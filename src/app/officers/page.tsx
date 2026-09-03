@@ -1,13 +1,87 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { 
-  Search, ChevronLeft, ChevronRight, User, FileText, Shield, 
-  Briefcase, MapPin, GraduationCap, Loader2, X, Mail, Phone, 
-  Calendar, Database, Plus, Users, Building2, TrendingUp
+import {
+  Search, ChevronLeft, ChevronRight, User, Shield, Briefcase,
+  MapPin, GraduationCap, X, Mail, Phone, Users, Building2,
+  Plus, Database, Loader2, ArrowRight, Contact
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import CreateOfficerPanel from '@/components/CreateOfficerPanel';
+
+/* --------------------------- Type Color Configuration --------------------------- */
+
+const TYPE_CONFIG: Record<string, {
+  label: string;
+  badge: string;
+  dot: string;
+  avatar: string;
+  panelGradient: string;
+  buttonGradient: string;
+  blurA: string;
+  blurB: string;
+  glow: string;
+}> = {
+  IAS: {
+    label: 'IAS',
+    badge: 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-600/20',
+    dot: 'bg-blue-400',
+    avatar: 'from-sky-400 to-blue-600',
+    panelGradient: 'from-blue-600 via-blue-700 to-indigo-900',
+    buttonGradient: 'from-sky-500 to-blue-600',
+    blurA: 'bg-sky-400/25',
+    blurB: 'bg-blue-500/20',
+    glow: 'shadow-blue-600/25',
+  },
+  IPS: {
+    label: 'IPS',
+    badge: 'bg-indigo-50 text-indigo-700 ring-1 ring-inset ring-indigo-600/20',
+    dot: 'bg-indigo-400',
+    avatar: 'from-indigo-400 to-violet-600',
+    panelGradient: 'from-indigo-600 via-violet-700 to-purple-900',
+    buttonGradient: 'from-indigo-500 to-violet-600',
+    blurA: 'bg-violet-400/25',
+    blurB: 'bg-indigo-400/20',
+    glow: 'shadow-indigo-600/25',
+  },
+  Other: {
+    label: 'Other',
+    badge: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/25',
+    dot: 'bg-amber-400',
+    avatar: 'from-amber-400 to-orange-600',
+    panelGradient: 'from-amber-500 via-orange-600 to-rose-800',
+    buttonGradient: 'from-amber-500 to-orange-600',
+    blurA: 'bg-amber-300/25',
+    blurB: 'bg-orange-400/20',
+    glow: 'shadow-amber-600/25',
+  },
+};
+
+/* Colorful stat cards */
+const STAT_CARDS = [
+  { key: 'all' as const,   label: 'Total',         caption: 'All records',          icon: Users,     iconGradient: 'from-violet-500 to-purple-600', ring: 'ring-violet-500/40', glow: 'shadow-violet-600/25' },
+  { key: 'IAS' as const,   label: 'IAS Officers',  caption: 'Administrative',       icon: Briefcase, iconGradient: 'from-sky-500 to-blue-600',      ring: 'ring-blue-500/40',   glow: 'shadow-blue-600/25' },
+  { key: 'IPS' as const,   label: 'IPS Officers',  caption: 'Police service',       icon: Shield,    iconGradient: 'from-indigo-500 to-violet-600', ring: 'ring-indigo-500/40', glow: 'shadow-indigo-600/25' },
+  { key: 'Other' as const, label: 'Other Contacts', caption: 'Additional contacts',  icon: Building2, iconGradient: 'from-amber-500 to-orange-600',  ring: 'ring-amber-500/40',  glow: 'shadow-amber-600/25' },
+];
+
+/* Page header per selected type */
+const HEADER_CONFIG = {
+  all:   { title: 'Officers Directory', subtitle: 'Browse and manage all officers and contacts', icon: Users,     gradient: 'from-violet-600 to-indigo-600', glow: 'shadow-violet-600/25' },
+  IAS:   { title: 'IAS Officers',       subtitle: 'Indian Administrative Service records',        icon: Briefcase, gradient: 'from-sky-500 to-blue-600',      glow: 'shadow-blue-600/25' },
+  IPS:   { title: 'IPS Officers',       subtitle: 'Indian Police Service records',                icon: Shield,    gradient: 'from-indigo-600 to-violet-600', glow: 'shadow-indigo-600/25' },
+  Other: { title: 'Other Contacts',     subtitle: 'Additional contacts directory',                icon: Contact,   gradient: 'from-amber-500 to-orange-600',  glow: 'shadow-amber-600/25' },
+} as const;
+
+const PER_PAGE_OPTIONS = [10, 25, 50];
+
+/* Generates page numbers with ellipsis, e.g. [1, '...', 4, 5, 6, '...', 12] */
+function getPaginationRange(current: number, total: number): (number | 'dots')[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  if (current <= 4) return [1, 2, 3, 4, 5, 'dots', total];
+  if (current >= total - 3) return [1, 'dots', total - 4, total - 3, total - 2, total - 1, total];
+  return [1, 'dots', current - 1, current, current + 1, 'dots', total];
+}
 
 export default function OfficersPage() {
   const [officers, setOfficers] = useState<any[]>([]);
@@ -16,76 +90,82 @@ export default function OfficersPage() {
   const [selectedType, setSelectedType] = useState<'all' | 'IAS' | 'IPS' | 'Other'>('all');
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [panelOfficerType, setPanelOfficerType] = useState<'IAS' | 'IPS' | 'Other'>('IAS');
-  
-  // Counts for each type
+
+  /* Counts for each type */
   const [iasCount, setIasCount] = useState(0);
   const [ipsCount, setIpsCount] = useState(0);
   const [otherCount, setOtherCount] = useState(0);
-  
-  // Pagination State
+
+  /* Pagination state */
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalItems, setTotalItems] = useState(0);
-  const perPage = 50;
+  const [perPage, setPerPage] = useState(50);
 
-  // Sidebar State
+  /* Off-canvas panel state */
   const [selectedOfficer, setSelectedOfficer] = useState<any>(null);
 
   useEffect(() => {
-    setCurrentPage(1);
-  }, [selectedType]);
-
-  useEffect(() => {
     loadData(currentPage);
-  }, [currentPage, selectedType]);
+  }, [currentPage, selectedType, perPage]);
+
+  /* Close panel with Escape key */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape' || isPanelOpen) return;
+      if (selectedOfficer) setSelectedOfficer(null);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedOfficer, isPanelOpen]);
+
+  /* ------------------------------ Data Loading ----------------------------- */
 
   async function loadData(page: number) {
     try {
       setLoading(true);
-      
-      let officersData = [];
-      
+
+      let officersData: any[] = [];
+
       if (selectedType === 'IAS') {
         const result = await pb.collection('ias_officers').getList(page, perPage, { sort: 'name' });
         officersData = result.items.map((o: any) => ({ ...o, type: 'IAS' }));
         setIasCount(result.totalItems);
         setTotalItems(result.totalItems);
-        setTotalPages(Math.ceil(result.totalItems / perPage));
+        setTotalPages(Math.max(1, Math.ceil(result.totalItems / perPage)));
       } else if (selectedType === 'IPS') {
         const result = await pb.collection('ips_officers').getList(page, perPage, { sort: 'name' });
         officersData = result.items.map((o: any) => ({ ...o, type: 'IPS' }));
         setIpsCount(result.totalItems);
         setTotalItems(result.totalItems);
-        setTotalPages(Math.ceil(result.totalItems / perPage));
+        setTotalPages(Math.max(1, Math.ceil(result.totalItems / perPage)));
       } else if (selectedType === 'Other') {
         const result = await pb.collection('other_contacts').getList(page, perPage, { sort: 'name' });
         officersData = result.items.map((o: any) => ({ ...o, type: 'Other' }));
         setOtherCount(result.totalItems);
         setTotalItems(result.totalItems);
-        setTotalPages(Math.ceil(result.totalItems / perPage));
+        setTotalPages(Math.max(1, Math.ceil(result.totalItems / perPage)));
       } else {
-        // Fetch all three
+        /* Fetch all three */
         const [iasResult, ipsResult, otherResult] = await Promise.all([
           pb.collection('ias_officers').getList(page, perPage, { sort: 'name' }),
           pb.collection('ips_officers').getList(page, perPage, { sort: 'name' }),
           pb.collection('other_contacts').getList(page, perPage, { sort: 'name' }),
         ]);
-        
-        const iasOfficers = iasResult.items.map((o: any) => ({ ...o, type: 'IAS' }));
-        const ipsOfficers = ipsResult.items.map((o: any) => ({ ...o, type: 'IPS' }));
-        const otherOfficers = otherResult.items.map((o: any) => ({ ...o, type: 'Other' }));
-        
-        officersData = [...iasOfficers, ...ipsOfficers, ...otherOfficers].sort((a, b) => 
-          (a.name || '').localeCompare(b.name || '')
-        );
-        
+
+        officersData = [
+          ...iasResult.items.map((o: any) => ({ ...o, type: 'IAS' })),
+          ...ipsResult.items.map((o: any) => ({ ...o, type: 'IPS' })),
+          ...otherResult.items.map((o: any) => ({ ...o, type: 'Other' })),
+        ].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
         setIasCount(iasResult.totalItems);
         setIpsCount(ipsResult.totalItems);
         setOtherCount(otherResult.totalItems);
-        
+
         const total = iasResult.totalItems + ipsResult.totalItems + otherResult.totalItems;
         setTotalItems(total);
-        setTotalPages(Math.ceil(Math.max(iasResult.totalItems, ipsResult.totalItems, otherResult.totalItems) / perPage));
+        setTotalPages(Math.max(1, Math.ceil(Math.max(iasResult.totalItems, ipsResult.totalItems, otherResult.totalItems) / perPage)));
       }
 
       setOfficers(officersData);
@@ -96,7 +176,9 @@ export default function OfficersPage() {
     }
   }
 
-  const filteredOfficers = officers.filter(officer => {
+  /* -------------------------------- Helpers -------------------------------- */
+
+  const filteredOfficers = officers.filter((officer) => {
     if (searchQuery === '') return true;
     const query = searchQuery.toLowerCase();
     return (
@@ -107,10 +189,7 @@ export default function OfficersPage() {
     );
   });
 
-  const handleNextPage = () => { if (currentPage < totalPages) setCurrentPage(currentPage + 1); };
-  const handlePrevPage = () => { if (currentPage > 1) setCurrentPage(currentPage - 1); };
-
-  const formatLabel = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  const formatLabel = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
 
   const formatValue = (value: any) => {
     if (value === null || value === undefined) return 'N/A';
@@ -119,11 +198,14 @@ export default function OfficersPage() {
       if (value.length === 0) return 'N/A';
       return value.join(', ');
     }
-    if (typeof value === 'object') {
-      return JSON.stringify(value, null, 2);
-    }
+    if (typeof value === 'object') return JSON.stringify(value, null, 2);
     return String(value);
   };
+
+  const getInitials = (name: string) =>
+    (name || '?').trim().split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+
+  const getConfig = (type: string) => TYPE_CONFIG[type] || TYPE_CONFIG.Other;
 
   const handleCardClick = (type: 'all' | 'IAS' | 'IPS' | 'Other') => {
     setSelectedType(type);
@@ -136,372 +218,519 @@ export default function OfficersPage() {
     setIsPanelOpen(true);
   };
 
-  return (
-    <div className="p-8 max-w-7xl mx-auto space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">
-            {selectedType === 'all' ? 'Officers Directory' : 
-             selectedType === 'IAS' ? 'IAS Officers' : 
-             selectedType === 'IPS' ? 'IPS Officers' : 'Other Contacts'}
-          </h1>
-          <p className="text-gray-500 mt-1">
-            Page {currentPage} of {totalPages} • Showing {filteredOfficers.length} of {totalItems} records
-          </p>
-        </div>
-        
-        <button 
-          onClick={() => handleCreateNew(selectedType === 'all' ? 'IAS' : selectedType === 'Other' ? 'Other' : selectedType)}
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors shadow-sm"
-        >
-          <Plus className="w-5 h-5" />
-          Create New Record
-        </button>
-      </div>
+  /* Pagination derived values */
+  const safePage = Math.min(currentPage, totalPages);
+  const paginationRange = getPaginationRange(safePage, totalPages);
+  const start = filteredOfficers.length > 0 ? (currentPage - 1) * perPage + 1 : 0;
+  const end = searchQuery
+    ? start + filteredOfficers.length - 1
+    : Math.min(currentPage * perPage, totalItems);
 
-      {/* Three Clickable Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {/* All Officers Card */}
-        <button
-          onClick={() => handleCardClick('all')}
-          className={`p-5 rounded-xl border-2 transition-all duration-200 text-left hover:shadow-md ${
-            selectedType === 'all' 
-              ? 'border-blue-600 bg-blue-50 shadow-md' 
-              : 'border-gray-200 bg-white hover:border-gray-300'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div className={`p-2.5 rounded-lg ${selectedType === 'all' ? 'bg-blue-600' : 'bg-gray-100'}`}>
-              <Users className={`w-5 h-5 ${selectedType === 'all' ? 'text-white' : 'text-gray-600'}`} />
+  const header = HEADER_CONFIG[selectedType];
+  const HeaderIcon = header.icon;
+  const positionSpan = selectedType === 'all' ? 'col-span-3' : 'col-span-4';
+
+  /* ------------------------------ Skeleton View ----------------------------- */
+
+  if (loading && officers.length === 0) {
+    return (
+      <div className="min-h-screen bg-slate-50/70 p-6 lg:p-10">
+        <div className="max-w-7xl mx-auto space-y-6 animate-pulse">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-gray-200 rounded-2xl" />
+              <div className="space-y-2">
+                <div className="h-7 w-44 bg-gray-200 rounded-lg" />
+                <div className="h-4 w-60 bg-gray-100 rounded" />
+              </div>
             </div>
-            <TrendingUp className={`w-4 h-4 ${selectedType === 'all' ? 'text-blue-600' : 'text-gray-400'}`} />
+            <div className="h-11 w-40 bg-gray-200 rounded-xl" />
           </div>
-          <h3 className={`text-lg font-bold ${selectedType === 'all' ? 'text-blue-900' : 'text-gray-900'}`}>
-            All Officers
-          </h3>
-          <p className={`text-sm mt-1 ${selectedType === 'all' ? 'text-blue-700' : 'text-gray-500'}`}>
-            {iasCount + ipsCount + otherCount} total records
-          </p>
-        </button>
-
-        {/* IAS Officers Card */}
-        <button
-          onClick={() => handleCardClick('IAS')}
-          className={`p-5 rounded-xl border-2 transition-all duration-200 text-left hover:shadow-md ${
-            selectedType === 'IAS' 
-              ? 'border-blue-600 bg-blue-50 shadow-md' 
-              : 'border-gray-200 bg-white hover:border-gray-300'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div className={`p-2.5 rounded-lg ${selectedType === 'IAS' ? 'bg-blue-600' : 'bg-blue-100'}`}>
-              <Briefcase className={`w-5 h-5 ${selectedType === 'IAS' ? 'text-white' : 'text-blue-600'}`} />
-            </div>
-            <span className={`text-xs font-bold px-2 py-1 rounded-full ${
-              selectedType === 'IAS' ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700'
-            }`}>
-              IAS
-            </span>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="h-[118px] bg-gray-100 rounded-2xl border border-gray-200" />
+            ))}
           </div>
-          <h3 className={`text-lg font-bold ${selectedType === 'IAS' ? 'text-blue-900' : 'text-gray-900'}`}>
-            IAS Officers
-          </h3>
-          <p className={`text-sm mt-1 ${selectedType === 'IAS' ? 'text-blue-700' : 'text-gray-500'}`}>
-            {iasCount} records
-          </p>
-        </button>
-
-        {/* IPS Officers Card */}
-        <button
-          onClick={() => handleCardClick('IPS')}
-          className={`p-5 rounded-xl border-2 transition-all duration-200 text-left hover:shadow-md ${
-            selectedType === 'IPS' 
-              ? 'border-indigo-600 bg-indigo-50 shadow-md' 
-              : 'border-gray-200 bg-white hover:border-gray-300'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div className={`p-2.5 rounded-lg ${selectedType === 'IPS' ? 'bg-indigo-600' : 'bg-indigo-100'}`}>
-              <Shield className={`w-5 h-5 ${selectedType === 'IPS' ? 'text-white' : 'text-indigo-600'}`} />
-            </div>
-            <span className={`text-xs font-bold px-2 py-1 rounded-full ${
-              selectedType === 'IPS' ? 'bg-indigo-600 text-white' : 'bg-indigo-100 text-indigo-700'
-            }`}>
-              IPS
-            </span>
-          </div>
-          <h3 className={`text-lg font-bold ${selectedType === 'IPS' ? 'text-indigo-900' : 'text-gray-900'}`}>
-            IPS Officers
-          </h3>
-          <p className={`text-sm mt-1 ${selectedType === 'IPS' ? 'text-indigo-700' : 'text-gray-500'}`}>
-            {ipsCount} records
-          </p>
-        </button>
-
-        {/* Other Contacts Card */}
-        <button
-          onClick={() => handleCardClick('Other')}
-          className={`p-5 rounded-xl border-2 transition-all duration-200 text-left hover:shadow-md ${
-            selectedType === 'Other' 
-              ? 'border-gray-600 bg-gray-50 shadow-md' 
-              : 'border-gray-200 bg-white hover:border-gray-300'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div className={`p-2.5 rounded-lg ${selectedType === 'Other' ? 'bg-gray-600' : 'bg-gray-100'}`}>
-              <Users className={`w-5 h-5 ${selectedType === 'Other' ? 'text-white' : 'text-gray-600'}`} />
-            </div>
-            <span className={`text-xs font-bold px-2 py-1 rounded-full ${
-              selectedType === 'Other' ? 'bg-gray-600 text-white' : 'bg-gray-100 text-gray-700'
-            }`}>
-              Other
-            </span>
-          </div>
-          <h3 className={`text-lg font-bold ${selectedType === 'Other' ? 'text-gray-900' : 'text-gray-900'}`}>
-            Other Contacts
-          </h3>
-          <p className={`text-sm mt-1 ${selectedType === 'Other' ? 'text-gray-700' : 'text-gray-500'}`}>
-            {otherCount} records
-          </p>
-        </button>
-      </div>
-
-      {/* Search Bar */}
-      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-          <input
-            type="text"
-            placeholder={`Search ${selectedType === 'all' ? 'all officers' : selectedType === 'Other' ? 'contacts' : `${selectedType} officers`} by name, ID, position, or cadre...`}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
-        </div>
-      </div>
-
-      {/* Table */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Officer ID</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Batch Year</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Cadre</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">State</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Current Position</th>
-                {selectedType === 'all' && (
-                  <th className="px-6 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Type</th>
-                )}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {loading ? (
-                <tr>
-                  <td colSpan={selectedType === 'all' ? 7 : 6} className="px-6 py-16 text-center">
-                    <div className="flex flex-col items-center gap-3">
-                      <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
-                      <p className="text-gray-500">Loading officers...</p>
-                    </div>
-                  </td>
-                </tr>
-              ) : filteredOfficers.length === 0 ? (
-                <tr>
-                  <td colSpan={selectedType === 'all' ? 7 : 6} className="px-6 py-16 text-center text-gray-500">
-                    <div className="flex flex-col items-center gap-3">
-                      <User className="w-8 h-8 text-gray-400" />
-                      <p className="text-lg font-medium">No officers found</p>
-                    </div>
-                  </td>
-                </tr>
-              ) : (
-                filteredOfficers.map((officer) => (
-                  <tr 
-                    key={officer.id} 
-                    onClick={() => setSelectedOfficer(officer)}
-                    className="hover:bg-blue-50/50 transition-colors cursor-pointer group"
-                  >
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-3">
-                        <div className={`w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-sm ${
-                          officer.type === 'IAS' ? 'bg-gradient-to-br from-blue-500 to-blue-600' : 
-                          officer.type === 'IPS' ? 'bg-gradient-to-br from-indigo-500 to-indigo-600' :
-                          'bg-gradient-to-br from-gray-500 to-gray-600'
-                        }`}>
-                          {(officer.name || '?').charAt(0).toUpperCase()}
-                        </div>
-                        <div>
-                          <p className="font-semibold text-gray-900 text-sm group-hover:text-blue-700 transition-colors">{officer.name || 'N/A'}</p>
-                          <p className="text-xs text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">View Profile →</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-600 font-mono">{officer.officer_id || '-'}</td>
-                    <td className="px-6 py-4 text-sm text-gray-600">{officer.batch_year || '-'}</td>
-                    <td className="px-6 py-4 text-sm text-gray-600">{officer.cadre || '-'}</td>
-                    <td className="px-6 py-4 text-sm text-gray-600">{officer.state || '-'}</td>
-                    <td className="px-6 py-4 text-sm text-gray-800 font-medium max-w-xs truncate" title={officer.current_position}>
-                      {officer.current_position || '-'}
-                    </td>
-                    {selectedType === 'all' && (
-                      <td className="px-6 py-4 text-center">
-                        <span className={`inline-flex px-2.5 py-1 text-xs font-bold rounded-full ${
-                          officer.type === 'IAS' ? 'bg-blue-100 text-blue-700 border border-blue-200' : 
-                          officer.type === 'IPS' ? 'bg-indigo-100 text-indigo-700 border border-indigo-200' :
-                          'bg-gray-100 text-gray-700 border border-gray-200'
-                        }`}>
-                          {officer.type === 'Other' ? 'Other' : officer.type}
-                        </span>
-                      </td>
-                    )}
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Pagination Controls */}
-        <div className="bg-gray-50 px-6 py-4 border-t border-gray-200 flex items-center justify-between">
-          <div className="text-sm text-gray-500">
-            Showing <span className="font-medium">{filteredOfficers.length > 0 ? ((currentPage - 1) * perPage) + 1 : 0}</span> to <span className="font-medium">{Math.min(currentPage * perPage, totalItems)}</span> of <span className="font-medium">{totalItems}</span> results
-          </div>
-          <div className="flex gap-2">
-            <button onClick={handlePrevPage} disabled={currentPage === 1 || loading} className="inline-flex items-center gap-1 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              <ChevronLeft className="w-4 h-4" /> Previous
-            </button>
-            <button onClick={handleNextPage} disabled={currentPage === totalPages || loading} className="inline-flex items-center gap-1 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              Next <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Officer Details Sidebar */}
-      {selectedOfficer && (
-        <div className="fixed inset-0 z-50 flex justify-end">
-          <div 
-            className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" 
-            onClick={() => setSelectedOfficer(null)}
-          />
-          
-          <div className="relative w-full max-w-md bg-white shadow-2xl h-full overflow-y-auto animate-in slide-in-from-right duration-300 flex flex-col">
-            <div className="sticky top-0 bg-white border-b border-gray-200 p-5 z-10">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-3">
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-white text-lg font-bold shadow-sm ${
-                    selectedOfficer.type === 'IAS' ? 'bg-gradient-to-br from-blue-500 to-blue-700' : 
-                    selectedOfficer.type === 'IPS' ? 'bg-gradient-to-br from-indigo-500 to-indigo-700' :
-                    'bg-gradient-to-br from-gray-500 to-gray-700'
-                  }`}>
-                    {(selectedOfficer.name || '?').charAt(0).toUpperCase()}
-                  </div>
-                  <div>
-                    <h2 className="text-lg font-bold text-gray-900 leading-tight">{selectedOfficer.name || 'Unknown'}</h2>
-                    <span className={`inline-flex px-2 py-0.5 text-[10px] font-bold rounded-full mt-1 ${
-                      selectedOfficer.type === 'IAS' ? 'bg-blue-100 text-blue-700' : 
-                      selectedOfficer.type === 'IPS' ? 'bg-indigo-100 text-indigo-700' :
-                      'bg-gray-100 text-gray-700'
-                    }`}>
-                      {selectedOfficer.type === 'Other' ? 'Contact' : `${selectedOfficer.type} Officer`}
-                    </span>
-                  </div>
+          <div className="h-[70px] bg-gray-100 rounded-2xl" />
+          <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
+            {[...Array(7)].map((_, i) => (
+              <div key={i} className="flex items-center gap-4 p-5">
+                <div className="w-9 h-9 bg-gray-200 rounded-full" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 w-1/3 bg-gray-100 rounded" />
+                  <div className="h-3 w-1/4 bg-gray-50 rounded" />
                 </div>
-                <button 
-                  onClick={() => setSelectedOfficer(null)}
-                  className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+                <div className="h-4 w-24 bg-gray-50 rounded" />
+                <div className="h-6 w-16 bg-gray-100 rounded-full" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------------------- Main View ------------------------------- */
+
+  return (
+    <div className="min-h-screen bg-slate-50/70 p-6 lg:p-10">
+      <div className="max-w-7xl mx-auto space-y-6">
+
+        {/* ------------------------------ Page Header ----------------------------- */}
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className={`w-12 h-12 rounded-2xl bg-gradient-to-br ${header.gradient} flex items-center justify-center shadow-lg ${header.glow}`}>
+              <HeaderIcon className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-slate-900">{header.title}</h1>
+              <p className="text-sm text-gray-500 mt-0.5">{header.subtitle}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => handleCreateNew(selectedType === 'all' ? 'IAS' : selectedType === 'Other' ? 'Other' : selectedType)}
+            className={`inline-flex items-center justify-center gap-2 px-5 py-3 bg-gradient-to-r ${header.gradient} text-white font-semibold rounded-xl shadow-lg ${header.glow} hover:shadow-xl transition-all hover:-translate-y-px`}
+          >
+            <Plus className="w-5 h-5" />
+            Create New Record
+          </button>
+        </div>
+
+        {/* ------------------------------ Type Stats ------------------------------ */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {STAT_CARDS.map((stat) => {
+            const Icon = stat.icon;
+            const active = selectedType === stat.key;
+            const count =
+              stat.key === 'all' ? iasCount + ipsCount + otherCount :
+              stat.key === 'IAS' ? iasCount :
+              stat.key === 'IPS' ? ipsCount : otherCount;
+
+            return (
+              <button
+                key={stat.key}
+                onClick={() => handleCardClick(stat.key)}
+                className={`group text-left bg-white rounded-2xl border p-4 lg:p-5 transition-all hover:shadow-md hover:-translate-y-0.5 ${
+                  active ? `ring-2 ${stat.ring} border-transparent shadow-md` : 'border-gray-200 shadow-sm hover:border-gray-300'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${stat.iconGradient} flex items-center justify-center shadow-md ${stat.glow} transition-transform group-hover:scale-110`}>
+                    <Icon className="w-5 h-5 text-white" />
+                  </div>
+                  <span className="text-2xl font-bold text-slate-900 tabular-nums">{count}</span>
+                </div>
+                <p className="mt-3 text-sm font-semibold text-gray-800">{stat.label}</p>
+                <p className="text-xs text-gray-400 mt-0.5">{stat.caption}</p>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* ------------------------------- Search Bar ----------------------------- */}
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 lg:p-5">
+          <div className="relative lg:max-w-md">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder={`Search ${selectedType === 'all' ? 'all officers' : selectedType === 'Other' ? 'contacts' : `${selectedType} officers`} by name, ID, position, or cadre...`}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-10 pr-10 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* --------------------------------- Table -------------------------------- */}
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+
+          {/* Table header */}
+          <div className="px-6 py-4 flex items-center justify-between border-b border-gray-100">
+            <div className="flex items-center gap-2.5">
+              <h3 className="text-sm font-bold text-gray-800">{header.title}</h3>
+              <span className="px-2 py-0.5 bg-gray-100 rounded-full text-[11px] font-bold text-gray-500 tabular-nums">
+                {totalItems}
+              </span>
+              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />}
+            </div>
+            {(searchQuery || selectedType !== 'all') && (
+              <button
+                onClick={() => handleCardClick('all')}
+                className="text-xs font-semibold text-blue-600 hover:text-blue-700 transition-colors"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
+
+          {/* Column headers */}
+          <div className="hidden md:grid grid-cols-12 gap-4 px-6 py-3.5 bg-slate-50/80 border-b border-gray-200 text-[11px] font-bold text-gray-500 uppercase tracking-wider">
+            <div className="col-span-3">Name</div>
+            <div className="col-span-2">Officer ID</div>
+            <div className="col-span-1 text-center">Batch</div>
+            <div className="col-span-1">Cadre</div>
+            <div className="col-span-1">State</div>
+            <div className={positionSpan}>Current Position</div>
+            {selectedType === 'all' && <div className="col-span-1 text-center">Type</div>}
+          </div>
+
+          <div className={`divide-y divide-gray-100 transition-opacity ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
+            {filteredOfficers.length === 0 && !loading ? (
+              /* Empty state */
+              <div className="py-20 flex flex-col items-center justify-center text-center">
+                <div className={`w-16 h-16 rounded-2xl bg-gradient-to-br ${header.gradient} flex items-center justify-center shadow-lg ${header.glow}`}>
+                  <User className="w-8 h-8 text-white" />
+                </div>
+                <h3 className="mt-4 text-base font-semibold text-gray-800">No officers found</h3>
+                <p className="mt-1 text-sm text-gray-500">Try adjusting your search, or create a new record.</p>
+                <button
+                  onClick={() => handleCreateNew(selectedType === 'all' ? 'IAS' : selectedType === 'Other' ? 'Other' : selectedType)}
+                  className="mt-5 inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
                 >
-                  <X className="w-5 h-5 text-gray-500" />
+                  <Plus className="w-4 h-4" /> Create New Record
                 </button>
               </div>
-              
-              {selectedOfficer.officer_id && (
-                <div className="text-xs text-gray-500 font-mono bg-gray-50 px-2 py-1 rounded inline-block">
-                  ID: {selectedOfficer.officer_id}
-                </div>
-              )}
-            </div>
+            ) : (
+              filteredOfficers.map((officer) => {
+                const config = getConfig(officer.type);
 
-            <div className="p-5 space-y-5 flex-1">
-              <div className="grid grid-cols-2 gap-3">
-                {[
-                  { label: 'Position', value: selectedOfficer.current_position, icon: Briefcase },
-                  { label: 'Cadre', value: selectedOfficer.cadre, icon: Shield },
-                  { label: 'State', value: selectedOfficer.state, icon: MapPin },
-                  { label: 'Batch', value: selectedOfficer.batch_year, icon: GraduationCap },
-                ].map((item, idx) => (
-                  <div key={idx} className="p-3 rounded-lg border border-gray-200 bg-gray-50/50">
-                    <div className="flex items-center gap-1.5 text-gray-500 mb-1">
-                      <item.icon className="w-3.5 h-3.5" />
-                      <span className="text-[10px] font-semibold uppercase">{item.label}</span>
-                    </div>
-                    <p className="text-xs font-semibold text-gray-900 line-clamp-2">{item.value || 'N/A'}</p>
-                  </div>
-                ))}
-              </div>
-
-              <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <Database className="w-4 h-4 text-blue-600" />
-                  <h3 className="text-xs font-bold text-gray-900 uppercase tracking-wider">All Fields</h3>
-                </div>
-                
-                <div className="bg-gray-50 rounded-lg border border-gray-200 divide-y divide-gray-100">
-                  {Object.entries(selectedOfficer).map(([key, value]) => {
-                    const skipFields = ['collectionId', 'collectionName', 'expand', 'type'];
-                    if (skipFields.includes(key)) return null;
-                    
-                    const formattedValue = formatValue(value);
-                    if (formattedValue === 'N/A' && key !== 'id') return null;
-
-                    return (
-                      <div key={key} className="p-3 flex gap-3 hover:bg-white transition-colors">
-                        <div className="w-1/3 flex-shrink-0">
-                          <p className="text-[10px] font-bold text-gray-500 uppercase leading-tight">
-                            {formatLabel(key)}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className={`text-xs text-gray-900 break-words ${
-                            typeof value === 'object' || Array.isArray(value) 
-                              ? 'font-mono bg-gray-100 p-1.5 rounded text-[10px]' 
-                              : ''
-                          }`}>
-                            {formattedValue}
-                          </p>
+                return (
+                  <div key={officer.id} onClick={() => setSelectedOfficer(officer)}>
+                    {/* Desktop row */}
+                    <div className="hidden md:grid grid-cols-12 gap-4 px-6 py-4 items-center cursor-pointer transition-colors group hover:bg-blue-50/40">
+                      <div className="col-span-3 min-w-0">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-sm flex-shrink-0 bg-gradient-to-br ${config.avatar} transition-transform group-hover:scale-110`}>
+                            {getInitials(officer.name)}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-semibold text-gray-900 text-sm truncate group-hover:text-blue-700 transition-colors">
+                              {officer.name || 'N/A'}
+                            </p>
+                            <p className="text-[11px] text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                              View Profile <ArrowRight className="w-3 h-3" />
+                            </p>
+                          </div>
                         </div>
                       </div>
-                    );
-                  })}
+
+                      <div className="col-span-2 text-xs text-gray-600 font-mono truncate">
+                        {officer.officer_id || '—'}
+                      </div>
+
+                      <div className="col-span-1 text-center text-sm text-gray-600 tabular-nums">
+                        {officer.batch_year || '—'}
+                      </div>
+
+                      <div className="col-span-1 text-sm text-gray-600 truncate" title={officer.cadre}>
+                        {officer.cadre || '—'}
+                      </div>
+
+                      <div className="col-span-1 text-sm text-gray-600 truncate" title={officer.state}>
+                        {officer.state || '—'}
+                      </div>
+
+                      <div className={`${positionSpan} min-w-0`}>
+                        <p className="text-sm font-medium text-gray-800 truncate" title={officer.current_position}>
+                          {officer.current_position || '—'}
+                        </p>
+                      </div>
+
+                      {selectedType === 'all' && (
+                        <div className="col-span-1 flex justify-center">
+                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${config.badge}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${config.dot}`} />
+                            {config.label}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Mobile card */}
+                    <div className="md:hidden p-4 cursor-pointer hover:bg-blue-50/40 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0 shadow-sm bg-gradient-to-br ${config.avatar}`}>
+                          {getInitials(officer.name)}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="font-semibold text-gray-900 text-sm leading-snug line-clamp-2">
+                              {officer.name || 'N/A'}
+                            </p>
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold flex-shrink-0 ${config.badge}`}>
+                              <span className={`w-1 h-1 rounded-full ${config.dot}`} />
+                              {config.label}
+                            </span>
+                          </div>
+                          {officer.current_position && (
+                            <p className="text-xs text-gray-500 mt-1 line-clamp-2">{officer.current_position}</p>
+                          )}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[11px] text-gray-500">
+                            {officer.officer_id && <span className="font-mono">{officer.officer_id}</span>}
+                            {officer.batch_year && <span>{officer.batch_year}</span>}
+                            {officer.cadre && <span>{officer.cadre}</span>}
+                            {officer.state && <span>{officer.state}</span>}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* ------------------------------- Pagination ---------------------------- */}
+          {totalItems > 0 && (
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-6 py-4 border-t border-gray-100 bg-slate-50/50">
+              <div className="flex items-center gap-3 text-xs text-gray-500">
+                <p>
+                  Showing <span className="font-bold text-gray-700">{start}–{end}</span> of{' '}
+                  <span className="font-bold text-gray-700">{totalItems}</span> records
+                </p>
+                <div className="flex items-center gap-2">
+                  <span className="hidden sm:inline text-gray-300">|</span>
+                  <label className="hidden sm:inline text-gray-400">Per page</label>
+                  <select
+                    value={perPage}
+                    onChange={(e) => { setPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                    className="px-2 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/60 cursor-pointer"
+                  >
+                    {PER_PAGE_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
-            </div>
 
-            <div className="sticky bottom-0 bg-white border-t border-gray-200 p-4">
-              <button 
-                onClick={() => setSelectedOfficer(null)}
-                className="w-full px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg transition-colors text-sm"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage === 1 || loading}
+                  className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white transition-colors"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  <span className="hidden sm:inline">Prev</span>
+                </button>
+
+                {paginationRange.map((item, i) =>
+                  item === 'dots' ? (
+                    <span key={`dots-${i}`} className="px-2 py-2 text-xs text-gray-400 select-none">…</span>
+                  ) : (
+                    <button
+                      key={item}
+                      onClick={() => setCurrentPage(item)}
+                      disabled={loading}
+                      className={`w-8 h-8 text-xs font-bold rounded-lg tabular-nums transition-all disabled:opacity-40 ${
+                        item === safePage
+                          ? 'bg-slate-900 text-white shadow-md'
+                          : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-100'
+                      }`}
+                    >
+                      {item}
+                    </button>
+                  )
+                )}
+
+                <button
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages || loading}
+                  className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white transition-colors"
+                >
+                  <span className="hidden sm:inline">Next</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
-      )}
 
-      {/* Create Officer Panel */}
-      <CreateOfficerPanel 
-        isOpen={isPanelOpen}
-        onClose={() => setIsPanelOpen(false)}
-        onSuccess={() => {
-          loadData(currentPage);
-          setIsPanelOpen(false);
-        }}
-        officerType={panelOfficerType}
-      />
+        {/* ----------------------- Off-Canvas Officer Profile --------------------- */}
+        {selectedOfficer && (() => {
+          const config = getConfig(selectedOfficer.type);
+          const phone = selectedOfficer.phone || selectedOfficer.mobile || selectedOfficer.contact_number;
+
+          /* Quick info tiles with colorful icons */
+          const tiles = [
+            { label: 'Position', value: selectedOfficer.current_position, icon: Briefcase, iconColor: 'text-sky-500' },
+            { label: 'Cadre', value: selectedOfficer.cadre, icon: Shield, iconColor: 'text-indigo-500' },
+            { label: 'State', value: selectedOfficer.state, icon: MapPin, iconColor: 'text-rose-500' },
+            { label: 'Batch Year', value: selectedOfficer.batch_year, icon: GraduationCap, iconColor: 'text-emerald-500' },
+          ];
+
+          return (
+            <>
+              {/* Overlay */}
+              <div
+                className="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-[2px] animate-in fade-in duration-300"
+                onClick={() => setSelectedOfficer(null)}
+              />
+
+              {/* Panel */}
+              <div className="fixed inset-y-0 right-0 w-full max-w-md bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
+
+                {/* Colorful gradient header — matches officer type */}
+                <div className={`relative bg-gradient-to-br ${config.panelGradient} px-6 pt-6 pb-5 overflow-hidden flex-shrink-0`}>
+                  <div className={`absolute -top-20 -right-20 w-56 h-56 ${config.blurA} rounded-full blur-3xl`} />
+                  <div className={`absolute -bottom-24 -left-16 w-48 h-48 ${config.blurB} rounded-full blur-3xl`} />
+
+                  <div className="relative">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-4">
+                        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white text-lg font-bold shadow-xl bg-gradient-to-br ${config.avatar} ring-2 ring-white/25`}>
+                          {getInitials(selectedOfficer.name)}
+                        </div>
+                        <div className="min-w-0">
+                          <h2 className="text-xl font-bold text-white leading-tight line-clamp-2">
+                            {selectedOfficer.name || 'Unknown'}
+                          </h2>
+                          <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white/15 text-white ring-1 ring-inset ring-white/25">
+                              <span className={`w-1.5 h-1.5 rounded-full ${config.dot}`} />
+                              {selectedOfficer.type === 'Other' ? 'Contact' : `${selectedOfficer.type} Officer`}
+                            </span>
+                            {selectedOfficer.officer_id && (
+                              <span className="px-2 py-1 rounded-full text-[11px] font-semibold bg-white/10 text-slate-200 ring-1 ring-inset ring-white/15 font-mono">
+                                {selectedOfficer.officer_id}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setSelectedOfficer(null)}
+                        className="p-2 -mr-2 -mt-1 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    {selectedOfficer.current_position && (
+                      <p className="mt-3 text-sm text-white/80 flex items-center gap-1.5">
+                        <Briefcase className="w-4 h-4 text-white/60 flex-shrink-0" />
+                        <span className="truncate">{selectedOfficer.current_position}</span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Scrollable body */}
+                <div className="flex-1 overflow-y-auto min-h-0 p-5 space-y-4 bg-slate-50/70">
+
+                  {/* Quick info tiles — colorful icons */}
+                  <div className="grid grid-cols-2 gap-3">
+                    {tiles.map((tile, idx) => (
+                      <div key={idx} className="bg-white rounded-xl border border-gray-200 p-4">
+                        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
+                          <tile.icon className={`w-3.5 h-3.5 ${tile.iconColor}`} /> {tile.label}
+                        </p>
+                        <p className="mt-1.5 text-sm font-semibold text-gray-900 line-clamp-2">{tile.value || '—'}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Contact info */}
+                  {(phone || selectedOfficer.email) && (
+                    <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+                      {phone && (
+                        <a href={`tel:${phone}`} className="flex items-center gap-3 group">
+                          <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center flex-shrink-0">
+                            <Phone className="w-4 h-4 text-emerald-600" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Phone</p>
+                            <p className="text-sm font-semibold text-gray-800 group-hover:text-emerald-600 transition-colors truncate">
+                              {phone}
+                            </p>
+                          </div>
+                        </a>
+                      )}
+                      {selectedOfficer.email && (
+                        <a href={`mailto:${selectedOfficer.email}`} className="flex items-center gap-3 group">
+                          <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+                            <Mail className="w-4 h-4 text-blue-600" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Email</p>
+                            <p className="text-sm font-semibold text-gray-800 group-hover:text-blue-600 transition-colors truncate">
+                              {selectedOfficer.email}
+                            </p>
+                          </div>
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  {/* All fields */}
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="flex items-center gap-2 px-4 py-3 bg-slate-50/80 border-b border-gray-100">
+                      <Database className="w-4 h-4 text-violet-500" />
+                      <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">All Fields</h4>
+                    </div>
+                    <div className="divide-y divide-gray-100">
+                      {Object.entries(selectedOfficer).map(([key, value]) => {
+                        const skipFields = ['id', 'collectionId', 'collectionName', 'expand', 'type'];
+                        if (skipFields.includes(key)) return null;
+
+                        const formattedValue = formatValue(value);
+                        if (formattedValue === 'N/A') return null;
+
+                        return (
+                          <div key={key} className="px-4 py-2.5 flex gap-3 hover:bg-slate-50/70 transition-colors">
+                            <div className="w-2/5 flex-shrink-0">
+                              <p className="text-[10px] font-bold text-gray-400 uppercase leading-tight tracking-wider">
+                                {formatLabel(key)}
+                              </p>
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-xs text-gray-800 break-words ${
+                                typeof value === 'object' || Array.isArray(value)
+                                  ? 'font-mono bg-gray-100 p-1.5 rounded text-[10px]'
+                                  : ''
+                              }`}>
+                                {formattedValue}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sticky action footer — type-tinted gradient */}
+                <div className="flex items-center gap-3 p-5 border-t border-gray-200 bg-white/95 backdrop-blur flex-shrink-0">
+                  <button
+                    onClick={() => setSelectedOfficer(null)}
+                    className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r ${config.buttonGradient} text-white font-semibold rounded-xl transition-all hover:shadow-lg ${config.glow}`}
+                  >
+                    <X className="w-4 h-4" /> Close Profile
+                  </button>
+                </div>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* ---------------------------- Create Officer Panel ---------------------- */}
+        <CreateOfficerPanel
+          isOpen={isPanelOpen}
+          onClose={() => setIsPanelOpen(false)}
+          onSuccess={() => {
+            loadData(currentPage);
+            setIsPanelOpen(false);
+          }}
+          officerType={panelOfficerType}
+        />
+      </div>
     </div>
   );
 }
