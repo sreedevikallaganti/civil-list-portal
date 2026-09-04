@@ -728,7 +728,6 @@ export default function OfficersPage() {
             loadData(currentPage);
             setIsPanelOpen(false);
           }}
-          officerType={panelOfficerType}
         />
       </div>
     </div>

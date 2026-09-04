@@ -41,3 +41,10 @@
     @apply px-6 py-4;
   }
 }
+
+html, body {
+  overflow-x: hidden;
+}
+html {
+  scrollbar-gutter: stable;
+}
