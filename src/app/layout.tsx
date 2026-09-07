@@ -1,7 +1,10 @@
+// src/app/layout.tsx
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
-import SideBar from '@/components/SideBar';
 import './globals.css';
+import { Toaster } from '@/components/Toaster';
+import { AuthProvider } from '@/contexts/AuthContext'; // ✅ new
+import AppShell from '@/components/AppShell';           // ✅ new (sidebar moved here)
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -18,15 +21,12 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <div className="flex min-h-screen bg-gray-50">
-          {/* Sidebar */}
-          <SideBar />
-          
-          {/* Main Content */}
-          <main className="flex-1">
-            {children}
-          </main>
-        </div>
+        <AuthProvider>
+          {/* AppShell renders /login standalone and your original sidebar
+              layout for authenticated routes, with central auth redirects. */}
+          <AppShell>{children}</AppShell>
+          <Toaster />
+        </AuthProvider>
       </body>
     </html>
   );

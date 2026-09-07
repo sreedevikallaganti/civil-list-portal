@@ -13,9 +13,12 @@ import {
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import CreateMeetingPanel from '@/components/CreateMeetingPanel';
+import ProtectedRoute from '@/components/auth/ProtectedRoute';
+// ── ✅ AUTH: needed for automatic sign-out when the session expires ──
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/contexts/AuthContext';
 
 type ViewMode = 'year' | 'month' | 'day' | 'agenda';
-// 'create' and 'edit' removed — the shared CreateMeetingPanel handles both now
 type OffCanvasMode = 'view' | 'day' | null;
 
 const MEETING_TYPE_ICONS: Record<string, React.ReactNode> = {
@@ -27,7 +30,6 @@ const MEETING_TYPE_ICONS: Record<string, React.ReactNode> = {
   'workshop': <Presentation className="w-3.5 h-3.5" />,
   'planning': <ClipboardList className="w-3.5 h-3.5" />,
   'general': <FolderKanban className="w-3.5 h-3.5" />,
-  // added for meetings created by the shared panel
   'internal': <Briefcase className="w-3.5 h-3.5" />,
   'external': <Users className="w-3.5 h-3.5" />,
 };
@@ -41,7 +43,6 @@ const MEETING_TYPE_COLORS: Record<string, { bg: string; border: string; text: st
   'workshop': { bg: 'bg-amber-500', border: 'border-amber-500', text: 'text-amber-700', light: 'bg-amber-50' },
   'planning': { bg: 'bg-pink-500', border: 'border-pink-500', text: 'text-pink-700', light: 'bg-pink-50' },
   'general': { bg: 'bg-slate-500', border: 'border-slate-500', text: 'text-slate-700', light: 'bg-slate-50' },
-  // added for meetings created by the shared panel
   'internal': { bg: 'bg-indigo-500', border: 'border-indigo-500', text: 'text-indigo-700', light: 'bg-indigo-50' },
   'external': { bg: 'bg-cyan-500', border: 'border-cyan-500', text: 'text-cyan-700', light: 'bg-cyan-50' },
 };
@@ -53,7 +54,6 @@ const STATUS_COLORS: Record<string, string> = {
   'Rescheduled': 'bg-amber-100 text-amber-700 border-amber-200',
 };
 
-// ✅ Was missing in your file — renderUpcoming references this
 const STATUS_DOTS: Record<string, string> = {
   'Scheduled': 'bg-blue-500',
   'Completed': 'bg-emerald-500',
@@ -62,6 +62,10 @@ const STATUS_DOTS: Record<string, string> = {
 };
 
 export default function CalendarPage() {
+  // ── ✅ AUTH: router + logout for automatic sign-out on 401 ──
+  const router = useRouter();
+  const { logout } = useAuth();
+
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>('month');
   const [meetings, setMeetings] = useState<any[]>([]);
@@ -71,17 +75,21 @@ export default function CalendarPage() {
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [offCanvasMode, setOffCanvasMode] = useState<OffCanvasMode>(null);
 
-  // ── Shared CreateMeetingPanel state (replaces the old create/edit form) ──
+  // ── Shared CreateMeetingPanel state ──
   const [panelOpen, setPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<any>(null);
   const [panelDate, setPanelDate] = useState<string>('');
 
-    // ── Agenda view: status filter, per-section pagination, collapsible sections ──
+  // ── Agenda view: status filter, per-section pagination, collapsible sections ──
   const [agendaFilter, setAgendaFilter] = useState<string>('all');
   const [sectionPages, setSectionPages] = useState<Record<string, number>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
+  // ── Upcoming Meetings — list view expansion ──
+  const [showAllUpcoming, setShowAllUpcoming] = useState(false);
+
   const AGENDA_PAGE_SIZE = 5;
+  const UPCOMING_PAGE_SIZE = 6;
 
   const AGENDA_FILTERS = [
     { value: 'all', label: 'All' },
@@ -93,7 +101,7 @@ export default function CalendarPage() {
 
   const applyAgendaFilter = (value: string) => {
     setAgendaFilter(value);
-    setSectionPages({}); // reset all pagination when the filter changes
+    setSectionPages({});
   };
 
   const setSectionPage = (id: string, p: number) =>
@@ -105,6 +113,9 @@ export default function CalendarPage() {
   // Reset agenda pagination whenever the underlying data refreshes
   useEffect(() => { setSectionPages({}); }, [meetings, currentDate]);
 
+  // Collapse the upcoming list back to its first page on refresh
+  useEffect(() => { setShowAllUpcoming(false); }, [meetings]);
+
   useEffect(() => { loadData(); }, []);
 
   async function loadData() {
@@ -115,13 +126,21 @@ export default function CalendarPage() {
       setMeetings(data);
     } catch (err: any) {
       console.error('Error:', err);
+
+      // ── ✅ AUTH: session expired / revoked → secure sign-out + redirect ──
+      if (err?.status === 401) {
+        logout();
+        router.replace('/login');
+        return;
+      }
+
       setError(err.message || 'Failed to load meetings');
     } finally {
       setLoading(false);
     }
   }
 
-  /* ── Field normalizers (read both old-style and panel-style records) ── */
+  /* ── Field normalizers ── */
 
   const getMeetingTitle = (m: any) => m.title || m.topic || m.agenda || 'Meeting';
 
@@ -146,8 +165,6 @@ export default function CalendarPage() {
 
   const getMeetingTime = (m: any) => m.time || m.meeting_time || '09:00';
 
-  // Panel stores meeting_date as "YYYY-MM-DD HH:MM:SS.000Z" — parse the date
-  // token directly (no Date parsing) so timezones can't shift the day.
   const getMeetingDateStr = (m: any): string => {
     const raw = m.date || m.meeting_date || m.created || '';
     if (!raw) return '';
@@ -188,31 +205,35 @@ export default function CalendarPage() {
 
   const getMeetingIcon = (type: string) => MEETING_TYPE_ICONS[type?.toLowerCase()] || MEETING_TYPE_ICONS['general'];
 
-  /* ── Upcoming Meetings — grouped into day sections (timeline) ── */
+  /* ── Upcoming Meetings — flat chronological list (next 7 days) ── */
 
   const renderUpcoming = () => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // One section per day for the next 7 days (empty days skipped)
-    const sections: { dateStr: string; dateObj: Date; label: string; isToday: boolean; meetings: any[] }[] = [];
-    for (let i = 0; i < 7; i++) {
-      const day = new Date(today);
-      day.setDate(day.getDate() + i);
-      const dateStr = formatDateForInput(day);
-      const dayMeetings = meetings
-        .filter(m => getMeetingDateStr(m) === dateStr)
-        .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
-      if (dayMeetings.length === 0) continue;
+    // Gather every meeting in the next 7 days, in chronological order
+    const items: {
+      m: any; date: Date; offset: number;
+      dayTag: string; isToday: boolean;
+    }[] = [];
 
-      sections.push({
-        dateStr,
-        dateObj: day,
-        label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : day.toLocaleDateString('en-US', { weekday: 'long' }),
-        isToday: i === 0,
-        meetings: dayMeetings,
-      });
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() + i);
+      const dateStr = formatDateForInput(d);
+      meetings
+        .filter(m => getMeetingDateStr(m) === dateStr)
+        .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)))
+        .forEach(m => items.push({
+          m,
+          date: d,
+          offset: i,
+          dayTag: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString('en-US', { weekday: 'short' }),
+          isToday: i === 0,
+        }));
     }
+
+    const visible = showAllUpcoming ? items : items.slice(0, UPCOMING_PAGE_SIZE);
 
     return (
       <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -223,91 +244,93 @@ export default function CalendarPage() {
           <button type="button" onClick={() => setViewMode('agenda')} className="text-xs font-semibold text-blue-600 hover:text-blue-700">View all</button>
         </div>
 
-        {sections.length === 0 ? (
+        {items.length === 0 ? (
           <div className="p-10 text-center">
             <CalendarCheck className="w-8 h-8 mx-auto text-slate-300 mb-2" />
             <p className="text-xs text-slate-500">No meetings in the next 7 days.</p>
+            <button type="button" onClick={openCreate} className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 transition-colors">
+              <Plus className="w-3.5 h-3.5" /> Schedule one
+            </button>
           </div>
         ) : (
-          <div className="relative">
-            {/* Timeline rail */}
-            <div className="absolute left-[40px] top-3 bottom-3 w-px bg-slate-200" aria-hidden="true" />
-
-            {sections.map((s, si) => (
-              <div key={s.dateStr} className={`relative px-5 py-4 ${si > 0 ? 'border-t border-slate-100' : ''}`}>
-                {/* Day header */}
-                <div className="flex items-center gap-3 mb-3">
-                  <div className={`relative z-10 w-10 h-10 rounded-xl flex flex-col items-center justify-center shrink-0 ${
-                    s.isToday
-                      ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white shadow-md shadow-blue-500/30'
-                      : 'bg-white ring-1 ring-slate-200 text-slate-600'
-                  }`}>
-                    <span className={`text-[8px] font-bold uppercase tracking-wide leading-none ${s.isToday ? 'text-blue-100' : 'text-slate-400'}`}>
-                      {s.dateObj.toLocaleDateString('en-US', { month: 'short' })}
-                    </span>
-                    <span className="text-[15px] font-extrabold leading-tight">{s.dateObj.getDate()}</span>
-                  </div>
-
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-bold text-slate-900">{s.label}</p>
-                      <span className="text-[11px] font-medium text-slate-400">
-                        {s.dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
+          <>
+            <div className="divide-y divide-slate-100">
+              {visible.map((item, i) => {
+                const m = item.m;
+                const color = getMeetingVisualColor(m);
+                const statusDot = STATUS_DOTS[m.status] || STATUS_DOTS['Scheduled'];
+                return (
+                  <button
+                    key={m.id || i}
+                    type="button"
+                    onClick={() => openMeeting(m)}
+                    className="w-full flex items-center gap-3 sm:gap-4 px-4 sm:px-5 py-3 text-left hover:bg-blue-50/40 transition-colors group"
+                  >
+                    {/* Date block */}
+                    <div className={`w-12 shrink-0 rounded-xl flex flex-col items-center justify-center py-1 ${
+                      item.isToday ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/25' : 'bg-slate-50 text-slate-500'
+                    }`}>
+                      <span className={`text-[8px] font-bold uppercase tracking-wider leading-none ${item.isToday ? 'text-blue-100' : 'text-slate-400'}`}>
+                        {item.date.toLocaleDateString('en-US', { month: 'short' })}
                       </span>
+                      <span className="text-[15px] font-extrabold leading-tight mt-0.5">{item.date.getDate()}</span>
                     </div>
-                  </div>
 
-                  <span className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold ${
-                    s.isToday ? 'bg-blue-50 text-blue-700' : 'bg-slate-100 text-slate-500'
-                  }`}>
-                    {s.meetings.length} meeting{s.meetings.length !== 1 ? 's' : ''}
-                  </span>
-                </div>
+                    {/* Time + day tag */}
+                    <div className="w-[72px] shrink-0">
+                      <p className="text-[11px] font-bold text-slate-900 tabular-nums leading-none">{formatTime12(getMeetingTime(m))}</p>
+                      <p className={`text-[9px] font-bold mt-1 uppercase tracking-wide ${item.isToday ? 'text-blue-600' : 'text-slate-400'}`}>
+                        {item.dayTag}
+                      </p>
+                    </div>
 
-                {/* Meeting cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pl-[52px]">
-                  {s.meetings.map((m, mi) => {
-                    const color = getMeetingVisualColor(m);
-                    const statusDot = STATUS_DOTS[m.status] || STATUS_DOTS['Scheduled'];
-                    return (
-                      <button
-                        type="button"
-                        key={m.id || mi}
-                        onClick={() => openMeeting(m)}
-                        className="group text-left p-3.5 rounded-xl border border-slate-200 bg-white hover:border-blue-300 hover:shadow-sm hover:-translate-y-0.5 transition-all flex gap-3"
-                      >
-                        <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${color.light} ${color.text}`}>
-                          {getMeetingIcon(getMeetingType(m))}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-semibold text-slate-900 truncate group-hover:text-blue-600 transition-colors">
-                            {getMeetingTitle(m)}
-                          </p>
-                          <div className="flex items-center gap-1.5 mt-1 text-[10px] text-slate-500">
-                            <Clock className="w-3 h-3 shrink-0" />
-                            <span className="font-semibold">{formatTime12(getMeetingTime(m))}</span>
-                            {m.duration ? <span className="text-slate-400">· {m.duration} min</span> : null}
-                          </div>
-                          {(m.location || m.venue) && (
-                            <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1 truncate">
-                              <MapPin className="w-3 h-3 shrink-0" />{m.location || m.venue}
-                            </p>
-                          )}
-                          {m.officer_name && (
-                            <p className="text-[10px] text-slate-400 mt-1 truncate">with {m.officer_name}</p>
-                          )}
-                        </div>
-                        <div className="flex flex-col items-end justify-between shrink-0">
-                          <span className={`w-2 h-2 rounded-full ${statusDot}`} title={m.status || 'Scheduled'} />
-                          <ChevronRightIcon className="w-3.5 h-3.5 text-slate-300 group-hover:text-blue-500 transition-colors" />
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                    {/* Type icon */}
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${color.light} ${color.text}`}>
+                      {getMeetingIcon(getMeetingType(m))}
+                    </div>
+
+                    {/* Title + meta */}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-slate-900 truncate group-hover:text-blue-600 transition-colors">
+                        {getMeetingTitle(m)}
+                      </p>
+                      <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                        {m.officer_name ? `with ${m.officer_name}` : ''}
+                        {m.officer_name && (m.location || m.venue) ? ' · ' : ''}
+                        {(m.location || m.venue) || ''}
+                      </p>
+                    </div>
+
+                    {/* Type badge (desktop) */}
+                    <span className={`hidden md:inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-bold uppercase border shrink-0 ${color.light} ${color.text} ${color.border}`}>
+                      {getMeetingType(m)}
+                    </span>
+
+                    {/* Status dot */}
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot}`} title={m.status || 'Scheduled'} />
+
+                    <ChevronRightIcon className="w-4 h-4 text-slate-300 group-hover:text-blue-500 group-hover:translate-x-0.5 transition-all shrink-0" />
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Show more / less */}
+            {items.length > UPCOMING_PAGE_SIZE && (
+              <div className="border-t border-slate-100 px-4 sm:px-5 py-2.5 flex items-center justify-between bg-slate-50/50">
+                <p className="text-[11px] font-medium text-slate-400">
+                  Showing {visible.length} of {items.length}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowAllUpcoming(v => !v)}
+                  className="text-[11px] font-bold text-blue-600 hover:text-blue-700"
+                >
+                  {showAllUpcoming ? 'Show less' : `Show all ${items.length}`}
+                </button>
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </section>
     );
@@ -332,7 +355,7 @@ export default function CalendarPage() {
     return currentDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   };
 
-  /* ── Shared panel wiring (replaces openCreate / openCreateForDate / edit form) ── */
+  /* ── Shared panel wiring ── */
 
   const openCreateForDate = (date: Date) => {
     setOffCanvasMode(null);
@@ -393,6 +416,12 @@ export default function CalendarPage() {
       await loadData();
     } catch (err: any) {
       console.error('Delete error:', err);
+
+      // ── ✅ AUTH: session expired / revoked → secure sign-out + redirect ──
+      if (err?.status === 401) {
+        logout();
+        router.replace('/login');
+      }
     }
   };
 
@@ -443,46 +472,45 @@ export default function CalendarPage() {
                 const isToday = cellDate.toDateString() === new Date().toDateString();
 
                 return (
-                <div
-  key={index}
-  onClick={() => openDayDetails(cellDate)}
-  className={`min-h-[148px] border-b border-r border-slate-100 p-2.5 cursor-pointer transition-colors hover:bg-slate-50 ${isToday ? 'bg-blue-50/25' : 'bg-white'}`}
->
-  <div className="flex items-center justify-between mb-2">
-    <span className={`w-8 h-8 flex items-center justify-center rounded-full text-sm font-semibold ${isToday ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}>
-      {day}
-    </span>
-    {dayMeetings.length > 0 && <span className="text-[10px] font-bold text-slate-400">{dayMeetings.length}</span>}
-  </div>
+                  <div
+                    key={index}
+                    onClick={() => openDayDetails(cellDate)}
+                    className={`min-h-[148px] border-b border-r border-slate-100 p-2.5 cursor-pointer transition-colors hover:bg-slate-50 ${isToday ? 'bg-blue-50/25' : 'bg-white'}`}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={`w-8 h-8 flex items-center justify-center rounded-full text-sm font-semibold ${isToday ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-700 hover:bg-slate-100'}`}>
+                        {day}
+                      </span>
+                      {dayMeetings.length > 0 && <span className="text-[10px] font-bold text-slate-400">{dayMeetings.length}</span>}
+                    </div>
 
-  <div className="space-y-1.5">
-    {dayMeetings.slice(0, 3).map((m, i) => {
-      const color = getMeetingVisualColor(m);
-      return (
-        <button
-          key={m.id || i}
-          type="button"
-          onClick={(e) => { e.stopPropagation(); openMeeting(m); }}
-          className={`w-full text-left rounded-lg px-2.5 py-2 border-l-[3px] ${color.light} ${color.border} hover:shadow-sm transition-all overflow-hidden`}
-        >
-          <div className={`flex items-center gap-1.5 ${color.text}`}>
-            <span className="shrink-0">{getMeetingIcon(getMeetingType(m))}</span>
-            <span className="truncate text-[11px] font-semibold">{getMeetingTitle(m)}</span>
-          </div>
-          <p className="text-[10px] font-medium text-slate-500 mt-1 pl-5 tabular-nums">
-            {formatTime12(getMeetingTime(m))}
-          </p>
-        </button>
-      );
-    })}
-    {dayMeetings.length > 3 && (
-      <button type="button" onClick={(e) => { e.stopPropagation(); openDayDetails(cellDate); }} className="text-[10px] font-bold text-blue-600 hover:underline px-1">
-        +{dayMeetings.length - 3} more
-      </button>
-    )}
-  </div>
-</div>
-                    
+                    <div className="space-y-1.5">
+                      {dayMeetings.slice(0, 3).map((m, i) => {
+                        const color = getMeetingVisualColor(m);
+                        return (
+                          <button
+                            key={m.id || i}
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); openMeeting(m); }}
+                            className={`w-full text-left rounded-lg px-2.5 py-2 border-l-[3px] ${color.light} ${color.border} hover:shadow-sm transition-all overflow-hidden`}
+                          >
+                            <div className={`flex items-center gap-1.5 ${color.text}`}>
+                              <span className="shrink-0">{getMeetingIcon(getMeetingType(m))}</span>
+                              <span className="truncate text-[11px] font-semibold">{getMeetingTitle(m)}</span>
+                            </div>
+                            <p className="text-[10px] font-medium text-slate-500 mt-1 pl-5 tabular-nums">
+                              {formatTime12(getMeetingTime(m))}
+                            </p>
+                          </button>
+                        );
+                      })}
+                      {dayMeetings.length > 3 && (
+                        <button type="button" onClick={(e) => { e.stopPropagation(); openDayDetails(cellDate); }} className="text-[10px] font-bold text-blue-600 hover:underline px-1">
+                          +{dayMeetings.length - 3} more
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 );
               })}
             </div>
@@ -551,25 +579,25 @@ export default function CalendarPage() {
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
-  <h3 className="text-sm font-bold text-slate-900 mb-2.5">Calendars</h3>
-  <div className="space-y-1.5">
-    {[
-      ['All Meetings', 'bg-blue-500'],
-      ['General', 'bg-purple-500'],
-      ['Official', 'bg-emerald-500'],
-      ['Personal', 'bg-amber-500'],
-    ].map(([label, dot]) => (
-      <div key={label} className="flex items-center gap-2.5 text-xs text-slate-600">
-        <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
-        <span className="truncate">{label}</span>
-      </div>
-    ))}
-  </div>
-</div>
+              <h3 className="text-sm font-bold text-slate-900 mb-2.5">Calendars</h3>
+              <div className="space-y-1.5">
+                {[
+                  ['All Meetings', 'bg-blue-500'],
+                  ['General', 'bg-purple-500'],
+                  ['Official', 'bg-emerald-500'],
+                  ['Personal', 'bg-amber-500'],
+                ].map(([label, dot]) => (
+                  <div key={label} className="flex items-center gap-2.5 text-xs text-slate-600">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+                    <span className="truncate">{label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           </aside>
         </div>
 
-        {/* Upcoming meetings — grouped by day */}
+        {/* Upcoming meetings — flat list */}
         {renderUpcoming()}
       </div>
     );
@@ -588,7 +616,6 @@ export default function CalendarPage() {
             <p className="text-sm font-bold text-slate-900">{currentDate.toLocaleDateString('en-US', { weekday: 'long' })}</p>
             <p className="text-xs text-slate-500">{currentDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</p>
           </div>
-          {/* opens the shared panel pre-filled with this date */}
           <button type="button" onClick={() => openCreateForDate(currentDate)} className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700"><Plus className="w-3.5 h-3.5" /> New Meeting</button>
         </div>
         <div className="divide-y divide-slate-100">
@@ -613,15 +640,12 @@ export default function CalendarPage() {
     );
   };
 
-  /* ─── Agenda View ─── */
-    /* ─── Agenda View — sectioned timeline with pagination ─── */
-    /* ─── Agenda View — scoped to the selected month, sectioned + paginated ─── */
+  /* ─── Agenda View — scoped to the selected month, sectioned + paginated ─── */
   const renderAgendaView = () => {
-    // ── Scope everything to the currently selected month ──
     const viewYear = currentDate.getFullYear();
     const viewMonth = currentDate.getMonth();
     const monthStart = new Date(viewYear, viewMonth, 1);
-    const monthEnd = new Date(viewYear, viewMonth + 1, 0); // last day of month
+    const monthEnd = new Date(viewYear, viewMonth + 1, 0);
     const monthStartStr = formatDateForInput(monthStart);
     const monthEndStr = formatDateForInput(monthEnd);
     const monthLabel = monthStart.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
@@ -642,7 +666,6 @@ export default function CalendarPage() {
 
     const goToCurrentMonth = () => setCurrentDate(new Date());
 
-    // ── Meetings within the selected month (after status filter) ──
     const dated = meetings.filter(m => {
       const d = getMeetingDateStr(m);
       if (!d) return false;
@@ -654,14 +677,12 @@ export default function CalendarPage() {
       `${getMeetingDateStr(a)} ${getMeetingTime(a)}`.localeCompare(`${getMeetingDateStr(b)} ${getMeetingTime(b)}`)
     );
 
-    // ── Sections ──
     let sections: {
       id: string; label: string; sub: string; icon: any; iconBg: string;
       meetings: any[]; showDate: boolean; defaultCollapsed: boolean;
     }[];
 
     if (isCurrentMonth) {
-      // Time-aware sections within the current month
       sections = [
         {
           id: 'today', label: 'Today',
@@ -708,7 +729,6 @@ export default function CalendarPage() {
         },
       ];
     } else {
-      // Any other month — a single section scoped to that month
       sections = [
         {
           id: 'month', label: monthLabel,
@@ -725,7 +745,6 @@ export default function CalendarPage() {
 
     sections = sections.filter(s => s.meetings.length > 0);
 
-    // ── Stats (scoped to the month) ──
     const daysWithMeetings = new Set(monthSorted.map(m => getMeetingDateStr(m))).size;
     const upcomingCount = monthSorted.filter(m => getMeetingDateStr(m) >= todayStr).length;
     const stats = [
@@ -735,7 +754,6 @@ export default function CalendarPage() {
       { label: 'Past', value: monthSorted.length - upcomingCount, icon: History, bubble: 'bg-slate-100 text-slate-500' },
     ];
 
-    // ── Renders one section card with its own pagination ──
     const renderSection = (section: (typeof sections)[number]) => {
       const Icon = section.icon;
       const isCollapsed = collapsed[section.id] ?? section.defaultCollapsed;
@@ -857,7 +875,6 @@ export default function CalendarPage() {
     return (
       <div className="space-y-4">
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-          {/* Header — title, month nav, filters */}
           <div className="px-5 py-4 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
             <div className="flex items-center gap-3 flex-wrap">
               <div>
@@ -867,7 +884,6 @@ export default function CalendarPage() {
                 </p>
               </div>
 
-              {/* Month navigation — changes which month the agenda shows */}
               <div className="flex items-center gap-1 bg-slate-50 rounded-xl ring-1 ring-slate-200 p-1">
                 <button
                   type="button"
@@ -901,7 +917,6 @@ export default function CalendarPage() {
               )}
             </div>
 
-            {/* Status filter chips */}
             <div className="flex items-center gap-1.5 flex-wrap">
               <Filter className="w-3.5 h-3.5 text-slate-400 mr-0.5" />
               {AGENDA_FILTERS.map(f => {
@@ -933,7 +948,6 @@ export default function CalendarPage() {
             </div>
           </div>
 
-          {/* Stats row — scoped to the month */}
           <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-slate-100">
             {stats.map(s => {
               const Icon = s.icon;
@@ -952,7 +966,6 @@ export default function CalendarPage() {
           </div>
         </div>
 
-        {/* Sections */}
         {sections.length === 0 ? (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-16 text-center">
             <div className="w-16 h-16 rounded-2xl bg-slate-50 flex items-center justify-center mx-auto mb-4">
@@ -1000,8 +1013,16 @@ export default function CalendarPage() {
     );
   };
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     ⚠️ RECONSTRUCTED SECTION — your paste was cut off here.
+     Everything below (rest of Year view, off-canvas panels, CreateMeetingPanel
+     rendering, main return) is rebuilt in your code style, wired to your
+     existing state/handlers, and using the icons your imports already listed.
+     Compare with your original before saving — especially the
+     CreateMeetingPanel props. Keep your original JSX wherever it differs.
+     ══════════════════════════════════════════════════════════════════════════ */
+
   /* ─── Year View ─── */
-    /* ─── Year View — click any month card to open it in Month view ─── */
   const renderYearView = () => {
     const year = currentDate.getFullYear();
     const months = Array.from({ length: 12 }, (_, i) => i);
@@ -1012,98 +1033,93 @@ export default function CalendarPage() {
     const isCurrentMonth = (monthIndex: number) =>
       new Date().getFullYear() === year && new Date().getMonth() === monthIndex;
 
-    const getMonthMeetings = (monthIndex: number) => {
-      const prefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
-      return meetings.filter(m => getMeetingDateStr(m).startsWith(prefix));
-    };
+    const yearMeetings = meetings.filter(m => getMeetingDateStr(m).startsWith(String(year)));
 
-    const openMonth = (monthIndex: number) => {
+    const goToMonth = (monthIndex: number) => {
       setCurrentDate(new Date(year, monthIndex, 1));
       setViewMode('month');
     };
 
     return (
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
-          {months.map(monthIndex => {
-            const firstDay = new Date(year, monthIndex, 1).getDay();
-            const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-            const cells: (number | null)[] = [];
-            for (let i = 0; i < firstDay; i++) cells.push(null);
-            for (let day = 1; day <= daysInMonth; day++) cells.push(day);
-            while (cells.length % 7 !== 0) cells.push(null);
+      <div className="space-y-3">
+        {/* Year summary */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">{year} Calendar</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {yearMeetings.length} meeting{yearMeetings.length !== 1 ? 's' : ''} scheduled in {year}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => { goToToday(); setViewMode('month'); }}
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 transition-colors"
+          >
+            <CalendarCheck className="w-3.5 h-3.5" /> Back to today
+          </button>
+        </div>
 
-            const monthMeetings = getMonthMeetings(monthIndex);
-            const current = isCurrentMonth(monthIndex);
+        {/* 12 month mini grids */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          {months.map(monthIndex => {
+            const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+            const firstDay = new Date(year, monthIndex, 1).getDay();
+            const monthMeetings = yearMeetings.filter(m => {
+              const d = getMeetingDateStr(m);
+              const prefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+              return d >= `${prefix}-01` && d <= `${prefix}-${String(daysInMonth).padStart(2, '0')}`;
+            });
             const meetingDates = new Set(monthMeetings.map(m => getMeetingDateStr(m)));
 
             return (
-              <div
-                key={monthIndex}
-                onClick={() => openMonth(monthIndex)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    openMonth(monthIndex);
-                  }
-                }}
-                title={`Open ${monthNames[monthIndex]} ${year}`}
-                className={`group rounded-xl border p-2.5 cursor-pointer transition-all hover:shadow-md hover:-translate-y-0.5 ${
-                  current
-                    ? 'border-blue-400 ring-2 ring-blue-100 bg-blue-50/30'
-                    : 'border-slate-200 bg-white hover:border-blue-300'
-                }`}
-              >
-                {/* Month header + meeting count badge */}
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className={`text-sm font-bold transition-colors ${current ? 'text-blue-700' : 'text-slate-900 group-hover:text-blue-600'}`}>
-                    {monthNames[monthIndex]}
-                  </span>
+              <div key={monthIndex} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                <button
+                  type="button"
+                  onClick={() => goToMonth(monthIndex)}
+                  className={`w-full flex items-center justify-between mb-3 group transition-colors ${
+                    isCurrentMonth(monthIndex) ? 'text-blue-600' : 'text-slate-900 hover:text-blue-600'
+                  }`}
+                >
+                  <span className="text-sm font-bold">{monthNames[monthIndex]}</span>
                   {monthMeetings.length > 0 && (
-                    <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0 ${current ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-600 group-hover:bg-blue-100'}`}>
+                    <span className="text-[10px] font-bold text-slate-400 group-hover:text-blue-600 transition-colors">
                       {monthMeetings.length}
                     </span>
                   )}
-                </div>
+                </button>
 
-                {/* Weekday headers */}
                 <div className="grid grid-cols-7 mb-1">
                   {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
-                    <span key={`${d}-${i}`} className="text-[8px] text-center font-semibold text-slate-400">{d}</span>
+                    <span key={i} className="text-center text-[8px] font-semibold text-slate-400">{d}</span>
                   ))}
                 </div>
 
-                {/* Days — clicking a specific day still opens Day Details */}
                 <div className="grid grid-cols-7 gap-y-1">
-                  {cells.map((day, index) => {
-                    if (!day) return <span key={index} className="h-5" />;
-                    const date = new Date(year, monthIndex, day);
-                    const dateStr = formatDateForInput(date);
+                  {Array.from({ length: firstDay }).map((_, i) => (
+                    <span key={`pad-${i}`} className="h-6" />
+                  ))}
+                  {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(day => {
+                    const cellDate = new Date(year, monthIndex, day);
+                    const dateStr = formatDateForInput(cellDate);
                     const hasMeeting = meetingDates.has(dateStr);
-                    const isToday = date.toDateString() === new Date().toDateString();
+                    const isToday = cellDate.toDateString() === new Date().toDateString();
                     return (
                       <button
+                        key={day}
                         type="button"
-                        key={index}
-                        onClick={(e) => { e.stopPropagation(); openDayDetails(date); }}
-                        className={`h-5 w-5 mx-auto rounded-full text-[9px] flex items-center justify-center transition-colors ${
-                          isToday ? 'bg-blue-600 text-white font-bold'
-                            : hasMeeting ? 'bg-blue-100 text-blue-700 font-semibold hover:bg-blue-200'
-                            : 'text-slate-500 hover:bg-slate-100'
+                        onClick={() => { setCurrentDate(cellDate); setViewMode('month'); }}
+                        className={`relative h-6 w-6 mx-auto rounded-full text-[10px] font-medium transition-colors ${
+                          isToday ? 'bg-blue-600 text-white font-bold' : 'text-slate-600 hover:bg-slate-100'
                         }`}
                       >
                         {day}
+                        {hasMeeting && !isToday && (
+                          <span className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-blue-500" />
+                        )}
                       </button>
                     );
                   })}
                 </div>
-
-                {/* Hover hint — appears on hover, guides the click */}
-                <p className="mt-1.5 text-[9px] font-semibold text-blue-600 flex items-center justify-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                  Open month <ChevronRight className="w-2.5 h-2.5 group-hover:translate-x-0.5 transition-transform" />
-                </p>
               </div>
             );
           })}
@@ -1112,355 +1128,362 @@ export default function CalendarPage() {
     );
   };
 
-  /* ─── Day Details Off-Canvas ─── */
-  const renderDayDetails = () => {
-    if (!selectedDate) return null;
-    const dateStr = formatDateForInput(selectedDate);
-    const dayMeetings = meetings
-      .filter(m => getMeetingDateStr(m) === dateStr)
-      .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
-
-    const isToday = selectedDate.toDateString() === new Date().toDateString();
-
-    return (
-      <>
-        <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity" onClick={closeOffCanvas} />
-        <div className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-lg bg-white shadow-2xl transform transition-transform duration-300 ease-out overflow-y-auto">
-          <div className="sticky top-0 bg-white/80 backdrop-blur-md border-b border-gray-200 px-6 py-5 z-10">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-gray-900">Day Details</h2>
-              <button type="button" onClick={closeOffCanvas} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
-                <X className="w-5 h-5 text-gray-600" />
-              </button>
-            </div>
-
-            <div className={`p-5 rounded-2xl border-2 ${isToday ? 'bg-gradient-to-br from-blue-50 to-blue-100/50 border-blue-300' : 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200'}`}>
-              <div className="flex items-center gap-4">
-                <div className={`w-16 h-16 rounded-2xl flex flex-col items-center justify-center shadow-lg ${isToday ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200'}`}>
-                  <span className="text-xs font-semibold uppercase opacity-70">{selectedDate.toLocaleDateString('en-US', { month: 'short' })}</span>
-                  <span className="text-3xl font-bold leading-none">{selectedDate.getDate()}</span>
-                </div>
-                <div className="flex-1">
-                  <p className="text-lg font-bold text-gray-900">{selectedDate.toLocaleDateString('en-US', { weekday: 'long' })}</p>
-                  <p className="text-sm text-gray-600">{selectedDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</p>
-                  <div className="flex items-center gap-2 mt-2">
-                    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${dayMeetings.length > 0 ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
-                      <CalendarIcon className="w-3.5 h-3.5" />
-                      {dayMeetings.length} meeting{dayMeetings.length !== 1 ? 's' : ''}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* opens the shared panel pre-filled with this day */}
-            <button
-              onClick={() => openCreateForDate(selectedDate)}
-              className="w-full mt-4 flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 font-semibold shadow-lg shadow-blue-600/25 transition-all duration-200 hover:shadow-xl hover:shadow-blue-600/30 hover:-translate-y-0.5"
-            >
-              <Plus className="w-5 h-5" />
-              Add Meeting
-            </button>
-          </div>
-
-          <div className="p-6">
-            {dayMeetings.length === 0 ? (
-              <div className="text-center py-16">
-                <div className="w-20 h-20 bg-gradient-to-br from-gray-100 to-gray-200 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-inner">
-                  <CalendarIcon className="w-10 h-10 text-gray-400" />
-                </div>
-                <p className="text-gray-900 font-semibold mb-2">No meetings scheduled</p>
-                <p className="text-sm text-gray-500">Click "Add Meeting" to create one</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {dayMeetings.map((m, i) => {
-                  const type = getMeetingType(m);
-                  const color = getMeetingColor(type);
-                  const statusColor = STATUS_COLORS[m.status] || STATUS_COLORS['Scheduled'];
-                  return (
-                    <div
-                      key={m.id || i}
-                      onClick={() => openMeeting(m)}
-                      className="group bg-white border border-gray-200 rounded-xl p-4 cursor-pointer hover:shadow-lg hover:border-blue-300 transition-all duration-200 hover:-translate-y-0.5"
-                    >
-                      <div className="flex items-start justify-between mb-3">
-                        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold uppercase ${color.light} ${color.text} border ${color.border}`}>
-                          {getMeetingIcon(type)}
-                          <span>{type}</span>
-                        </div>
-                        <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${statusColor}`}>{m.status || 'Scheduled'}</span>
-                      </div>
-                      <h4 className="font-bold text-gray-900 mb-2 line-clamp-2 group-hover:text-blue-600 transition-colors">{getMeetingTitle(m)}</h4>
-                      <div className="space-y-2 text-sm text-gray-600">
-                        <div className="flex items-center gap-2">
-                          <Clock className="w-4 h-4 text-gray-400" />
-                          <span className="font-medium text-gray-900">{formatTime12(getMeetingTime(m))}</span>
-                          {m.duration && <span className="text-gray-400">• {m.duration} min</span>}
-                        </div>
-                        {(m.location || m.venue) && (
-                          <div className="flex items-center gap-2"><MapPin className="w-4 h-4 text-gray-400" /><span className="truncate">{m.location || m.venue}</span></div>
-                        )}
-                        {(m.meeting_link || m.link || m.meet_link) && (
-                          <div className="flex items-center gap-2"><Video className="w-4 h-4 text-gray-400" /><span className="text-blue-600 font-medium">Join meeting</span></div>
-                        )}
-                      </div>
-                      <div className="flex justify-end mt-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <ChevronRightIcon className="w-5 h-5 text-gray-400" />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="sticky bottom-0 bg-gray-50/80 backdrop-blur-md border-t border-gray-200 px-6 py-4">
-            <button onClick={closeOffCanvas} className="w-full px-4 py-3 border border-gray-300 text-gray-700 font-semibold rounded-xl hover:bg-gray-100 transition-colors">
-              Close
-            </button>
-          </div>
-        </div>
-      </>
-    );
-  };
-
-  /* ─── Meeting Details Off-Canvas (view only — create/edit delegated to shared panel) ─── */
+  /* ─── Off-canvas: Meeting details (view mode) ─── */
   const renderMeetingDetails = () => {
-    if (!selectedMeeting) return null;
-
-    const type = getMeetingType(selectedMeeting);
-    const color = getMeetingColor(type);
-    const statusColor = STATUS_COLORS[selectedMeeting.status] || STATUS_COLORS['Scheduled'];
-    const dateStr = getMeetingDateStr(selectedMeeting);
-    const attendees = getAttendeesArray(selectedMeeting.attendees);
-    const meetLink = selectedMeeting.meeting_link || selectedMeeting.link || selectedMeeting.meet_link;
+    const m = selectedMeeting;
+    if (!m) return null;
+    const color = getMeetingVisualColor(m);
+    const attendees = getAttendeesArray(m.attendees);
+    const dateStr = getMeetingDateStr(m);
+    const d = dateStr ? new Date(`${dateStr}T00:00:00`) : null;
+    const statusClass = STATUS_COLORS[m.status] || STATUS_COLORS['Scheduled'];
 
     return (
       <>
-        <div className="fixed inset-0 z-40 bg-slate-950/35 backdrop-blur-sm" onClick={closeOffCanvas} />
+        {/* Backdrop */}
+        <div className="fixed inset-0 bg-slate-900/40 z-40" onClick={closeOffCanvas} />
 
-        <div className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-xl bg-white shadow-2xl flex flex-col">
+        {/* Panel */}
+        <div className="fixed top-0 right-0 h-full w-full sm:w-[440px] bg-white z-50 shadow-2xl flex flex-col">
           {/* Header */}
-          <div className="shrink-0 px-5 sm:px-6 py-4 border-b border-slate-200 bg-white flex items-center justify-between">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${color.light} ${color.text}`}>
-                {getMeetingIcon(type)}
+          <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[9px] font-bold uppercase border ${color.light} ${color.text} ${color.border}`}>
+                  {getMeetingIcon(getMeetingType(m))} {getMeetingType(m)}
+                </span>
+                <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-bold uppercase border ${statusClass}`}>
+                  {m.status || 'Scheduled'}
+                </span>
               </div>
-              <div className="min-w-0">
-                <h2 className="text-lg font-bold text-slate-900 truncate">Meeting Details</h2>
-                <p className="text-xs text-slate-500 mt-0.5 truncate">{getMeetingTitle(selectedMeeting)}</p>
-              </div>
+              <h3 className="text-base font-bold text-slate-900 leading-snug">{getMeetingTitle(m)}</h3>
             </div>
-            <button type="button" onClick={closeOffCanvas} className="w-9 h-9 rounded-lg flex items-center justify-center hover:bg-slate-100 text-slate-500" aria-label="Close">
-              <X className="w-5 h-5" />
+            <button type="button" onClick={closeOffCanvas} className="p-2 rounded-lg hover:bg-slate-100 transition-colors shrink-0" aria-label="Close">
+              <X className="w-5 h-5 text-slate-400" />
             </button>
           </div>
 
           {/* Body */}
-          <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6">
-            {/* Actions */}
-            <div className="flex gap-3">
-              <button onClick={() => openEditMeeting(selectedMeeting)} className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors shadow-sm">
-                <Edit3 className="w-4 h-4" /> Edit Meeting
-              </button>
-              <button onClick={handleDeleteMeeting} className="px-4 py-2.5 bg-red-50 hover:bg-red-100 text-red-600 font-medium rounded-lg transition-colors border border-red-200">
-                <Trash2 className="w-5 h-5" />
-              </button>
-            </div>
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            {/* When & where */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                  <Clock className="w-4 h-4" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-slate-900">
+                    {d ? d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : '—'}
+                  </p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    {formatTime12(getMeetingTime(m))}{m.duration ? ` · ${m.duration} min` : ''}
+                  </p>
+                </div>
+              </div>
 
-            {/* Status + priority */}
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${statusColor}`}>{selectedMeeting.status || 'Scheduled'}</span>
-              {selectedMeeting.priority && (
-                <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200 capitalize">{selectedMeeting.priority} priority</span>
+              {(m.location || m.venue) && (
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                    <MapPin className="w-4 h-4" />
+                  </div>
+                  <p className="text-xs font-semibold text-slate-900">{m.location || m.venue}</p>
+                </div>
+              )}
+
+              {(m.meeting_link || m.link) && (
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center shrink-0">
+                    <Video className="w-4 h-4" />
+                  </div>
+                  <a
+                    href={m.meeting_link || m.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline truncate"
+                  >
+                    Join meeting link
+                  </a>
+                </div>
+              )}
+
+              {d && (
+                <button
+                  type="button"
+                  onClick={() => openDayDetails(d)}
+                  className="w-full flex items-center gap-3 group"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-slate-100 text-slate-500 flex items-center justify-center shrink-0 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors">
+                    <LinkIcon className="w-4 h-4" />
+                  </div>
+                  <p className="text-xs font-semibold text-slate-500 group-hover:text-blue-600 transition-colors">
+                    View this day's schedule
+                  </p>
+                </button>
               )}
             </div>
 
-            {/* Date & time */}
-            <div className="flex items-start gap-3">
-              <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0"><CalendarIcon className="w-4 h-4 text-blue-600" /></div>
-              <div className="flex-1">
-                <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Date & Time</p>
-                <p className="text-sm font-medium text-gray-900">
-                  {dateStr ? new Date(`${dateStr}T00:00:00`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A'}
-                  {' at '}{formatTime12(getMeetingTime(selectedMeeting))}
-                </p>
-                {selectedMeeting.duration && <p className="text-xs text-gray-500 mt-0.5">Duration: {selectedMeeting.duration} minutes</p>}
-              </div>
-            </div>
-
-            {/* Location */}
-            {(selectedMeeting.location || selectedMeeting.venue || selectedMeeting.meeting_place) && (
-              <div className="flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0"><MapPin className="w-4 h-4 text-blue-600" /></div>
-                <div className="flex-1">
-                  <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Location</p>
-                  <p className="text-sm text-gray-900">{selectedMeeting.location || selectedMeeting.venue}</p>
-                  {selectedMeeting.meeting_place && <p className="text-xs text-gray-500 mt-0.5">{selectedMeeting.meeting_place}</p>}
-                </div>
-              </div>
-            )}
-
-            {/* Officer (meetings created via the shared panel) */}
-            {(selectedMeeting.officer_name || selectedMeeting.designation) && (
-              <div className="flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0"><User className="w-4 h-4 text-indigo-600" /></div>
-                <div className="flex-1">
-                  <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Officer</p>
-                  {selectedMeeting.officer_name && <p className="text-sm font-medium text-gray-900">{selectedMeeting.officer_name}</p>}
-                  {selectedMeeting.designation && <p className="text-sm text-gray-700">{selectedMeeting.designation}</p>}
-                  {selectedMeeting.officer_type && <span className="inline-block mt-1 px-2 py-0.5 bg-indigo-50 text-indigo-700 text-xs font-semibold rounded">{selectedMeeting.officer_type}</span>}
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-gray-500">
-                    {selectedMeeting.contact_number && <span className="inline-flex items-center gap-1"><Phone className="w-3 h-3" />{selectedMeeting.contact_number}</span>}
-                    {selectedMeeting.email && <span className="inline-flex items-center gap-1 truncate"><Mail className="w-3 h-3" />{selectedMeeting.email}</span>}
+            {/* Officer */}
+            {m.officer_name && (
+              <div className="bg-slate-50 rounded-xl p-4">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-3">Officer</p>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center font-bold text-sm shrink-0">
+                    {m.officer_name.charAt(0).toUpperCase()}
                   </div>
-                </div>
-              </div>
-            )}
-
-            {/* Type */}
-            <div className="flex items-start gap-3">
-              <div className="w-8 h-8 rounded-lg bg-gray-50 flex items-center justify-center shrink-0"><Briefcase className="w-4 h-4 text-gray-600" /></div>
-              <div className="flex-1">
-                <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Type</p>
-                <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold uppercase ${color.light} ${color.text} border ${color.border}`}>
-                  {getMeetingIcon(type)}<span>{type}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Meet link */}
-            {meetLink && (
-              <div className="flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0"><Video className="w-4 h-4 text-blue-600" /></div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Meeting Link</p>
-                  <a href={meetLink} target="_blank" rel="noreferrer" className="text-sm text-blue-600 font-medium hover:underline flex items-center gap-1.5 truncate">
-                    <LinkIcon className="w-3.5 h-3.5 shrink-0" /> Join meeting
-                  </a>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-900 truncate">{m.officer_name}</p>
+                    <div className="flex flex-col gap-0.5 mt-0.5">
+                      {(m.officer_email || m.email) && (
+                        <p className="text-[11px] text-slate-500 flex items-center gap-1.5 truncate">
+                          <Mail className="w-3 h-3 shrink-0" /> {m.officer_email || m.email}
+                        </p>
+                      )}
+                      {(m.officer_phone || m.phone) && (
+                        <p className="text-[11px] text-slate-500 flex items-center gap-1.5 truncate">
+                          <Phone className="w-3 h-3 shrink-0" /> {m.officer_phone || m.phone}
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
 
             {/* Attendees */}
             {attendees.length > 0 && (
-              <div className="flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg bg-gray-50 flex items-center justify-center shrink-0"><Users className="w-4 h-4 text-gray-600" /></div>
-                <div className="flex-1">
-                  <p className="text-xs font-semibold text-gray-500 uppercase mb-1.5">Attendees ({attendees.length})</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {attendees.map((a, i) => (
-                      <span key={i} className="px-2 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium">{a}</span>
-                    ))}
-                  </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2.5">
+                  Attendees ({attendees.length})
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {attendees.map((a, i) => (
+                    <span key={i} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 text-[11px] font-medium text-slate-600">
+                      <User className="w-3 h-3 text-slate-400" /> {a}
+                    </span>
+                  ))}
                 </div>
               </div>
             )}
 
-            {/* Notes / description */}
-            {(selectedMeeting.notes || selectedMeeting.description || selectedMeeting.agenda) && (
-              <div className="flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg bg-yellow-50 flex items-center justify-center shrink-0"><FileText className="w-4 h-4 text-yellow-600" /></div>
-                <div className="flex-1">
-                  <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Notes</p>
-                  <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">{selectedMeeting.notes || selectedMeeting.description || selectedMeeting.agenda}</p>
-                </div>
+            {/* Notes / agenda */}
+            {(m.notes || m.description || (m.agenda && m.title)) && (
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2.5 flex items-center gap-1.5">
+                  <FileText className="w-3 h-3" /> Notes
+                </p>
+                <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 rounded-xl p-4 whitespace-pre-wrap">
+                  {m.notes || m.description || m.agenda}
+                </p>
               </div>
             )}
+          </div>
 
-            {/* Metadata */}
-            <div className="pt-4 border-t border-gray-200 grid grid-cols-2 gap-4 text-xs">
-              <div>
-                <p className="text-gray-500 mb-0.5">Created</p>
-                <p className="font-medium text-gray-900">{selectedMeeting.created ? new Date(selectedMeeting.created).toLocaleDateString() : 'N/A'}</p>
-              </div>
-              <div>
-                <p className="text-gray-500 mb-0.5">Last Updated</p>
-                <p className="font-medium text-gray-900">{selectedMeeting.updated ? new Date(selectedMeeting.updated).toLocaleDateString() : 'N/A'}</p>
-              </div>
-            </div>
+          {/* Actions */}
+          <div className="px-5 py-4 border-t border-slate-200 flex gap-2 bg-slate-50/50">
+            <button
+              type="button"
+              onClick={() => openEditMeeting(m)}
+              className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 transition-colors"
+            >
+              <Edit3 className="w-3.5 h-3.5" /> Edit meeting
+            </button>
+            <button
+              type="button"
+              onClick={handleDeleteMeeting}
+              className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete
+            </button>
           </div>
         </div>
       </>
     );
   };
 
-  if (loading) {
+  /* ─── Off-canvas: Day details (day mode) ─── */
+  const renderDayDetails = () => {
+    if (!selectedDate) return null;
+    const dateStr = formatDateForInput(selectedDate);
+    const dayMeetings = meetings
+      .filter(m => getMeetingDateStr(m) === dateStr)
+      .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
+    const isToday = selectedDate.toDateString() === new Date().toDateString();
+
     return (
-      <div className="p-8 flex items-center justify-center min-h-screen">
-        <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
-      </div>
-    );
-  }
+      <>
+        {/* Backdrop */}
+        <div className="fixed inset-0 bg-slate-900/40 z-40" onClick={closeOffCanvas} />
 
-  return (
-    <div className="p-4 lg:p-5 max-w-[1500px] mx-auto space-y-3">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">Calendar</h1>
-          <p className="text-slate-500 mt-1">Plan, schedule and track all your meetings</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={loadData} className="p-2.5 bg-white border border-slate-200 rounded-xl text-slate-500 hover:text-blue-600 hover:border-blue-300 transition-colors" aria-label="Refresh">
-            <RefreshCw className="w-5 h-5" />
-          </button>
-          {/* Same shared panel as the Meetings module */}
-          <button onClick={openCreate} className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition-colors shadow-sm">
-            <Plus className="w-5 h-5" /> New Meeting
-          </button>
-        </div>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
-          <AlertCircle className="w-5 h-5 shrink-0" />
-          <span className="flex-1">{error}</span>
-          <button onClick={loadData} className="text-xs font-semibold text-red-700 hover:text-red-900 underline">Retry</button>
-        </div>
-      )}
-
-      {/* Toolbar — Year now first, before Month */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <button onClick={() => navigate('prev')} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" aria-label="Previous"><ChevronLeft className="w-4 h-4" /></button>
-          <button onClick={goToToday} className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 border border-slate-200">Today</button>
-          <button onClick={() => navigate('next')} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500" aria-label="Next"><ChevronRight className="w-4 h-4" /></button>
-          <h2 className="text-base font-bold text-slate-900 px-2">{getHeaderLabel()}</h2>
-        </div>
-        <div className="flex bg-slate-100 rounded-lg p-1">
-          {(['year', 'month', 'day', 'agenda'] as ViewMode[]).map(v => (
-            <button
-              key={v}
-              onClick={() => setViewMode(v)}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold capitalize transition-all ${viewMode === v ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-            >
-              {v}
+        {/* Panel */}
+        <div className="fixed top-0 right-0 h-full w-full sm:w-[440px] bg-white z-50 shadow-2xl flex flex-col">
+          {/* Header */}
+          <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                {isToday ? 'Today' : selectedDate.toLocaleDateString('en-US', { weekday: 'long' })}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {selectedDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+                {dayMeetings.length > 0 && ` · ${dayMeetings.length} meeting${dayMeetings.length !== 1 ? 's' : ''}`}
+              </p>
+            </div>
+            <button type="button" onClick={closeOffCanvas} className="p-2 rounded-lg hover:bg-slate-100 transition-colors" aria-label="Close">
+              <X className="w-5 h-5 text-slate-400" />
             </button>
-          ))}
+          </div>
+
+          {/* Body */}
+          <div className="flex-1 overflow-y-auto p-5 space-y-2.5">
+            {dayMeetings.length === 0 ? (
+              <div className="py-10 text-center">
+                <CalendarCheck className="w-8 h-8 mx-auto text-slate-300 mb-2" />
+                <p className="text-xs text-slate-500">No meetings scheduled for this day.</p>
+              </div>
+            ) : (
+              dayMeetings.map((m, i) => {
+                const color = getMeetingVisualColor(m);
+                return (
+                  <button
+                    key={m.id || i}
+                    type="button"
+                    onClick={() => openMeeting(m)}
+                    className={`w-full text-left rounded-xl px-4 py-3 border-l-[3px] ${color.light} ${color.border} hover:shadow-sm transition-all`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={color.text}>{getMeetingIcon(getMeetingType(m))}</span>
+                      <p className={`text-xs font-bold ${color.text} truncate`}>{getMeetingTitle(m)}</p>
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1.5 tabular-nums">
+                      {formatTime12(getMeetingTime(m))}{m.duration ? ` · ${m.duration} min` : ''}
+                      {(m.location || m.venue) ? ` · ${m.location || m.venue}` : ''}
+                    </p>
+                  </button>
+                );
+              })
+            )}
+          </div>
+
+          {/* Footer action */}
+          <div className="px-5 py-4 border-t border-slate-200 bg-slate-50/50">
+            <button
+              type="button"
+              onClick={() => openCreateForDate(selectedDate)}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 shadow-sm shadow-blue-600/25 transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" /> New meeting on this day
+            </button>
+          </div>
         </div>
+      </>
+    );
+  };
+
+  const renderOffCanvas = () => {
+    if (offCanvasMode === 'view') return renderMeetingDetails();
+    if (offCanvasMode === 'day') return renderDayDetails();
+    return null;
+  };
+
+  /* ─── Main render ─── */
+  return (
+    // ── ✅ AUTH: route guard — shows a loader while the session is verified,
+    // redirects to /login when signed out, renders content only when signed in.
+    // (AppShell already gates this page; this is defense in depth.) ──
+    <ProtectedRoute>
+      <div className="p-4 sm:p-6 space-y-4">
+        {/* Header */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold text-slate-900">Calendar</h1>
+            <p className="text-xs text-slate-500 mt-0.5">View and manage all meetings</p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* View switcher */}
+            <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1">
+              {(['year', 'month', 'day', 'agenda'] as ViewMode[]).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setViewMode(mode)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-all ${
+                    viewMode === mode ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={openCreate}
+              className="inline-flex items-center gap-2 px-3.5 py-2 bg-blue-600 text-white rounded-xl text-xs font-semibold hover:bg-blue-700 shadow-sm shadow-blue-600/25 transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" /> New Meeting
+            </button>
+          </div>
+        </div>
+
+        {/* Toolbar: navigation + current label */}
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => navigate('prev')} className="p-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 transition-colors" aria-label="Previous">
+              <ChevronLeft className="w-4 h-4 text-slate-500" />
+            </button>
+            <button type="button" onClick={() => navigate('next')} className="p-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 transition-colors" aria-label="Next">
+              <ChevronRight className="w-4 h-4 text-slate-500" />
+            </button>
+            <button type="button" onClick={goToToday} className="px-3 py-2 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition-colors">
+              Today
+            </button>
+            <h2 className="text-sm font-bold text-slate-900 ml-1">{getHeaderLabel()}</h2>
+          </div>
+
+          <button type="button" onClick={loadData} className="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors" aria-label="Refresh" title="Refresh">
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Error state */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+            <p className="text-xs font-medium text-red-700 flex-1">{error}</p>
+            <button type="button" onClick={loadData} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-red-600 bg-white hover:bg-red-50 transition-colors">
+              <RefreshCw className="w-3.5 h-3.5" /> Retry
+            </button>
+          </div>
+        )}
+
+        {/* Content */}
+        {loading ? (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm py-24 flex flex-col items-center gap-3">
+            <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+            <p className="text-xs font-medium text-slate-400">Loading meetings…</p>
+          </div>
+        ) : (
+          viewMode === 'year' ? renderYearView() :
+          viewMode === 'month' ? renderMonthView() :
+          viewMode === 'day' ? renderDayView() :
+          renderAgendaView()
+        )}
+
+        {/* Off-canvas panels (meeting details / day details) */}
+        {renderOffCanvas()}
+
+        {/* ⚠️ RECONSTRUCTED — keep whatever props your original file passes to
+            CreateMeetingPanel. Adjust the prop names below to match yours. */}
+        {panelOpen && (
+          <CreateMeetingPanel
+            isOpen={panelOpen}
+            onClose={closePanel}
+            onSuccess={handlePanelSuccess}
+            editingMeeting={editingMeeting}
+            preselectedDate={panelDate}
+          />
+        )}
       </div>
-
-      {/* Views */}
-      {viewMode === 'month' && renderMonthView()}
-      {viewMode === 'day' && renderDayView()}
-      {viewMode === 'agenda' && renderAgendaView()}
-      {viewMode === 'year' && renderYearView()}
-
-      {/* Off-canvas layers */}
-      {offCanvasMode === 'day' && renderDayDetails()}
-      {offCanvasMode === 'view' && renderMeetingDetails()}
-
-      {/* ✅ Shared CreateMeetingPanel — identical to the Meetings module */}
-      <CreateMeetingPanel
-        isOpen={panelOpen}
-        onClose={closePanel}
-        onSuccess={handlePanelSuccess}
-        meetingToEdit={editingMeeting}
-        defaultDate={panelDate || undefined}
-      />
-    </div>
+    </ProtectedRoute>
   );
 }

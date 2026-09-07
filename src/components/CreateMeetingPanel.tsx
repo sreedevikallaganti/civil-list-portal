@@ -5,9 +5,11 @@ import {
   X, Calendar, Clock, MapPin, Trash2, Check, Search, ChevronDown,
   ChevronLeft, ChevronRight, Loader2, Users, Mail, Phone, User,
   Sparkles, ArrowLeft, AlertCircle, RefreshCw, Building2, Flag,
-  Video, Globe, Minus, Plus, Zap, Activity, Feather, Sunrise, Sun, Moon
+  Video, Globe, Plus, Zap, Activity, Feather, Sunrise, Sun, Moon
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
+import { showToast } from '@/components/Toaster';
+import toast, { Toaster } from 'react-hot-toast';
 
 /* ================================================================
    Types
@@ -57,6 +59,11 @@ const PLACE_OPTIONS = [
   { value: 'Outside', icon: Globe, hint: 'External venue' },
 ];
 
+const MEETING_TYPES = [
+  { value: 'Internal', icon: Users, hint: 'Within your team' },
+  { value: 'External', icon: Globe, hint: 'Outside participants' },
+];
+
 const STATUS_FLAGS = [
   { value: 'Scheduled', dot: 'bg-blue-500' },
   { value: 'Completed', dot: 'bg-emerald-500' },
@@ -83,13 +90,16 @@ const OFFICER_EDIT_FIELDS = [
   { key: 'batch_year', label: 'Batch' },
 ];
 
+/* No field carries a default selection. Fields inside "More details"
+   (status, meeting type, …) are OPTIONAL; everything shown in the
+   main flow is compulsory.                                    */
 const EMPTY_FORM = {
   agenda: '',
   meeting_date: '',
   meeting_time: '',
-  duration: '30',
+  duration: '',
   location: '',
-  status: 'Scheduled',
+  status: '',
   officer_type: '',
   officer_name: '',
   officer_id: '',
@@ -106,10 +116,10 @@ const EMPTY_FORM = {
   current_position: '',
   previous_postings: '',
   date_of_birth: '',
-  priority: 'Medium',
-  meeting_type: 'Internal',
-  meeting_place: 'Office',
-  status_flag: 'Scheduled',
+  priority: '',
+  meeting_type: '',
+  meeting_place: '',
+  status_flag: '',
   attendees: '',
   notes: '',
   follow_up_date: '',
@@ -206,7 +216,7 @@ function ToggleRow({ icon: Icon, title, description, checked, onChange }: {
 }
 
 /* ================================================================
-   Premium pickers — calendar, time slots, duration
+   Premium pickers — calendar, time slots
 ================================================================ */
 
 function MiniCalendar({ value, onChange }: { value: string; onChange: (v: string) => void }) {
@@ -355,145 +365,6 @@ function TimeSlotPicker({ value, onChange }: { value: string; onChange: (v: stri
   );
 }
 
-function DurationControl({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const total = Math.max(1, Math.min(600, Number(value) || 30));
-  const [hrDraft, setHrDraft] = useState(String(Math.floor(total / 60)));
-  const [minDraft, setMinDraft] = useState(String(total % 60));
-  const editingRef = useRef(false); // true while either field is focused
-
-  // Sync the fields when the value changes from outside
-  // (preset chips, +/− buttons, form reset, edit-mode populate)
-  useEffect(() => {
-    if (!editingRef.current) {
-      setHrDraft(String(Math.floor(total / 60)));
-      setMinDraft(String(total % 60));
-    }
-  }, [total]);
-
-  const clampTotal = (n: number) => Math.max(1, Math.min(600, n));
-
-  // Commit: sum hr + min, clamp 1–600, carry anything ≥ 60 min into hours
-  const commit = () => {
-    editingRef.current = false;
-    const h = parseInt(hrDraft, 10) || 0;
-    const m = parseInt(minDraft, 10) || 0;
-    const t = clampTotal(h * 60 + m);
-    setHrDraft(String(Math.floor(t / 60)));
-    setMinDraft(String(t % 60));
-    onChange(String(t));
-  };
-
-  // Live update while typing (end time + preview follow along)
-  const liveUpdate = (hStr: string, mStr: string) => {
-    const h = parseInt(hStr, 10);
-    const m = parseInt(mStr, 10);
-    const hh = isNaN(h) ? 0 : h;
-    const mm = isNaN(m) ? 0 : m;
-    const t = hh * 60 + mm;
-    if (t >= 1) onChange(String(Math.min(600, t)));
-  };
-
-  const step = (delta: number) => {
-    const next = clampTotal(total + delta);
-    editingRef.current = false;
-    setHrDraft(String(Math.floor(next / 60)));
-    setMinDraft(String(next % 60));
-    onChange(String(next));
-  };
-
-  // One editable field (reused for hr & min)
-  const durationField = (
-    draft: string,
-    setDraft: (v: string) => void,
-    unit: string,
-    arrowDelta: number,
-  ) => (
-    <input
-      type="text"
-      inputMode="numeric"
-      value={draft}
-      onFocus={() => { editingRef.current = true; }}
-      onChange={(e) => {
-        const raw = e.target.value.replace(/[^0-9]/g, '').slice(0, 3); // digits only, max 3
-        setDraft(raw);
-        // live-update using the *other* field's current draft too
-        liveUpdate(unit === 'hr' ? raw : hrDraft, unit === 'hr' ? minDraft : raw);
-      }}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-        if (e.key === 'ArrowUp') { e.preventDefault(); step(arrowDelta); }
-        if (e.key === 'ArrowDown') { e.preventDefault(); step(-arrowDelta); }
-      }}
-      placeholder="0"
-      className="w-14 text-center text-xl font-extrabold text-slate-900 tabular-nums tracking-tight bg-transparent outline-none border-b-2 border-slate-300 focus:border-indigo-500 transition-colors placeholder:text-slate-300"
-    />
-  );
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between rounded-2xl bg-slate-50 ring-1 ring-slate-200/70 p-2">
-        <button
-          type="button"
-          onClick={() => step(-15)}
-          disabled={total <= 1}
-          className="w-10 h-10 rounded-xl bg-white ring-1 ring-slate-200 text-slate-600 hover:ring-slate-400 hover:text-slate-900 flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 shadow-sm"
-        >
-          <Minus className="w-4 h-4" />
-        </button>
-
-        {/* Typeable HR : MIN fields */}
-        <div className="flex-1 flex items-center justify-center gap-1 min-w-0 px-1">
-          {durationField(hrDraft, setHrDraft, 'hr', 60)}
-          <span className="text-xs font-bold text-slate-400 mt-1.5">hr</span>
-          <span className="text-xl font-extrabold text-slate-300 mt-1 mx-0.5">:</span>
-          {durationField(minDraft, setMinDraft, 'min', 15)}
-          <span className="text-xs font-bold text-slate-400 mt-1.5">min</span>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => step(15)}
-          disabled={total >= 600}
-          className="w-10 h-10 rounded-xl bg-white ring-1 ring-slate-200 text-slate-600 hover:ring-slate-400 hover:text-slate-900 flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 shadow-sm"
-        >
-          <Plus className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Human-readable total */}
-      <p className="text-center text-[10px] font-bold uppercase tracking-widest text-slate-400">
-        {formatDuration(total)} total
-      </p>
-
-      <div className="flex flex-wrap gap-1.5 justify-center">
-        {PRESET_DURATIONS.map((d) => (
-          <button
-            key={d}
-            type="button"
-            onClick={() => {
-              editingRef.current = false;
-              setHrDraft(String(Math.floor(d / 60)));
-              setMinDraft(String(d % 60));
-              onChange(String(d));
-            }}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all
-              ${total === d
-                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30'
-                : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:ring-indigo-300 hover:text-indigo-700'}`}
-          >
-            {formatDuration(d)}
-          </button>
-        ))}
-      </div>
-
-      <p className="text-[11px] text-slate-400 text-center">
-        Type hours &amp; minutes directly — or pick a preset
-      </p>
-    </div>
-  );
-}
-
 /* ================================================================
    Main component
 ================================================================ */
@@ -509,7 +380,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
   const [selectedOfficer, setSelectedOfficer] = useState<Officer | null>(null);
   const [showOfficerEdit, setShowOfficerEdit] = useState(false);
 
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showMoreDetails, setShowMoreDetails] = useState(false);
   const [attendeeInput, setAttendeeInput] = useState('');
   const [attendeeList, setAttendeeList] = useState<string[]>([]);
 
@@ -616,9 +487,9 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
       agenda: m.agenda || '',
       meeting_date: formattedDate,
       meeting_time: formattedTime,
-      duration: String(m.duration ?? '30'),
+      duration: String(m.duration ?? ''),
       location: m.location || '',
-      status: m.status || 'Scheduled',
+      status: m.status || '',
       officer_type: m.officer_type || '',
       officer_name: m.officer_name || '',
       officer_id: m.officer_id || '',
@@ -635,10 +506,10 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
       current_position: m.current_position || '',
       previous_postings: m.previous_postings || '',
       date_of_birth: m.date_of_birth || '',
-      priority: m.priority || 'Medium',
-      meeting_type: m.meeting_type || 'Internal',
-      meeting_place: m.meeting_place || 'Office',
-      status_flag: m.status_flag || 'Scheduled',
+      priority: m.priority || '',
+      meeting_type: m.meeting_type || '',
+      meeting_place: m.meeting_place || '',
+      status_flag: m.status_flag || '',
       notes: m.notes || '',
       follow_up_date: followUp,
       send_invite: Boolean(m.send_invite),
@@ -670,7 +541,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
       setSelectedOfficer(null);
     }
     setShowOfficerEdit(false);
-    setShowAdvanced(Boolean(m.notes || attendeesArr.length || m.meet_link || m.follow_up_date || m.send_invite || m.sync_gcal));
+    setShowMoreDetails(Boolean(m.notes || attendeesArr.length || m.meet_link || m.follow_up_date || m.send_invite || m.sync_gcal));
     setErrors({});
     setSubmitError(null);
     setStep(1);
@@ -686,7 +557,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
     setTypeFilter('All');
     setAttendeeList([]);
     setAttendeeInput('');
-    setShowAdvanced(false);
+    setShowMoreDetails(false);
     setShowOfficerEdit(false);
     setErrors({});
     setSubmitError(null);
@@ -711,16 +582,25 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
   }, [officers, officerSearch, typeFilter]);
 
   const meetingEndTime = useMemo(() => {
-    if (!formData.meeting_time) return '';
+    if (!formData.meeting_time || !formData.duration) return '';
     const [h, m] = formData.meeting_time.split(':').map(Number);
     const total = (h * 60 + m + (Number(formData.duration) || 30)) % (24 * 60);
     return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
   }, [formData.meeting_time, formData.duration]);
 
+  /* Duration dropdown options — presets + the current value (edit mode
+     may hold a non-preset duration, keep it selectable) */
+  const durationOptions = useMemo(() => {
+    const current = Number(formData.duration);
+    const list = [...PRESET_DURATIONS];
+    if (current > 0 && !list.includes(current)) list.push(current);
+    return list.sort((a, b) => a - b);
+  }, [formData.duration]);
+
   const todayISO = toLocalISODate(new Date());
   const tomorrowISO = toLocalISODate(new Date(Date.now() + 86400000));
 
-  const priorityInfo = PRIORITIES.find((p) => p.value === formData.priority) || PRIORITIES[1];
+  const priorityInfo = PRIORITIES.find((p) => p.value === formData.priority);
 
   /* ---------------- handlers ---------------- */
 
@@ -804,25 +684,35 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
     setAttendeeInput('');
   };
 
+  /* Step 1 owns the agenda — validate it before moving on */
   const goToSchedule = () => {
-    if (!selectedOfficer) {
-      setErrors({ officer: 'Please select a participant to continue' });
-      return;
-    }
-    setErrors({});
+    const e: Record<string, string> = {};
+    if (!selectedOfficer) e.officer = 'Please select a participant to continue';
+    if (!formData.agenda.trim()) e.agenda = 'Add a short agenda for this meeting';
+    setErrors(e);
+    if (Object.keys(e).length > 0) return;
     setStep(2);
   };
 
   const handleSubmit = async () => {
-    if (!selectedOfficer) {
+    // Step-1 requirements — bounce back if anything is missing
+    if (!selectedOfficer || !formData.agenda.trim()) {
       setStep(1);
-      setErrors({ officer: 'Please select a participant to continue' });
+      setErrors({
+        ...(selectedOfficer ? {} : { officer: 'Please select a participant to continue' }),
+        ...(formData.agenda.trim() ? {} : { agenda: 'Add a short agenda for this meeting' }),
+      });
       return;
     }
+
+    // Main-flow fields are compulsory (no defaults).
+    // Fields inside "More details" (status, type, …) are optional.
     const e: Record<string, string> = {};
-    if (!formData.agenda.trim()) e.agenda = 'Add a short agenda for this meeting';
     if (!formData.meeting_date) e.date = 'Pick a date';
     if (!formData.meeting_time) e.time = 'Pick a time';
+    if (!formData.duration) e.duration = 'Select a duration';
+    if (!formData.meeting_place) e.meeting_place = 'Choose the meeting place';
+    if (!formData.priority) e.priority = 'Select a priority';
     setErrors(e);
     if (Object.keys(e).length > 0) return;
 
@@ -856,9 +746,9 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
         previous_postings: formData.previous_postings || '',
         date_of_birth: formData.date_of_birth || '',
         priority: formData.priority,
-        meeting_type: formData.meeting_type,
+        meeting_type: formData.meeting_type || '',
         meeting_place: formData.meeting_place,
-        status_flag: formData.status_flag,
+        status_flag: formData.status_flag || '',
         attendees: { attendees: attendeeList },
         notes: formData.notes || '',
         follow_up_date: formData.follow_up_date ? `${formData.follow_up_date} 00:00:00.000Z` : null,
@@ -875,13 +765,16 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
 
       if (isEditMode && meetingToEdit) {
         await pb.collection('meetings').update(meetingToEdit.id, meetingData);
+        showToast('Meeting updated successfully', formData.agenda);
       } else {
         await pb.collection('meetings').create(meetingData);
+        showToast('Meeting created successfully', formData.agenda);
       }
 
       setLoading(false);
       onSuccess();
       onClose();
+
     } catch (error: any) {
       console.error('Meeting save failed:', error?.response?.data || error);
       setLoading(false);
@@ -918,7 +811,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
   if (!isOpen) return null;
 
   /* ================================================================
-     Render — Step 1: Who
+     Render — Step 1: Who + Agenda
   ================================================================ */
 
   const renderStep1 = () => (
@@ -1083,6 +976,23 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
           </div>
         </div>
       )}
+
+      {/* Agenda — lives in Step 1 */}
+      <div>
+        <label className="block text-sm font-semibold text-slate-800 mb-1.5">
+          Agenda <span className="text-rose-500">*</span>
+        </label>
+        <input
+          value={formData.agenda}
+          onChange={(e) => {
+            setFormData((p) => ({ ...p, agenda: e.target.value }));
+            if (errors.agenda) setErrors((p) => ({ ...p, agenda: '' }));
+          }}
+          placeholder="e.g. Quarterly infrastructure review"
+          className={`${inputCls} font-medium`}
+        />
+        <FieldError message={errors.agenda} />
+      </div>
     </div>
   );
 
@@ -1100,24 +1010,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
         <p className="text-xs text-slate-500 mt-1 ml-9">Just the essentials — everything else is optional</p>
       </div>
 
-      {/* Agenda */}
-      <div>
-        <label className="block text-sm font-semibold text-slate-800 mb-1.5">
-          Agenda <span className="text-rose-500">*</span>
-        </label>
-        <input
-          value={formData.agenda}
-          onChange={(e) => {
-            setFormData((p) => ({ ...p, agenda: e.target.value }));
-            if (errors.agenda) setErrors((p) => ({ ...p, agenda: '' }));
-          }}
-          placeholder="e.g. Quarterly infrastructure review"
-          className={`${inputCls} font-medium`}
-        />
-        <FieldError message={errors.agenda} />
-      </div>
-
-      {/* When — calendar + time slots */}
+      {/* When — calendar, time slots and the duration dropdown */}
       <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -1162,33 +1055,42 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
                 <p className="text-[10px] text-slate-400 font-medium mt-0.5">{prettyDate(formData.meeting_date)}</p>
               </div>
             </div>
+
+            {/* Duration — inside "When" as a dropdown */}
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <label htmlFor="meeting-duration" className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                Duration <span className="text-rose-500">*</span>
+              </label>
+              <div className="relative">
+                <select
+                  id="meeting-duration"
+                  value={formData.duration}
+                  onChange={(e) => {
+                    setFormData((p) => ({ ...p, duration: e.target.value }));
+                    if (errors.duration) setErrors((p) => ({ ...p, duration: '' }));
+                  }}
+                  className={`appearance-none pl-3 pr-8 py-1.5 rounded-lg ring-1 text-xs font-bold bg-white outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow cursor-pointer ${
+                    errors.duration ? 'ring-rose-300 text-rose-600' : formData.duration ? 'text-slate-800 ring-slate-200' : 'text-slate-400 ring-slate-200'
+                  }`}
+                >
+                  <option value="">Select duration</option>
+                  {durationOptions.map((d) => (
+                    <option key={d} value={String(d)}>{formatDuration(d)}</option>
+                  ))}
+                </select>
+                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+              </div>
+            </div>
+
             <TimeSlotPicker value={formData.meeting_time} onChange={handleTimeChange} />
           </div>
         </div>
 
-        {(errors.date || errors.time) && (
+        {(errors.date || errors.time || errors.duration) && (
           <div className="px-4 pb-3">
-            <FieldError message={[errors.date, errors.time].filter(Boolean).join(' · ')} />
+            <FieldError message={[errors.date, errors.time, errors.duration].filter(Boolean).join(' · ')} />
           </div>
         )}
-      </div>
-
-      {/* Duration */}
-      <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 text-xs font-bold uppercase tracking-wider text-slate-400">
-          <Clock className="w-3.5 h-3.5" /> Duration
-        </div>
-        <div className="p-4 space-y-3">
-          <DurationControl
-            value={formData.duration}
-            onChange={(v) => setFormData((p) => ({ ...p, duration: v }))}
-          />
-          {formData.meeting_time && (
-            <p className="text-[11px] text-slate-400 text-center">
-              Meeting ends at <span className="font-bold text-slate-600">{to12Hour(meetingEndTime)}</span>
-            </p>
-          )}
-        </div>
       </div>
 
       {/* Where */}
@@ -1206,247 +1108,249 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
               className={`${inputCls} pl-10`}
             />
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            {PLACE_OPTIONS.map((o) => {
-              const Icon = o.icon;
-              const selected = formData.meeting_place === o.value;
-              return (
-                <button
-                  key={o.value}
-                  type="button"
-                  onClick={() => setFormData((p) => ({ ...p, meeting_place: o.value }))}
-                  className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl ring-1 transition-all text-left ${
-                    selected
-                      ? 'bg-indigo-600 text-white ring-indigo-600 shadow-md shadow-indigo-500/25'
-                      : 'bg-white text-slate-700 ring-slate-200 hover:ring-indigo-300'
-                  }`}
-                >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span className="min-w-0">
-                    <span className="block text-xs font-bold">{o.value}</span>
-                    <span className={`block text-[10px] ${selected ? 'text-indigo-100' : 'text-slate-400'}`}>{o.hint}</span>
-                  </span>
-                </button>
-              );
-            })}
+
+          {/* Meeting place — compulsory, no default */}
+          <div>
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+              Place <span className="text-rose-500">*</span>
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {PLACE_OPTIONS.map((p) => {
+                const Icon = p.icon;
+                const active = formData.meeting_place === p.value;
+                return (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() => {
+                      setFormData((prev) => ({ ...prev, meeting_place: p.value }));
+                      if (errors.meeting_place) setErrors((prev) => ({ ...prev, meeting_place: '' }));
+                    }}
+                    className={`flex items-center gap-3 p-3 rounded-xl ring-1 transition-all text-left ${
+                      active ? 'ring-2 ring-indigo-500 bg-indigo-50/70' : 'ring-slate-200 bg-white hover:ring-slate-300'
+                    }`}
+                  >
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-colors ${active ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>
+                      <Icon className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className={`text-sm font-bold ${active ? 'text-indigo-700' : 'text-slate-700'}`}>{p.value}</p>
+                      <p className="text-[11px] text-slate-400 truncate">{p.hint}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <FieldError message={errors.meeting_place} />
           </div>
         </div>
       </div>
 
-      {/* Priority */}
+      {/* Priority — compulsory, no default */}
       <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 text-xs font-bold uppercase tracking-wider text-slate-400">
-          <Flag className="w-3.5 h-3.5" /> Priority
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+            <Flag className="w-3.5 h-3.5" /> Priority <span className="text-rose-500">*</span>
+          </div>
+          {priorityInfo && (
+            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold ring-1 ${priorityInfo.bg} ${priorityInfo.text} ${priorityInfo.ring}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${priorityInfo.dot}`} />
+              {priorityInfo.value}
+            </span>
+          )}
         </div>
         <div className="p-4 grid grid-cols-3 gap-2">
           {PRIORITIES.map((p) => {
             const Icon = p.icon;
-            const selected = formData.priority === p.value;
+            const active = formData.priority === p.value;
             return (
               <button
                 key={p.value}
                 type="button"
-                onClick={() => setFormData((f) => ({ ...f, priority: p.value }))}
-                className={`flex flex-col items-center gap-1.5 py-3 rounded-xl ring-1 transition-all ${
-                  selected ? `${p.bg} ${p.ring} shadow-sm` : 'bg-white ring-slate-200 hover:ring-slate-300'
+                onClick={() => {
+                  setFormData((prev) => ({ ...prev, priority: p.value }));
+                  if (errors.priority) setErrors((prev) => ({ ...prev, priority: '' }));
+                }}
+                className={`relative overflow-hidden flex flex-col items-center gap-1.5 py-3.5 rounded-xl ring-1 transition-all ${
+                  active ? `ring-2 ${p.ring} ${p.bg}` : 'ring-slate-200 bg-white hover:ring-slate-300'
                 }`}
               >
-                <Icon className={`w-[18px] h-[18px] ${selected ? p.text : 'text-slate-400'}`} />
-                <span className={`text-xs font-bold ${selected ? p.text : 'text-slate-600'}`}>{p.value}</span>
+                {active && <span className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${p.bar}`} />}
+                <Icon className={`w-4 h-4 ${active ? p.text : 'text-slate-400'}`} />
+                <span className={`text-xs font-bold ${active ? p.text : 'text-slate-600'}`}>{p.value}</span>
+                <span className={`w-2 h-2 rounded-full ${p.dot}`} />
               </button>
             );
           })}
         </div>
+        <div className="px-4 pb-3">
+          <FieldError message={errors.priority} />
+        </div>
       </div>
 
-      {/* Live preview */}
+      {/* More details — all fields optional */}
       <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-        <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center gap-2">
-          <Calendar className="w-3.5 h-3.5 text-slate-400" />
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Preview</span>
-        </div>
-        <div className="p-4 flex gap-3.5">
-          <div className={`w-1.5 rounded-full bg-gradient-to-b ${priorityInfo.bar} shrink-0`} />
-          <div className="flex-1 min-w-0 space-y-1.5">
-            <p className="text-sm font-bold text-slate-900 truncate">{formData.agenda || 'Untitled meeting'}</p>
-            <div className="flex items-center gap-1.5 text-xs text-slate-600">
-              <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <span className="truncate">
-                {prettyDate(formData.meeting_date)}
-                {formData.meeting_time && ` · ${to12Hour(formData.meeting_time)} – ${to12Hour(meetingEndTime)}`}
-              </span>
-            </div>
-            {formData.location && (
-              <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <span className="truncate">{formData.location}</span>
-              </div>
-            )}
-            <div className="flex items-center gap-1.5 text-xs text-slate-600">
-              <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <span className="truncate">{formData.officer_name || '—'}</span>
-              {selectedOfficer && (
-                <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ring-1 shrink-0 ${typeStyle(selectedOfficer.type).badge}`}>{selectedOfficer.type}</span>
-              )}
-            </div>
-          </div>
-          <div className="shrink-0 self-start">
-            <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold ring-1 ${priorityInfo.bg} ${priorityInfo.text} ${priorityInfo.ring}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${priorityInfo.dot}`} />
-              {formData.priority}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Advanced / optional */}
-      <div className="rounded-2xl ring-1 ring-slate-200 overflow-hidden bg-white">
         <button
           type="button"
-          onClick={() => setShowAdvanced((v) => !v)}
-          className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-slate-50 transition-colors"
+          onClick={() => setShowMoreDetails((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-xs font-bold uppercase tracking-wider text-slate-400 hover:text-slate-600 transition-colors"
         >
-          <span className="text-sm font-semibold text-slate-700">More options</span>
-          <span className="text-xs text-slate-400">
-            {showAdvanced ? 'Hide' : 'Attendees, notes, invites…'}
-            <ChevronDown className={`w-4 h-4 inline ml-1.5 -mt-0.5 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
+          <span className="flex items-center gap-2">
+            <Sparkles className="w-3.5 h-3.5" /> More details
           </span>
+          <ChevronDown className={`w-4 h-4 transition-transform ${showMoreDetails ? 'rotate-180' : ''}`} />
         </button>
 
-        {showAdvanced && (
-          <div className="px-4 pb-4 pt-4 space-y-4 border-t border-slate-100 animate-in fade-in slide-in-from-top-1 duration-200">
-            {/* Attendees — tag input */}
+        {showMoreDetails && (
+          <div className="p-4 pt-3.5 border-t border-slate-100 space-y-4 animate-in fade-in duration-200">
+            {/* Status — optional */}
             <div>
-              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 mb-1.5">
-                <Users className="w-3.5 h-3.5 text-slate-400" /> Attendees
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                Status
               </label>
-              <div className="rounded-xl ring-1 ring-slate-200 focus-within:ring-2 focus-within:ring-indigo-500 p-2 flex flex-wrap gap-1.5 min-h-[42px] bg-white transition-shadow">
-                {attendeeList.map((a) => (
-                  <span key={a} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-medium">
-                    {a}
+              <div className="flex flex-wrap gap-2">
+                {STATUS_FLAGS.map((s) => {
+                  const active = formData.status_flag === s.value;
+                  return (
                     <button
+                      key={s.value}
                       type="button"
-                      onClick={() => setAttendeeList((list) => list.filter((x) => x !== a))}
-                      className="text-indigo-400 hover:text-indigo-700"
+                      onClick={() => setFormData((prev) => ({ ...prev, status_flag: s.value }))}
+                      className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold ring-1 transition-all ${
+                        active
+                          ? 'ring-2 ring-indigo-500 bg-indigo-50 text-indigo-700'
+                          : 'ring-slate-200 bg-white text-slate-600 hover:ring-slate-300'
+                      }`}
                     >
-                      <X className="w-3 h-3" />
+                      <span className={`w-2 h-2 rounded-full ${s.dot}`} />
+                      {s.value}
                     </button>
-                  </span>
-                ))}
-                <input
-                  value={attendeeInput}
-                  onChange={(e) => setAttendeeInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ',') {
-                      e.preventDefault();
-                      addAttendee(attendeeInput);
-                    } else if (e.key === 'Backspace' && !attendeeInput && attendeeList.length) {
-                      setAttendeeList((list) => list.slice(0, -1));
-                    }
-                  }}
-                  onBlur={() => attendeeInput && addAttendee(attendeeInput)}
-                  placeholder={attendeeList.length ? '' : 'Type a name and press Enter…'}
-                  className="flex-1 min-w-[120px] outline-none text-sm px-1 bg-transparent"
-                />
+                  );
+                })}
               </div>
+            </div>
+
+            {/* Meeting type — optional */}
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                Type
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {MEETING_TYPES.map((t) => {
+                  const Icon = t.icon;
+                  const active = formData.meeting_type === t.value;
+                  return (
+                    <button
+                      key={t.value}
+                      type="button"
+                      onClick={() => setFormData((prev) => ({ ...prev, meeting_type: t.value }))}
+                      className={`flex items-center gap-3 p-3 rounded-xl ring-1 transition-all text-left ${
+                        active ? 'ring-2 ring-indigo-500 bg-indigo-50/70' : 'ring-slate-200 bg-white hover:ring-slate-300'
+                      }`}
+                    >
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-colors ${active ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>
+                        <Icon className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className={`text-sm font-bold ${active ? 'text-indigo-700' : 'text-slate-700'}`}>{t.value}</p>
+                        <p className="text-[11px] text-slate-400 truncate">{t.hint}</p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Attendees */}
+            <div>
+              <label className="block text-sm font-semibold text-slate-800 mb-1.5">Attendees</label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Users className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                  <input
+                    value={attendeeInput}
+                    onChange={(e) => setAttendeeInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ',') {
+                        e.preventDefault();
+                        addAttendee(attendeeInput);
+                      }
+                    }}
+                    placeholder="Add attendee names"
+                    className={`${inputCls} pl-10`}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => addAttendee(attendeeInput)}
+                  className="px-3.5 rounded-xl ring-1 ring-slate-200 text-slate-600 hover:ring-indigo-300 hover:text-indigo-600 transition-all shrink-0"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
+              {attendeeList.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {attendeeList.map((a) => (
+                    <span key={a} className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-full bg-slate-100 text-xs font-semibold text-slate-700">
+                      {a}
+                      <button
+                        type="button"
+                        onClick={() => setAttendeeList((list) => list.filter((x) => x !== a))}
+                        className="w-4 h-4 rounded-full hover:bg-slate-300 flex items-center justify-center text-slate-500 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Notes */}
             <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1.5">Notes</label>
+              <label className="block text-sm font-semibold text-slate-800 mb-1.5">Notes</label>
               <textarea
                 value={formData.notes}
                 onChange={(e) => setFormData((p) => ({ ...p, notes: e.target.value }))}
-                rows={2}
-                placeholder="Anything worth remembering…"
-                className="w-full px-3.5 py-2.5 rounded-xl ring-1 ring-slate-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-none transition-shadow"
+                rows={3}
+                placeholder="Talking points, context, preparation…"
+                className={`${inputCls} resize-none`}
               />
             </div>
 
-            {/* Meeting type */}
+            {/* Follow-up date */}
             <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1.5">Meeting type</label>
-              <div className="flex gap-1.5">
-                {['Internal', 'External'].map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => setFormData((p) => ({ ...p, meeting_type: t }))}
-                    className={`flex-1 py-2 rounded-xl text-xs font-semibold transition-all ring-1 ${
-                      formData.meeting_type === t
-                        ? 'bg-indigo-600 text-white ring-indigo-600 shadow-sm'
-                        : 'bg-white text-slate-600 ring-slate-200 hover:ring-slate-400'
-                    }`}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Status */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1.5">Status</label>
-              <div className="flex gap-1.5 flex-wrap">
-                {STATUS_FLAGS.map((s) => (
-                  <button
-                    key={s.value}
-                    type="button"
-                    onClick={() => setFormData((p) => ({ ...p, status_flag: s.value }))}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all ring-1 ${
-                      formData.status_flag === s.value
-                        ? 'bg-slate-900 text-white ring-slate-900'
-                        : 'bg-white text-slate-600 ring-slate-200 hover:ring-slate-400'
-                    }`}
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
-                    {s.value}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Follow-up + Meet link */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 mb-1.5">
-                  <Calendar className="w-3.5 h-3.5 text-slate-400" /> Follow-up date
-                </label>
-                <input
-                  type="date"
-                  value={formData.follow_up_date}
-                  onChange={(e) => setFormData((p) => ({ ...p, follow_up_date: e.target.value }))}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 mb-1.5">
-                  <Video className="w-3.5 h-3.5 text-slate-400" /> Meet link
-                </label>
-                <input
-                  value={formData.meet_link}
-                  onChange={(e) => setFormData((p) => ({ ...p, meet_link: e.target.value }))}
-                  placeholder="https://meet.google.com/…"
-                  className={inputCls}
-                />
-              </div>
+              <label className="block text-sm font-semibold text-slate-800 mb-1.5">Follow-up date</label>
+              <input
+                type="date"
+                value={formData.follow_up_date}
+                onChange={(e) => setFormData((p) => ({ ...p, follow_up_date: e.target.value }))}
+                className={inputCls}
+              />
             </div>
 
             {/* Toggles */}
             <div className="space-y-2">
               <ToggleRow
                 icon={Mail}
-                title="Send email invite"
-                description="Notify participants by email"
+                title="Send invite"
+                description="Email the participant"
                 checked={formData.send_invite}
                 onChange={(v) => setFormData((p) => ({ ...p, send_invite: v }))}
               />
               <ToggleRow
                 icon={Calendar}
-                title="Sync with Google Calendar"
-                description="Add this meeting to your calendar"
+                title="Sync to Google Calendar"
+                description="Create a matching GCal event"
                 checked={formData.sync_gcal}
                 onChange={(v) => setFormData((p) => ({ ...p, sync_gcal: v }))}
+              />
+              <ToggleRow
+                icon={Video}
+                title="Add Google Meet"
+                description="Attach a Meet link"
+                checked={formData.add_meet}
+                onChange={(v) => setFormData((p) => ({ ...p, add_meet: v }))}
               />
             </div>
           </div>
@@ -1456,99 +1360,106 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
   );
 
   /* ================================================================
-     Render — shell
+     Render — panel shell
   ================================================================ */
 
   return (
-    <>
-      <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-sm z-40 animate-in fade-in duration-200" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex justify-end">
+      <div
+        className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px] animate-in fade-in duration-200"
+        onClick={onClose}
+      />
 
-      <div className="fixed inset-y-0 right-0 w-full max-w-2xl bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
-        {/* Header with gradient progress bar */}
-        <div className="relative px-6 pt-5 pb-4">
-          <div className="flex items-start justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/25">
-                <Calendar className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-slate-900 tracking-tight">{isEditMode ? 'Edit Meeting' : 'New Meeting'}</h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {step === 1 ? 'Step 1 of 2 — pick who you\u2019re meeting' : 'Step 2 of 2 — set the when & where'}
-                </p>
-              </div>
-            </div>
-            <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors">
-              <X className="w-5 h-5" />
-            </button>
+      <div className="relative h-full w-full sm:max-w-xl bg-white shadow-2xl flex flex-col animate-in slide-in-from-right duration-300">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-4 border-b border-slate-100">
+          <div className="min-w-0">
+            <h2 className="text-lg font-bold text-slate-900">{isEditMode ? 'Edit meeting' : 'Create a meeting'}</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Step {step} of 2 · {step === 1 ? 'Who & agenda' : 'When & where'}
+            </p>
           </div>
-          <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-slate-100">
-            <div
-              className="h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 transition-all duration-500 ease-out"
-              style={{ width: step === 1 ? '50%' : '100%' }}
-            />
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-8 h-8 -mr-1 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500 transition-colors shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
-        {/* Body */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          {submitError && (
-            <div className="mx-6 mt-5 flex items-start gap-2.5 p-3.5 rounded-xl bg-rose-50 ring-1 ring-rose-200 animate-in fade-in duration-200">
-              <AlertCircle className="w-4 h-4 mt-0.5 text-rose-600 shrink-0" />
-              <p className="text-xs leading-relaxed text-rose-700">{submitError}</p>
+        {/* Step progress */}
+        <div className="px-6 pt-4 flex items-center gap-2">
+          {[
+            { n: 1 as const, label: 'Who & agenda' },
+            { n: 2 as const, label: 'When & where' },
+          ].map((s) => (
+            <div key={s.n} className="flex-1">
+              <div className={`h-1.5 rounded-full transition-colors ${step >= s.n ? 'bg-gradient-to-r from-indigo-500 to-violet-600' : 'bg-slate-200'}`} />
+              <p className={`text-[10px] font-bold mt-1.5 ${step >= s.n ? 'text-indigo-600' : 'text-slate-400'}`}>{s.label}</p>
             </div>
-          )}
+          ))}
+        </div>
+
+        {/* Scrollable body */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {step === 1 ? renderStep1() : renderStep2()}
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 bg-white">
-          <div className="min-w-0">
-            {isEditMode ? (
-              <button
-                onClick={handleDelete}
-                disabled={loading}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-50"
-              >
-                <Trash2 className="w-3.5 h-3.5" /> Delete meeting
-              </button>
-            ) : (
-              <p className="text-[11px] text-slate-400 hidden sm:flex items-center gap-1.5 pl-1">
-                <span className="px-1.5 py-0.5 rounded border border-slate-200 text-[10px] font-semibold">Esc</span>
-                to close
-              </p>
-            )}
-          </div>
+        {/* Footer actions */}
+        <div className="border-t border-slate-100 p-4 bg-white">
+          {submitError && (
+            <div className="mb-3">
+              <FieldError message={submitError} />
+            </div>
+          )}
 
           <div className="flex items-center gap-2">
             {step === 2 && (
               <button
+                type="button"
                 onClick={() => setStep(1)}
-                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
+                className="px-4 py-2.5 rounded-xl text-sm font-bold text-slate-600 ring-1 ring-slate-200 hover:ring-slate-400 transition-all inline-flex items-center gap-1.5"
               >
                 <ArrowLeft className="w-4 h-4" /> Back
               </button>
             )}
+
+            <div className="flex-1" />
+
+            {isEditMode && (
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={loading}
+                className="px-3.5 py-2.5 rounded-xl text-sm font-bold text-rose-600 ring-1 ring-rose-200 hover:bg-rose-50 transition-all inline-flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Trash2 className="w-4 h-4" /> Delete
+              </button>
+            )}
+
             {step === 1 ? (
               <button
+                type="button"
                 onClick={goToSchedule}
-                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:brightness-110 active:scale-[0.98] transition-all"
+                className="px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-br from-indigo-500 to-violet-600 shadow-lg shadow-indigo-500/30 hover:shadow-xl hover:shadow-indigo-500/40 transition-all inline-flex items-center gap-1.5"
               >
-                Continue <ChevronRight className="w-4 h-4" />
+                Next <ChevronRight className="w-4 h-4" />
               </button>
             ) : (
               <button
+                type="button"
                 onClick={handleSubmit}
                 disabled={loading}
-                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                className="px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-br from-indigo-500 to-violet-600 shadow-lg shadow-indigo-500/30 hover:shadow-xl hover:shadow-indigo-500/40 transition-all inline-flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                {loading ? 'Saving…' : isEditMode ? 'Save changes' : 'Create meeting'}
+                {isEditMode ? 'Save changes' : 'Create meeting'}
               </button>
             )}
           </div>
         </div>
       </div>
-    </>
+    </div>
   );
-}
+} 

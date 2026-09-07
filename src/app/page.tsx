@@ -1,21 +1,16 @@
 "use client";
 
 import {
-  Activity,
-  ArrowRight,
-  CalendarDays,
-  CheckCircle2,
-  Clock3,
-  FileText,
-  RefreshCw,
-  Search,
-  ShieldCheck,
-  TrendingUp,
-  Users,
-  XCircle,
+  Activity, AlignLeft, ArrowRight, Briefcase, Calendar, CalendarDays,
+  CheckCircle2, Clock, Clock3, Edit2, FileText, Mail, MapPin, Phone,
+  RefreshCw, Search, ShieldCheck, Tag, Trash2, TrendingUp, User, Users,
+  X, XCircle,
 } from "lucide-react";
+import pb from "@/lib/pocketbase";
+import CreateMeetingPanel from "@/components/CreateMeetingPanel";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import ProtectedRoute from '@/components/auth/ProtectedRoute';
 
 type Meeting = {
   id: string;
@@ -73,6 +68,46 @@ function getMeetingTitle(meeting: Meeting) {
 function getMeetingStatus(meeting: Meeting) {
   return (meeting.status || "scheduled").toLowerCase().trim();
 }
+
+/* ── Off-canvas details (same as Meetings page) ── */
+
+const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string }> = {
+  scheduled:   { label: 'Scheduled',   dot: 'bg-blue-400',    badge: 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-600/20' },
+  completed:   { label: 'Completed',   dot: 'bg-emerald-400', badge: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20' },
+  rescheduled: { label: 'Rescheduled', dot: 'bg-amber-400',   badge: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20' },
+  cancelled:   { label: 'Cancelled',   dot: 'bg-red-400',     badge: 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/20' },
+  rejected:    { label: 'Rejected',    dot: 'bg-rose-400',    badge: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20' },
+};
+
+const getStatusKey = (meeting: any) => (meeting.status || 'scheduled').toLowerCase();
+const getStatusStyle = (key: string) =>
+  STATUS_STYLES[key] || {
+    label: key.replace(/\b\w/g, (c) => c.toUpperCase()),
+    dot: 'bg-gray-400',
+    badge: 'bg-gray-100 text-gray-600 ring-1 ring-inset ring-gray-500/20',
+  };
+
+const formatTimeDisplay = (timeString: string): string => {
+  if (!timeString || !timeString.includes(':')) return '—';
+  const [hours, minutes] = timeString.split(':');
+  const hour = parseInt(hours);
+  const modifier = hour >= 12 ? 'PM' : 'AM';
+  return `${hour % 12 || 12}:${minutes} ${modifier}`;
+};
+
+const formatDate = (dateString: any) => {
+  if (!dateString) return null;
+  try {
+    const date = new Date(dateString);
+    return {
+      day: date.getDate(),
+      month: date.toLocaleString('default', { month: 'short' }),
+      year: date.getFullYear(),
+      weekday: date.toLocaleDateString('en-US', { weekday: 'long' }),
+      full: date.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }),
+    };
+  } catch { return null; }
+};
 
 /**
  * Converts different possible date formats into a Date.
@@ -291,6 +326,31 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
 
   const [search, setSearch] = useState("");
+    // ── Off-canvas: meeting details + edit panel ──
+  const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
+  const [editPanelOpen, setEditPanelOpen] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isPanelOpen, setIsPanelOpen] = useState(false);
+  const [editingMeeting, setEditingMeeting] = useState<Meeting | null>(null);
+
+  const openMeetingDetails = (meeting: Meeting) => setSelectedMeeting(meeting);
+  const closeMeetingDetails = () => setSelectedMeeting(null);
+
+  const openEditFromDetails = (meeting: Meeting) => {
+    setSelectedMeeting(null); // close the details off-canvas
+    setEditingMeeting(meeting);
+    setEditPanelOpen(true);
+  };
+
+  const closeEditPanel = () => {
+    setEditPanelOpen(false);
+    setEditingMeeting(null);
+  };
+
+  const handleEditSuccess = () => {
+    closeEditPanel();
+    loadDashboardData(); // refresh stats + upcoming list
+  };
 
   const loadDashboardData = async () => {
     try {
@@ -481,7 +541,39 @@ export default function DashboardPage() {
     router.push(path);
   };
 
+    /* ── Off-canvas actions ── */
+  const handleEdit = () => {
+    if (!selectedMeeting) return;
+    setEditingMeeting(selectedMeeting);
+    setIsPanelOpen(true);
+    setSelectedMeeting(null);
+  };
+
+  const confirmDelete = async () => {
+    if (!selectedMeeting) return;
+    try {
+      await pb.collection('meetings').delete(selectedMeeting.id);
+      setSelectedMeeting(null);
+      setShowDeleteConfirm(false);
+      loadDashboardData();
+    } catch {
+      alert('Failed to delete meeting');
+    }
+  };
+
+  /* ESC closes delete modal first, then the off-canvas */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape' || isPanelOpen) return;
+      if (showDeleteConfirm) setShowDeleteConfirm(false);
+      else setSelectedMeeting(null);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedMeeting, showDeleteConfirm, isPanelOpen]);
+
   return (
+    <ProtectedRoute>
     <div className="min-h-screen w-full bg-[#f5f7fb]">
       {/* =====================================================
           TOP HEADER
@@ -775,9 +867,9 @@ export default function DashboardPage() {
                       return (
                         <button
                           key={meeting.id}
-                          onClick={() =>
-                            goTo(
-                              `/meetings/${meeting.id}`
+                           onClick={() =>
+                            openMeetingDetails(
+                              meeting
                             )
                           }
                           className="group flex w-full items-center gap-4 rounded-xl border border-slate-100 p-4 text-left transition hover:border-blue-200 hover:bg-blue-50/40"
@@ -1167,10 +1259,277 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* Footer spacing */}
+                {/* Footer spacing */}
         <div className="h-8" />
+
+        {/* ---------------------- Off-Canvas Details Panel ------------------------ */}
+        {selectedMeeting && (() => {
+          const dateInfo = formatDate(selectedMeeting.meeting_date || selectedMeeting.created);
+          const time = selectedMeeting.meeting_time || '';
+          const style = getStatusStyle(getStatusKey(selectedMeeting));
+          const title = getMeetingTitle(selectedMeeting);
+          const officerInitials = selectedMeeting.officer_name
+            ? selectedMeeting.officer_name.split(' ').map((w: string) => w[0]).slice(0, 2).join('').toUpperCase()
+            : '';
+          const priorityColor =
+            { high: 'text-red-600', medium: 'text-amber-600', low: 'text-emerald-600' }[String(selectedMeeting.priority || '').toLowerCase()] || 'text-gray-900';
+
+          return (
+            <>
+              <div
+                className="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-[2px] animate-in fade-in duration-300"
+                onClick={() => setSelectedMeeting(null)}
+              />
+
+              <div className="fixed inset-y-0 right-0 w-full max-w-md bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
+
+                {/* Gradient header */}
+                <div className="relative bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 px-6 pt-6 pb-5 overflow-hidden flex-shrink-0">
+                  <div className="absolute -top-20 -right-20 w-56 h-56 bg-blue-500/20 rounded-full blur-3xl" />
+                  <div className="absolute -bottom-24 -left-16 w-48 h-48 bg-indigo-400/10 rounded-full blur-3xl" />
+
+                  <div className="relative">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white/10 text-white ring-1 ring-inset ring-white/20">
+                          <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
+                          {style.label}
+                        </span>
+                        {selectedMeeting.meeting_type && (
+                          <span className="inline-flex px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white/10 text-white/70 ring-1 ring-inset ring-white/15 capitalize">
+                            {selectedMeeting.meeting_type}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => setSelectedMeeting(null)}
+                        className="p-2 -mr-2 -mt-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <h2 className="text-xl font-bold text-white leading-snug mt-3 line-clamp-3">{title}</h2>
+
+                    <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 mt-3 text-sm text-slate-300">
+                      <span className="flex items-center gap-1.5">
+                        <Calendar className="w-4 h-4 text-slate-400" />
+                        {dateInfo ? `${dateInfo.weekday}, ${dateInfo.full}` : '—'}
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <Clock className="w-4 h-4 text-slate-400" />
+                        {formatTimeDisplay(time)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Scrollable body */}
+                <div className="flex-1 overflow-y-auto min-h-0 p-5 space-y-4 bg-slate-50/70">
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-white rounded-xl border border-gray-200 p-4">
+                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
+                        <Calendar className="w-3.5 h-3.5 text-blue-500" /> Date
+                      </p>
+                      <p className="mt-1.5 text-sm font-semibold text-gray-900">{dateInfo?.full || '—'}</p>
+                    </div>
+                    <div className="bg-white rounded-xl border border-gray-200 p-4">
+                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
+                        <Clock className="w-3.5 h-3.5 text-blue-500" /> Time
+                      </p>
+                      <p className="mt-1.5 text-sm font-semibold text-gray-900">{formatTimeDisplay(time)}</p>
+                      {selectedMeeting.duration && <p className="text-xs text-gray-400 mt-0.5">{selectedMeeting.duration} min</p>}
+                    </div>
+                    <div className="bg-white rounded-xl border border-gray-200 p-4">
+                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
+                        <MapPin className="w-3.5 h-3.5 text-blue-500" /> Location
+                      </p>
+                      <p className="mt-1.5 text-sm font-semibold text-gray-900 truncate">
+                        {selectedMeeting.location || selectedMeeting.meeting_place || 'Not specified'}
+                      </p>
+                    </div>
+                    {selectedMeeting.meeting_type && (
+                      <div className="bg-white rounded-xl border border-gray-200 p-4">
+                        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
+                          <Briefcase className="w-3.5 h-3.5 text-blue-500" /> Type
+                        </p>
+                        <p className="mt-1.5 text-sm font-semibold text-gray-900 capitalize">{selectedMeeting.meeting_type}</p>
+                      </div>
+                    )}
+                    {selectedMeeting.priority && (
+                      <div className="bg-white rounded-xl border border-gray-200 p-4">
+                        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
+                          <Tag className="w-3.5 h-3.5 text-blue-500" /> Priority
+                        </p>
+                        <p className={`mt-1.5 text-sm font-semibold capitalize ${priorityColor}`}>{selectedMeeting.priority}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {(selectedMeeting.officer_name || selectedMeeting.designation || selectedMeeting.officer_type) && (
+                    <div className="bg-white rounded-xl border border-gray-200 p-4">
+                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-3">
+                        <User className="w-3.5 h-3.5 text-indigo-500" /> Officer
+                      </p>
+                      <div className="flex items-center gap-3">
+                        {officerInitials && (
+                          <div className="w-11 h-11 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-sm font-bold flex-shrink-0">
+                            {officerInitials}
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          {selectedMeeting.officer_name && (
+                            <p className="text-sm font-semibold text-gray-900 truncate">{selectedMeeting.officer_name}</p>
+                          )}
+                          {selectedMeeting.designation && (
+                            <p className="text-xs text-gray-500 truncate">{selectedMeeting.designation}</p>
+                          )}
+                        </div>
+                        {selectedMeeting.officer_type && (
+                          <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 text-[11px] font-bold rounded-md flex-shrink-0">
+                            {selectedMeeting.officer_type}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedMeeting.description && (
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                      <div className="flex items-center gap-2 px-4 py-3 bg-slate-50/80 border-b border-gray-100">
+                        <AlignLeft className="w-4 h-4 text-gray-400" />
+                        <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Description</h4>
+                      </div>
+                      <p className="px-4 py-3.5 text-sm text-gray-600 leading-relaxed whitespace-pre-wrap">
+                        {selectedMeeting.description}
+                      </p>
+                    </div>
+                  )}
+
+                  {selectedMeeting.notes && (
+                    <div className="bg-amber-50/60 rounded-xl border border-amber-200/70 overflow-hidden">
+                      <div className="flex items-center gap-2 px-4 py-3 border-b border-amber-200/70">
+                        <FileText className="w-4 h-4 text-amber-500" />
+                        <h4 className="text-xs font-bold text-amber-800/80 uppercase tracking-wider">Additional Notes</h4>
+                      </div>
+                      <p className="px-4 py-3.5 text-sm text-amber-900/80 leading-relaxed whitespace-pre-wrap">
+                        {selectedMeeting.notes}
+                      </p>
+                    </div>
+                  )}
+
+                  {(selectedMeeting.contact_number || selectedMeeting.email) && (
+                    <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+                      {selectedMeeting.contact_number && (
+                        <a href={`tel:${selectedMeeting.contact_number}`} className="flex items-center gap-3 group">
+                          <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center flex-shrink-0">
+                            <Phone className="w-4 h-4 text-emerald-600" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Phone</p>
+                            <p className="text-sm font-semibold text-gray-800 group-hover:text-emerald-600 transition-colors truncate">
+                              {selectedMeeting.contact_number}
+                            </p>
+                          </div>
+                        </a>
+                      )}
+                      {selectedMeeting.email && (
+                        <a href={`mailto:${selectedMeeting.email}`} className="flex items-center gap-3 group">
+                          <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+                            <Mail className="w-4 h-4 text-blue-600" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Email</p>
+                            <p className="text-sm font-semibold text-gray-800 group-hover:text-blue-600 transition-colors truncate">
+                              {selectedMeeting.email}
+                            </p>
+                          </div>
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between text-[11px] text-gray-400 px-1 pt-1">
+                    <span>
+                      Created {new Date(selectedMeeting.created).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    </span>
+                    <span>
+                      Updated{' '}
+                      {selectedMeeting.updated
+                        ? new Date(selectedMeeting.updated).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })
+                        : '—'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Sticky action footer */}
+                <div className="flex items-center gap-3 p-5 border-t border-gray-200 bg-white/95 backdrop-blur flex-shrink-0">
+                  <button
+                    onClick={handleEdit}
+                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl transition-colors shadow-md"
+                  >
+                    <Edit2 className="w-4 h-4" /> Edit Meeting
+                  </button>
+                  <button
+                    onClick={() => setShowDeleteConfirm(true)}
+                    title="Delete meeting"
+                    className="px-4 py-3 bg-white border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 rounded-xl transition-colors shadow-sm"
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* -------------------------- Delete Confirmation ------------------------- */}
+        {showDeleteConfirm && selectedMeeting && (
+          <>
+            <div
+              className="fixed inset-0 z-[60] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200"
+              onClick={() => setShowDeleteConfirm(false)}
+            />
+            <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+              <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-gray-100 p-6 animate-in zoom-in-95 fade-in duration-200">
+                <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto">
+                  <Trash2 className="w-6 h-6 text-red-600" />
+                </div>
+                <h3 className="mt-4 text-lg font-bold text-gray-900 text-center">Delete this meeting?</h3>
+                <p className="mt-1.5 text-sm text-gray-500 text-center leading-relaxed">
+                  <span className="font-semibold text-gray-700">"{getMeetingTitle(selectedMeeting)}"</span> will be permanently
+                  removed. This action cannot be undone.
+                </p>
+                <div className="mt-6 flex gap-3">
+                  <button
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="flex-1 px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmDelete}
+                    className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-xl transition-colors shadow-md shadow-red-600/20"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ---------------------------- Create/Edit Panel ------------------------- */}
+        <CreateMeetingPanel
+          isOpen={isPanelOpen}
+          onClose={() => { setIsPanelOpen(false); setEditingMeeting(null); }}
+          onSuccess={() => { loadDashboardData(); setIsPanelOpen(false); setEditingMeeting(null); }}
+          meetingToEdit={editingMeeting}
+        />
       </main>
     </div>
+    </ProtectedRoute>
   );
 }
 
@@ -1180,6 +1539,7 @@ export default function DashboardPage() {
 
 function LoadingRows() {
   return (
+    <ProtectedRoute>
     <div className="space-y-3">
       {[1, 2, 3].map((item) => (
         <div
@@ -1198,6 +1558,7 @@ function LoadingRows() {
         </div>
       ))}
     </div>
+    </ProtectedRoute>
   );
 }
 
@@ -1207,6 +1568,7 @@ function LoadingRows() {
 
 function EmptyMeetings() {
   return (
+    <ProtectedRoute>
     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 px-6 py-12 text-center">
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-100">
         <CalendarDays className="h-6 w-6 text-slate-400" />
@@ -1221,6 +1583,7 @@ function EmptyMeetings() {
         for a future date.
       </p>
     </div>
+    </ProtectedRoute>
   );
 }
 
@@ -1260,6 +1623,7 @@ function StatusCard({
   };
 
   return (
+    <ProtectedRoute>
     <div
       className={`rounded-xl border p-4 ${styles[type].wrapper}`}
     >
@@ -1285,6 +1649,7 @@ function StatusCard({
         </span>
       </div>
     </div>
+    </ProtectedRoute>
   );
 }
 
@@ -1304,6 +1669,7 @@ function QuickAction({
   onClick: () => void;
 }) {
   return (
+    <ProtectedRoute>
     <button
       onClick={onClick}
       className="group flex w-full items-center gap-3 rounded-xl border border-slate-100 p-3 text-left transition hover:border-blue-200 hover:bg-blue-50"
@@ -1324,5 +1690,6 @@ function QuickAction({
 
       <ArrowRight className="h-4 w-4 text-slate-300 transition group-hover:translate-x-1 group-hover:text-blue-600" />
     </button>
+    </ProtectedRoute>
   );
 }
