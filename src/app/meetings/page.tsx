@@ -4,10 +4,11 @@ import { useEffect, useState } from 'react';
 import {
   Calendar, CalendarClock, CheckCircle2, RotateCcw, XCircle,
   Clock, MapPin, Search, Plus, Edit2, Trash2, X, ChevronRight, ChevronLeft,
-  User, Briefcase, Tag, AlignLeft, FileText, Phone, Mail
+  User, Briefcase, Tag, AlignLeft, FileText, Phone, Mail, ArrowUpDown
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import CreateMeetingPanel from '@/components/CreateMeetingPanel';
+import MeetingUpdatePanel from '@/components/MeetingUpdatePanel'; // ═══ NEW ═══
 
 /* ----------------------------- Status Styling ----------------------------- */
 
@@ -21,7 +22,66 @@ const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string 
 
 const PER_PAGE_OPTIONS = [8, 12, 24, 48];
 
-/* Generates page numbers with ellipsis, e.g. [1, '...', 4, 5, 6, '...', 12] */
+/* ------------------------------- Sort options ------------------------------ */
+
+const DEFAULT_SORT = 'created-desc';
+
+const SORT_GROUPS: { group: string; options: { value: string; label: string }[] }[] = [
+  {
+    group: 'Created',
+    options: [
+      { value: 'created-desc', label: 'Newest Created' },
+      { value: 'created-asc',  label: 'Oldest Created' },
+    ],
+  },
+  {
+    group: 'Meeting Date',
+    options: [
+      { value: 'date-desc', label: 'Newest Date' },
+      { value: 'date-asc',  label: 'Oldest Date' },
+    ],
+  },
+  {
+    group: 'Meeting Time',
+    options: [
+      { value: 'time-asc',  label: 'Earliest Time' },
+      { value: 'time-desc', label: 'Latest Time' },
+    ],
+  },
+  {
+    group: 'Duration',
+    options: [
+      { value: 'duration-desc', label: 'Longest First' },
+      { value: 'duration-asc',  label: 'Shortest First' },
+    ],
+  },
+  {
+    group: 'Priority',
+    options: [
+      { value: 'priority-desc', label: 'High → Low' },
+      { value: 'priority-asc',  label: 'Low → High' },
+    ],
+  },
+  {
+    group: 'Agenda',
+    options: [
+      { value: 'agenda-asc',  label: 'A → Z' },
+      { value: 'agenda-desc', label: 'Z → A' },
+    ],
+  },
+  {
+    group: 'Officer',
+    options: [
+      { value: 'officer-asc',  label: 'A → Z' },
+      { value: 'officer-desc', label: 'Z → A' },
+    ],
+  },
+];
+
+const ALL_SORT_OPTIONS = SORT_GROUPS.flatMap((g) => g.options);
+
+const PRIORITY_WEIGHT: Record<string, number> = { high: 3, medium: 2, low: 1 };
+
 function getPaginationRange(current: number, total: number): (number | 'dots')[] {
   if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
   if (current <= 4) return [1, 2, 3, 4, 5, 'dots', total];
@@ -35,9 +95,17 @@ export default function MeetingsPage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+
+  const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [priorityFilter, setPriorityFilter] = useState<string>('all');
+
+  const [sortBy, setSortBy] = useState<string>(DEFAULT_SORT);
+
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<any>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  const [updateMeeting, setUpdateMeeting] = useState<any>(null); // ═══ NEW ═══
 
   /* Pagination state */
   const [page, setPage] = useState(1);
@@ -45,10 +113,8 @@ export default function MeetingsPage() {
 
   useEffect(() => { loadData(); }, []);
 
-  /* Reset to first page whenever search, filter, or page size changes */
-  useEffect(() => { setPage(1); }, [searchQuery, statusFilter, perPage]);
+  useEffect(() => { setPage(1); }, [searchQuery, statusFilter, typeFilter, priorityFilter, sortBy, perPage]);
 
-  /* Close panel / modal with Escape key */
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'Escape' || isPanelOpen) return;
@@ -62,7 +128,7 @@ export default function MeetingsPage() {
   async function loadData() {
     try {
       setLoading(true);
-      const meetingsData = await pb.collection('meetings').getFullList({ sort: '-meeting_date' });
+      const meetingsData = await pb.collection('meetings').getFullList({ sort: '-created_date' });
       setMeetings(meetingsData);
     } catch (error) {
       console.error('Error loading data:', error);
@@ -72,11 +138,19 @@ export default function MeetingsPage() {
   }
 
   const handleEdit = () => {
-    if (!selectedMeeting) return;
-    setEditingMeeting(selectedMeeting);
-    setIsPanelOpen(true);
-    setSelectedMeeting(null);
-  };
+  if (!selectedMeeting) return;
+  const snapshot = selectedMeeting;   // keep a copy before closing
+  setSelectedMeeting(null);           // ← closes the details popup
+  setEditingMeeting(snapshot);
+  setIsPanelOpen(true);
+};
+
+const handleOpenUpdate = () => {
+  if (!selectedMeeting) return;
+  const snapshot = selectedMeeting;
+  setSelectedMeeting(null);           // ← closes the details popup
+  setUpdateMeeting(snapshot);
+};
 
   const confirmDelete = async () => {
     if (!selectedMeeting) return;
@@ -91,6 +165,35 @@ export default function MeetingsPage() {
   };
 
   /* -------------------------------- Helpers -------------------------------- */
+
+  const dateToTime = (value: any): number => {
+    if (!value) return 0;
+    const normalized = String(value).trim().replace(' ', 'T');
+    const time = new Date(normalized).getTime();
+    return Number.isNaN(time) ? 0 : time;
+  };
+
+  const formatDateTime = (value: any): string => {
+    const ts = dateToTime(value);
+    if (!ts) return '—';
+    const date = new Date(ts);
+    return `${date.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })} · ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+  };
+
+  const meetingDateTs = (m: any) => dateToTime(m.meeting_date) || dateToTime(m.created_date);
+  const createdTs = (m: any) => dateToTime(m.created_date) || dateToTime(m.updated_date) || 0;
+
+  const timeMinutes = (m: any): number | null => {
+    const t = String(m.meeting_time || '');
+    if (!t.includes(':')) return null;
+    const [h, min] = t.split(':');
+    const hNum = parseInt(h, 10);
+    const mNum = parseInt(min, 10);
+    if (Number.isNaN(hNum) || Number.isNaN(mNum)) return null;
+    return hNum * 60 + mNum;
+  };
+
+  const priorityWeight = (m: any) => PRIORITY_WEIGHT[String(m.priority || '').toLowerCase()] || 0;
 
   const formatTimeDisplay = (timeString: string): string => {
     if (!timeString || !timeString.includes(':')) return '—';
@@ -128,24 +231,69 @@ export default function MeetingsPage() {
 
   /* ------------------------------- Filtering ------------------------------- */
 
-  const filteredMeetings = meetings.filter((meeting) => {
-    const title = getMeetingTitle(meeting).toLowerCase();
-    const matchesSearch =
-      searchQuery === '' ||
-      title.includes(searchQuery.toLowerCase()) ||
-      (meeting.location || '').toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || getStatusKey(meeting) === statusFilter;
-    return matchesSearch && matchesStatus;
-  });
+  const filteredMeetings = meetings
+    .filter((meeting) => {
+      const title = getMeetingTitle(meeting).toLowerCase();
+      const matchesSearch =
+        searchQuery === '' ||
+        title.includes(searchQuery.toLowerCase()) ||
+        (meeting.location || '').toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesStatus = statusFilter === 'all' || getStatusKey(meeting) === statusFilter;
+
+      const matchesType =
+        typeFilter === 'all' ||
+        String(meeting.meeting_type || '').toLowerCase() === typeFilter;
+
+      const matchesPriority =
+        priorityFilter === 'all' ||
+        String(meeting.priority || '').toLowerCase() === priorityFilter;
+
+      return matchesSearch && matchesStatus && matchesType && matchesPriority;
+    })
+    .sort((a: any, b: any) => {
+      switch (sortBy) {
+        case 'created-asc': return createdTs(a) - createdTs(b);
+
+        case 'date-desc': return meetingDateTs(b) - meetingDateTs(a) || createdTs(b) - createdTs(a);
+        case 'date-asc':  return meetingDateTs(a) - meetingDateTs(b) || createdTs(b) - createdTs(a);
+
+        case 'time-asc':
+        case 'time-desc': {
+          const aT = timeMinutes(a);
+          const bT = timeMinutes(b);
+          if (aT === null && bT === null) return createdTs(b) - createdTs(a);
+          if (aT === null) return 1;
+          if (bT === null) return -1;
+          const diff = sortBy === 'time-asc' ? aT - bT : bT - aT;
+          return diff !== 0 ? diff : createdTs(b) - createdTs(a);
+        }
+
+        case 'duration-desc': return (Number(b.duration) || 0) - (Number(a.duration) || 0) || createdTs(b) - createdTs(a);
+        case 'duration-asc':  return (Number(a.duration) || 0) - (Number(b.duration) || 0) || createdTs(b) - createdTs(a);
+
+        case 'priority-desc': return priorityWeight(b) - priorityWeight(a) || createdTs(b) - createdTs(a);
+        case 'priority-asc':  return priorityWeight(a) - priorityWeight(b) || createdTs(b) - createdTs(a);
+
+        case 'agenda-asc':  return getMeetingTitle(a).localeCompare(getMeetingTitle(b)) || createdTs(b) - createdTs(a);
+        case 'agenda-desc': return getMeetingTitle(b).localeCompare(getMeetingTitle(a)) || createdTs(b) - createdTs(a);
+
+        case 'officer-asc':  return String(a.officer_name || '').localeCompare(String(b.officer_name || '')) || createdTs(b) - createdTs(a);
+        case 'officer-desc': return String(b.officer_name || '').localeCompare(String(a.officer_name || '')) || createdTs(b) - createdTs(a);
+
+        default: return createdTs(b) - createdTs(a);
+      }
+    });
 
   /* ------------------------------- Pagination ------------------------------ */
 
   const totalPages = Math.max(1, Math.ceil(filteredMeetings.length / perPage));
-  const currentPage = Math.min(page, totalPages); // clamp when list shrinks
+  const currentPage = Math.min(page, totalPages);
   const startIndex = (currentPage - 1) * perPage;
   const endIndex = Math.min(startIndex + perPage, filteredMeetings.length);
   const paginatedMeetings = filteredMeetings.slice(startIndex, endIndex);
   const paginationRange = getPaginationRange(currentPage, totalPages);
+
+  const activeSortLabel = ALL_SORT_OPTIONS.find((o) => o.value === sortBy)?.label ?? 'Newest Created';
 
   /* ------------------------------ Skeleton View ----------------------------- */
 
@@ -247,40 +395,90 @@ export default function MeetingsPage() {
 
         {/* ------------------------------- Search Bar ----------------------------- */}
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 lg:p-5">
-          <div className="relative lg:max-w-md">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search by agenda, location..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-10 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+          <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3 lg:items-center">
+
+            <div className="relative flex-1 min-w-[180px] lg:max-w-md">
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search by agenda, location..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-10 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="relative">
+              <Briefcase className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+              <select
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value)}
+                className="w-full sm:w-44 pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all cursor-pointer"
               >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
+                <option value="all">All Types</option>
+                <option value="internal">Internal</option>
+                <option value="external">External</option>
+              </select>
+            </div>
+
+            <div className="relative">
+              <Tag className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+              <select
+                value={priorityFilter}
+                onChange={(e) => setPriorityFilter(e.target.value)}
+                className="w-full sm:w-44 pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all cursor-pointer"
+              >
+                <option value="all">All Priorities</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+
+            <div className="relative">
+              <ArrowUpDown className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="w-full sm:w-48 pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all cursor-pointer"
+              >
+                {SORT_GROUPS.map((g) => (
+                  <optgroup key={g.group} label={g.group}>
+                    {g.options.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 
         {/* --------------------------------- Table -------------------------------- */}
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
 
-          {/* Table header */}
           <div className="px-6 py-4 flex items-center justify-between border-b border-gray-100">
             <div className="flex items-center gap-2.5">
               <h3 className="text-sm font-bold text-gray-800">All Meetings</h3>
               <span className="px-2 py-0.5 bg-gray-100 rounded-full text-[11px] font-bold text-gray-500 tabular-nums">
                 {filteredMeetings.length}
               </span>
+              <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full text-[11px] font-bold">
+                <ArrowUpDown className="w-3 h-3" />
+                {activeSortLabel}
+              </span>
             </div>
-            {(searchQuery || statusFilter !== 'all') && (
+            {(searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all' || sortBy !== DEFAULT_SORT) && (
               <button
-                onClick={() => { setSearchQuery(''); setStatusFilter('all'); }}
+                onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); setSortBy(DEFAULT_SORT); }}
                 className="text-xs font-semibold text-blue-600 hover:text-blue-700 transition-colors"
               >
                 Clear filters
@@ -288,7 +486,6 @@ export default function MeetingsPage() {
             )}
           </div>
 
-          {/* Column headers */}
           <div className="hidden md:grid grid-cols-12 gap-4 px-6 py-3.5 bg-slate-50/80 border-b border-gray-200 text-[11px] font-bold text-gray-500 uppercase tracking-wider">
             <div className="col-span-1 text-center">Date</div>
             <div className="col-span-4">Agenda</div>
@@ -301,7 +498,6 @@ export default function MeetingsPage() {
 
           <div className="divide-y divide-gray-100">
             {paginatedMeetings.length === 0 ? (
-              /* Empty state */
               <div className="py-20 flex flex-col items-center justify-center text-center">
                 <div className="w-16 h-16 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center">
                   <CalendarClock className="w-8 h-8 text-gray-300" />
@@ -317,10 +513,18 @@ export default function MeetingsPage() {
               </div>
             ) : (
               paginatedMeetings.map((meeting) => {
-                const dateInfo = formatDate(meeting.meeting_date || meeting.created);
+                const dateInfo = formatDate(meeting.meeting_date || meeting.created_date);
                 const time = meeting.meeting_time || '';
                 const style = getStatusStyle(getStatusKey(meeting));
                 const title = getMeetingTitle(meeting);
+
+                const createdMs = dateToTime(meeting.created_date);
+                const createdDateStr = createdMs
+                  ? new Date(createdMs).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })
+                  : '—';
+                const createdTimeStr = createdMs
+                  ? new Date(createdMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+                  : '';
 
                 return (
                   <div key={meeting.id} onClick={() => setSelectedMeeting(meeting)}>
@@ -423,7 +627,6 @@ export default function MeetingsPage() {
           {/* ------------------------------- Pagination ---------------------------- */}
           {filteredMeetings.length > 0 && (
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-6 py-4 border-t border-gray-100 bg-slate-50/50">
-              {/* Results info + rows per page */}
               <div className="flex items-center gap-3 text-xs text-gray-500">
                 <p>
                   Showing <span className="font-bold text-gray-700">{startIndex + 1}–{endIndex}</span> of{' '}
@@ -444,7 +647,6 @@ export default function MeetingsPage() {
                 </div>
               </div>
 
-              {/* Page controls */}
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setPage(currentPage - 1)}
@@ -488,7 +690,7 @@ export default function MeetingsPage() {
 
         {/* ---------------------- Off-Canvas Details Panel ------------------------ */}
         {selectedMeeting && (() => {
-          const dateInfo = formatDate(selectedMeeting.meeting_date || selectedMeeting.created);
+          const dateInfo = formatDate(selectedMeeting.meeting_date || selectedMeeting.created_date);
           const time = selectedMeeting.meeting_time || '';
           const style = getStatusStyle(getStatusKey(selectedMeeting));
           const title = getMeetingTitle(selectedMeeting);
@@ -649,6 +851,28 @@ export default function MeetingsPage() {
                     </div>
                   )}
 
+                  {/* ═══ NEW: Follow-up (saved from the Update panel) — delete this block if you don't want it shown ═══ */}
+                  {(selectedMeeting.follow_up_date || selectedMeeting.follow_up_details) && (
+                    <div className="bg-indigo-50/60 rounded-xl border border-indigo-200/70 overflow-hidden">
+                      <div className="flex items-center gap-2 px-4 py-3 border-b border-indigo-200/70">
+                        <CalendarClock className="w-4 h-4 text-indigo-500" />
+                        <h4 className="text-xs font-bold text-indigo-800/80 uppercase tracking-wider">Follow-up</h4>
+                      </div>
+                      <div className="px-4 py-3.5 space-y-2">
+                        {selectedMeeting.follow_up_date && (
+                          <p className="text-sm font-semibold text-indigo-900">
+                            {formatDate(String(selectedMeeting.follow_up_date).split(' ')[0])?.full || selectedMeeting.follow_up_date}
+                          </p>
+                        )}
+                        {selectedMeeting.follow_up_details && (
+                          <p className="text-sm text-indigo-900/70 leading-relaxed whitespace-pre-wrap">
+                            {selectedMeeting.follow_up_details}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Contact info */}
                   {(selectedMeeting.contact_number || selectedMeeting.email) && (
                     <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
@@ -683,66 +907,64 @@ export default function MeetingsPage() {
 
                   {/* Metadata */}
                   <div className="flex items-center justify-between text-[11px] text-gray-400 px-1 pt-1">
-                    <span>
-                      Created {new Date(selectedMeeting.created).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}
-                    </span>
-                    <span>
-                      Updated{' '}
-                      {selectedMeeting.updated
-                        ? new Date(selectedMeeting.updated).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })
-                        : '—'}
-                    </span>
+                    <span>Created {formatDateTime(selectedMeeting.created_date)}</span>
+                    <span>Updated {formatDateTime(selectedMeeting.updated_date)}</span>
                   </div>
                 </div>
 
                 {/* Sticky action footer */}
-                <div className="flex items-center gap-3 p-5 border-t border-gray-200 bg-white/95 backdrop-blur flex-shrink-0">
-                  <button
-                    onClick={handleEdit}
-                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl transition-colors shadow-md"
-                  >
-                    <Edit2 className="w-4 h-4" /> Edit Meeting
-                  </button>
-                  <button
-                    onClick={() => setShowDeleteConfirm(true)}
-                    title="Delete meeting"
-                    className="px-4 py-3 bg-white border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 rounded-xl transition-colors shadow-sm"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
-                </div>
+<div className="flex items-center gap-3 p-5 border-t border-gray-200 bg-white/95 backdrop-blur flex-shrink-0">
+  <button
+    onClick={(e) => { e.stopPropagation(); handleOpenUpdate(); }}
+    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold rounded-xl transition-colors shadow-md shadow-blue-600/25"
+  >
+    <FileText className="w-4 h-4" /> Update
+  </button>
+  <button
+    onClick={(e) => { e.stopPropagation(); handleEdit(); }}
+    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl transition-colors shadow-md"
+  >
+    <Edit2 className="w-4 h-4" /> Edit
+  </button>
+  <button
+    onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(true); }}
+    title="Delete meeting"
+    className="px-4 py-3 bg-white border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 rounded-xl transition-colors shadow-sm"
+  >
+    <Trash2 className="w-4 h-4" />
+  </button>
+</div>
               </div>
             </>
           );
         })()}
 
-        {/* -------------------------- Delete Confirmation ------------------------- */}
+        {/* ---------------------- Delete Confirmation Modal ----------------------- */}
         {showDeleteConfirm && selectedMeeting && (
           <>
             <div
-              className="fixed inset-0 z-[60] bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200"
+              className="fixed inset-0 z-[80] bg-slate-900/50 backdrop-blur-[2px] animate-in fade-in duration-200"
               onClick={() => setShowDeleteConfirm(false)}
             />
-            <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
-              <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-gray-100 p-6 animate-in zoom-in-95 fade-in duration-200">
-                <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto">
-                  <Trash2 className="w-6 h-6 text-red-600" />
+            <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 pointer-events-none">
+              <div className="pointer-events-auto bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-in fade-in zoom-in-95 duration-200">
+                <div className="w-12 h-12 rounded-xl bg-red-50 flex items-center justify-center">
+                  <Trash2 className="w-5 h-5 text-red-600" />
                 </div>
-                <h3 className="mt-4 text-lg font-bold text-gray-900 text-center">Delete this meeting?</h3>
-                <p className="mt-1.5 text-sm text-gray-500 text-center leading-relaxed">
-                  <span className="font-semibold text-gray-700">"{getMeetingTitle(selectedMeeting)}"</span> will be permanently
-                  removed. This action cannot be undone.
+                <h3 className="mt-4 text-lg font-bold text-slate-900">Delete this meeting?</h3>
+                <p className="mt-1 text-sm text-gray-500">
+                  "{getMeetingTitle(selectedMeeting)}" will be permanently removed. This action can't be undone.
                 </p>
-                <div className="mt-6 flex gap-3">
+                <div className="mt-5 flex items-center gap-3">
                   <button
                     onClick={() => setShowDeleteConfirm(false)}
-                    className="flex-1 px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-xl transition-colors"
+                    className="flex-1 px-4 py-2.5 text-sm font-semibold text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 rounded-xl transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={confirmDelete}
-                    className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-xl transition-colors shadow-md shadow-red-600/20"
+                    className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl transition-colors shadow-md shadow-red-600/25"
                   >
                     Delete
                   </button>
@@ -752,14 +974,20 @@ export default function MeetingsPage() {
           </>
         )}
 
-        {/* ---------------------------- Create/Edit Panel ------------------------- */}
-        <CreateMeetingPanel
-          isOpen={isPanelOpen}
-          onClose={() => { setIsPanelOpen(false); setEditingMeeting(null); }}
-          onSuccess={() => { loadData(); setIsPanelOpen(false); setEditingMeeting(null); }}
-          meetingToEdit={editingMeeting}
-        />
+<CreateMeetingPanel
+  isOpen={isPanelOpen}
+  onClose={() => { setIsPanelOpen(false); setEditingMeeting(null); }}
+  onSuccess={loadData}
+  meetingToEdit={editingMeeting}
+/>
+
+<MeetingUpdatePanel
+  isOpen={!!updateMeeting}
+  meeting={updateMeeting}
+  onClose={() => setUpdateMeeting(null)}
+  onUpdated={() => loadData()}
+/>
       </div>
     </div>
   );
-} 
+}

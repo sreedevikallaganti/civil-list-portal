@@ -1,15 +1,14 @@
 'use client';
 
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, type FormEvent } from 'react';
 import {
-  X, Calendar, Clock, MapPin, Trash2, Check, Search, ChevronDown,
+  X, Calendar, CalendarDays, Clock, MapPin, Trash2, Check, Search, ChevronDown,
   ChevronLeft, ChevronRight, Loader2, Users, Mail, Phone, User,
   Sparkles, ArrowLeft, AlertCircle, RefreshCw, Building2, Flag,
-  Video, Globe, Plus, Zap, Activity, Feather, Sunrise, Sun, Moon
+  Video, Globe, Plus, Zap, Activity, Feather, Sun
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import { showToast } from '@/components/Toaster';
-import toast, { Toaster } from 'react-hot-toast';
 
 /* ================================================================
    Types
@@ -20,8 +19,8 @@ interface CreateMeetingPanelProps {
   onClose: () => void;
   onSuccess: () => void;
   meetingToEdit?: any;
-  /** Optional 'YYYY-MM-DD' — pre-fills the date when creating (e.g. calendar day click) */
   defaultDate?: string;
+  markedDates?: string[];
 }
 
 interface Officer {
@@ -49,9 +48,9 @@ const OFFICER_TYPE_STYLES: Record<string, { gradient: string; badge: string }> =
 };
 
 const PRIORITIES = [
-  { value: 'Low', icon: Feather, dot: 'bg-emerald-500', bg: 'bg-emerald-50', text: 'text-emerald-700', ring: 'ring-emerald-300', bar: 'from-emerald-400 to-teal-500' },
-  { value: 'Medium', icon: Activity, dot: 'bg-amber-500', bg: 'bg-amber-50', text: 'text-amber-700', ring: 'ring-amber-300', bar: 'from-amber-400 to-orange-500' },
-  { value: 'High', icon: Zap, dot: 'bg-rose-500', bg: 'bg-rose-50', text: 'text-rose-700', ring: 'ring-rose-300', bar: 'from-rose-400 to-red-500' },
+  { value: 'Low', icon: Feather, bg: 'bg-emerald-50', text: 'text-emerald-700', ring: 'ring-emerald-300' },
+  { value: 'Medium', icon: Activity, bg: 'bg-amber-50', text: 'text-amber-700', ring: 'ring-amber-300' },
+  { value: 'High', icon: Zap, bg: 'bg-rose-50', text: 'text-rose-700', ring: 'ring-rose-300' },
 ];
 
 const PLACE_OPTIONS = [
@@ -73,11 +72,13 @@ const STATUS_FLAGS = [
 
 const PRESET_DURATIONS = [15, 30, 45, 60, 90, 120, 180];
 
-const TIME_PERIODS = [
-  { label: 'Morning', icon: Sunrise, from: 7, to: 12 },
-  { label: 'Afternoon', icon: Sun, from: 12, to: 17 },
-  { label: 'Evening', icon: Moon, from: 17, to: 21 },
+const QUICK_TIME_SLOTS = [
+  '09:30', '10:00', '11:00', '12:00',
+  '14:00', '15:00', '16:30', '18:00',
 ];
+
+const HOUR_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+const MINUTE_OPTIONS = ['00', '05', '10', '15', '20', '25', '30', '35', '40', '45', '50', '55'];
 
 const OFFICER_EDIT_FIELDS = [
   { key: 'officer_name', label: 'Name' },
@@ -90,9 +91,7 @@ const OFFICER_EDIT_FIELDS = [
   { key: 'batch_year', label: 'Batch' },
 ];
 
-/* No field carries a default selection. Fields inside "More details"
-   (status, meeting type, …) are OPTIONAL; everything shown in the
-   main flow is compulsory.                                    */
+/* notes & follow_up_date REMOVED — managed in MeetingUpdatePanel */
 const EMPTY_FORM = {
   agenda: '',
   meeting_date: '',
@@ -121,8 +120,6 @@ const EMPTY_FORM = {
   meeting_place: '',
   status_flag: '',
   attendees: '',
-  notes: '',
-  follow_up_date: '',
   send_invite: false,
   sync_gcal: false,
   add_meet: false,
@@ -158,13 +155,20 @@ const to12Hour = (t: string) => {
   return `${hr}:${String(m).padStart(2, '0')} ${ampm}`;
 };
 
-const minutesToTime = (m: number) =>
-  `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const splitTo12 = (t: string) => {
+  if (!t) return { hour: '', minute: '00', ampm: 'AM' as 'AM' | 'PM' };
+  const [h, m] = t.split(':').map(Number);
+  return {
+    hour: String(h % 12 || 12),
+    minute: String(m).padStart(2, '0'),
+    ampm: (h >= 12 ? 'PM' : 'AM') as 'AM' | 'PM',
+  };
+};
 
-const formatSlot = (m: number) => {
-  const h = Math.floor(m / 60);
-  const hr = h % 12 === 0 ? 12 : h % 12;
-  return `${hr}:${String(m % 60).padStart(2, '0')}`;
+const to24Hour = (h12: string, min: string, ap: string) => {
+  let h = Number(h12) % 12;
+  if (ap === 'PM') h += 12;
+  return `${String(h).padStart(2, '0')}:${min}`;
 };
 
 const formatDuration = (m: number) => {
@@ -176,6 +180,41 @@ const formatDuration = (m: number) => {
 };
 
 const typeStyle = (t?: string) => OFFICER_TYPE_STYLES[t || 'Other'] ?? OFFICER_TYPE_STYLES.Other;
+
+const clampInt = (v: string, max: number) => {
+  if (v === '') return '';
+  const n = parseInt(v, 10);
+  if (isNaN(n) || n < 0) return '';
+  return String(Math.min(n, max));
+};
+
+const isPastISODate = (iso: string) => !!iso && iso < toLocalISODate(new Date());
+
+const PAST_DATE_MSG = 'The selected date has already passed. Please choose today or a future date.';
+const PAST_TIME_MSG = 'This time has already passed today. Please pick a later time.';
+
+const isTodayISO = (iso: string) => !!iso && iso === toLocalISODate(new Date());
+
+const nowHHMM = () => {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}`;
+};
+
+const isPastTimeToday = (iso: string, time: string) =>
+  !!iso && !!time && isTodayISO(iso) && time <= nowHHMM();
+
+const addDays = (d: Date, n: number) => {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+};
+
+const startOfWeekMonday = (d: Date) => {
+  const s = new Date(d);
+  s.setHours(0, 0, 0, 0);
+  s.setDate(s.getDate() - ((s.getDay() + 6) % 7));
+  return s;
+};
 
 /* ================================================================
    Small presentational pieces
@@ -190,6 +229,34 @@ function FieldError({ message }: { message?: string }) {
   );
 }
 
+function SectionLabel({ icon: Icon, text, optional }: { icon: any; text: string; optional?: boolean }) {
+  return (
+    <div className="flex items-center gap-2.5">
+      <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+        <Icon className="w-4 h-4" />
+      </div>
+      <p className="text-sm font-bold text-slate-900">{text}</p>
+      {optional && <span className="text-[10px] font-medium text-slate-400">(optional)</span>}
+    </div>
+  );
+}
+
+function SummaryPill({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-bold tabular-nums ring-1 ring-indigo-100">
+      {children}
+    </span>
+  );
+}
+
+function StepBadge({ n }: { n: number }) {
+  return (
+    <span className="w-7 h-7 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white text-xs font-bold flex items-center justify-center shadow-md shadow-indigo-500/25 ring-4 ring-indigo-50 shrink-0">
+      {n}
+    </span>
+  );
+}
+
 function ToggleRow({ icon: Icon, title, description, checked, onChange }: {
   icon: any; title: string; description: string; checked: boolean; onChange: (v: boolean) => void;
 }) {
@@ -197,10 +264,12 @@ function ToggleRow({ icon: Icon, title, description, checked, onChange }: {
     <button
       type="button"
       onClick={() => onChange(!checked)}
-      className="w-full flex items-center justify-between gap-3 p-3 rounded-xl ring-1 ring-slate-200 hover:ring-slate-300 transition-all text-left"
+      className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl ring-1 transition-all text-left bg-white ${
+        checked ? 'ring-indigo-200 bg-indigo-50/40' : 'ring-slate-200 hover:ring-slate-300'
+      }`}
     >
       <div className="flex items-center gap-3 min-w-0">
-        <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-colors ${checked ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>
+        <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-colors ${checked ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>
           <Icon className="w-4 h-4" />
         </div>
         <div className="min-w-0">
@@ -216,150 +285,362 @@ function ToggleRow({ icon: Icon, title, description, checked, onChange }: {
 }
 
 /* ================================================================
-   Premium pickers — calendar, time slots
+   WeekStrip
 ================================================================ */
+function WeekStrip({ value, onChange, markedDates = [] }: {
+  value: string; onChange: (v: string) => void; markedDates?: string[];
+}) {
+  const [mode, setMode] = useState<'week' | 'month'>('week');
+  const todayISO = toLocalISODate(new Date());
+  const marked = useMemo(() => new Set(markedDates), [markedDates]);
 
-function MiniCalendar({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const [view, setView] = useState(() => {
-    const d = value ? new Date(`${value}T00:00:00`) : new Date();
-    return { y: d.getFullYear(), m: d.getMonth() };
-  });
+  const [viewDate, setViewDate] = useState<Date>(() =>
+    value ? new Date(`${value}T00:00:00`) : new Date()
+  );
 
   useEffect(() => {
     if (!value) return;
     const d = new Date(`${value}T00:00:00`);
-    if (!isNaN(d.getTime())) setView({ y: d.getFullYear(), m: d.getMonth() });
+    if (!isNaN(d.getTime())) setViewDate(d);
   }, [value]);
 
-  const todayISO = toLocalISODate(new Date());
-  const { y, m } = view;
+  const weekStart = startOfWeekMonday(viewDate);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const canGoPrevWeek =
+    weekStart.getTime() > startOfWeekMonday(new Date()).getTime();
+  const shiftWeek = (delta: number) => {
+    if (delta < 0 && !canGoPrevWeek) return;
+    setViewDate((prev) => addDays(prev, delta * 7));
+  };
+  const monthBadge = (() => {
+    const m1 = days[0].toLocaleDateString('en', { month: 'short' }).toUpperCase();
+    const m2 = days[6].toLocaleDateString('en', { month: 'short' }).toUpperCase();
+    return m1 === m2 ? m1 : `${m1}–${m2}`;
+  })();
 
-  const firstDay = new Date(y, m, 1).getDay(); // 0 = Sunday
-  const daysInMonth = new Date(y, m + 1, 0).getDate();
-  const prevDays = new Date(y, m, 0).getDate();
+  const y = viewDate.getFullYear();
+  const mo = viewDate.getMonth();
+  const canGoPrevMonth =
+    y > new Date().getFullYear() ||
+    (y === new Date().getFullYear() && mo > new Date().getMonth());
+  const shiftMonth = (delta: number) => {
+    if (delta < 0 && !canGoPrevMonth) return;
+    setViewDate((prev) => new Date(prev.getFullYear(), prev.getMonth() + delta, 1));
+  };
+
+  const firstDow = (new Date(y, mo, 1).getDay() + 6) % 7;
+  const daysInMonth = new Date(y, mo + 1, 0).getDate();
+  const prevDays = new Date(y, mo, 0).getDate();
 
   const cells: { iso: string; day: number; inMonth: boolean }[] = [];
-  for (let i = firstDay - 1; i >= 0; i--) {
-    const d = new Date(y, m - 1, prevDays - i);
+  for (let i = firstDow - 1; i >= 0; i--) {
+    const d = new Date(y, mo - 1, prevDays - i);
     cells.push({ iso: toLocalISODate(d), day: d.getDate(), inMonth: false });
   }
   for (let day = 1; day <= daysInMonth; day++) {
-    cells.push({ iso: toLocalISODate(new Date(y, m, day)), day, inMonth: true });
+    cells.push({ iso: toLocalISODate(new Date(y, mo, day)), day, inMonth: true });
   }
-  let nextDay = 1;
+  let nd = 1;
   while (cells.length % 7 !== 0) {
-    const d = new Date(y, m + 1, nextDay++);
+    const d = new Date(y, mo + 1, nd++);
     cells.push({ iso: toLocalISODate(d), day: d.getDate(), inMonth: false });
   }
 
-  const shift = (delta: number) => {
-    const d = new Date(y, m + delta, 1);
-    setView({ y: d.getFullYear(), m: d.getMonth() });
+  const monthLabel = new Date(y, mo, 1).toLocaleDateString('en-IN', {
+    month: 'long', year: 'numeric',
+  });
+
+  const jumpToNow = () => {
+    setViewDate(new Date());
+    onChange(todayISO);
   };
 
-  const monthLabel = new Date(y, m, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
-
   return (
-    <div className="rounded-xl ring-1 ring-slate-200 bg-white p-3 w-full sm:w-[252px] shrink-0">
-      <div className="flex items-center justify-between mb-2">
-        <button type="button" onClick={() => shift(-1)} className="w-7 h-7 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500 transition-colors">
-          <ChevronLeft className="w-4 h-4" />
-        </button>
-        <p className="text-xs font-bold text-slate-800">{monthLabel}</p>
-        <button type="button" onClick={() => shift(1)} className="w-7 h-7 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500 transition-colors">
-          <ChevronRight className="w-4 h-4" />
-        </button>
-      </div>
+    <div className="rounded-2xl ring-1 ring-slate-200 bg-white p-3 shadow-sm">
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={jumpToNow}
+            title="Jump to today"
+            className="flex flex-col items-center gap-0.5 px-2 py-1 rounded-lg text-slate-700 hover:bg-slate-100 transition-colors shrink-0 active:scale-95"
+          >
+            <CalendarDays className="w-4 h-4" />
+            <span className="text-[8px] font-extrabold tracking-widest leading-none">NOW</span>
+          </button>
+          {mode === 'week' && (
+            <span className="px-2 py-0.5 rounded-lg bg-amber-50 ring-1 ring-amber-200 text-amber-700 text-[10px] font-extrabold tracking-wider shrink-0">
+              {monthBadge}
+            </span>
+          )}
+        </div>
 
-      <div className="grid grid-cols-7 mb-0.5">
-        {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
-          <div key={i} className="text-center text-[10px] font-bold text-slate-400 py-1">{d}</div>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-7 gap-y-0.5">
-        {cells.map((c) => {
-          const selected = c.iso === value;
-          const isToday = c.iso === todayISO;
-          return (
+        <div className="flex bg-slate-100 rounded-full p-1 shrink-0">
+          {([
+            { id: 'week' as const, label: 'Weekly' },
+            { id: 'month' as const, label: 'Monthly' },
+          ]).map((t) => (
             <button
-              key={c.iso}
+              key={t.id}
               type="button"
-              onClick={() => onChange(c.iso)}
-              className={`relative w-full h-8 rounded-full text-xs font-semibold flex items-center justify-center transition-all
-                ${selected
-                  ? 'bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/30 scale-105'
-                  : c.inMonth
-                    ? 'text-slate-700 hover:bg-indigo-50 hover:text-indigo-700'
-                    : 'text-slate-300 hover:text-slate-500'}`}
+              onClick={() => setMode(t.id)}
+              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${
+                mode === t.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              }`}
             >
-              {c.day}
-              {isToday && !selected && (
-                <span className="absolute bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-indigo-500" />
-              )}
+              {t.label}
             </button>
-          );
-        })}
+          ))}
+        </div>
+
+        <div className="w-[76px] hidden sm:block" />
       </div>
+
+      {mode === 'week' ? (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => shiftWeek(-1)}
+            disabled={!canGoPrevWeek}
+            title="Previous week"
+            className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+              canGoPrevWeek ? 'hover:bg-slate-100 text-slate-500 active:scale-90' : 'text-slate-300 cursor-not-allowed'
+            }`}
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
+          <div className="flex-1 grid grid-cols-7 gap-0.5">
+            {days.map((d) => {
+              const iso = toLocalISODate(d);
+              const selected = iso === value;
+              const isToday = iso === todayISO;
+              const isPast = iso < todayISO;
+              const hasMark = marked.has(iso);
+              return (
+                <button
+                  key={iso}
+                  type="button"
+                  disabled={isPast}
+                  onClick={() => onChange(iso)}
+                  className={`flex flex-col items-center gap-1 py-2 px-0.5 rounded-2xl transition-all
+                    ${selected
+                      ? 'bg-slate-900 shadow-lg shadow-slate-900/20 scale-[1.04]'
+                      : isPast
+                        ? 'cursor-not-allowed'
+                        : 'hover:bg-slate-100 active:scale-95'}`}
+                >
+                  <span className={`text-[10px] font-semibold ${
+                    selected ? 'text-slate-300' : isPast ? 'text-slate-300' : 'text-slate-400'
+                  }`}>
+                    {d.toLocaleDateString('en', { weekday: 'short' })}
+                  </span>
+                  <span className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm font-bold ${
+                    selected
+                      ? 'bg-white/10 text-white'
+                      : isPast
+                        ? 'text-slate-300'
+                        : isToday
+                          ? 'text-indigo-600 font-extrabold'
+                          : 'text-slate-800'
+                  }`}>
+                    {d.getDate()}
+                  </span>
+                  <span className="h-1 flex items-center justify-center">
+                    {hasMark && (
+                      <span className={`w-1 h-1 rounded-full ${selected ? 'bg-amber-300' : 'bg-amber-400'}`} />
+                    )}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => shiftWeek(1)}
+            title="Next week"
+            className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 hover:bg-slate-100 text-slate-500 transition-colors active:scale-90"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      ) : (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <button
+              type="button"
+              onClick={() => shiftMonth(-1)}
+              disabled={!canGoPrevMonth}
+              className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${
+                canGoPrevMonth ? 'hover:bg-slate-100 text-slate-500 active:scale-90' : 'text-slate-300 cursor-not-allowed'
+              }`}
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <p className="text-xs font-bold text-slate-800">{monthLabel}</p>
+            <button
+              type="button"
+              onClick={() => shiftMonth(1)}
+              className="w-7 h-7 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500 transition-colors active:scale-90"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-7 mb-0.5">
+            {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
+              <div key={i} className="text-center text-[10px] font-bold text-slate-400 py-1">{d}</div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-7 gap-y-0.5">
+            {cells.map((c) => {
+              const selected = c.iso === value;
+              const isToday = c.iso === todayISO;
+              const isPast = c.iso < todayISO;
+              const hasMark = marked.has(c.iso);
+              return (
+                <button
+                  key={c.iso}
+                  type="button"
+                  disabled={isPast && !selected}
+                  onClick={() => { if (isPast) return; onChange(c.iso); }}
+                  className={`relative w-full h-9 rounded-xl text-xs font-bold flex items-center justify-center transition-all active:scale-90
+                    ${selected
+                      ? 'bg-slate-900 text-white shadow-md shadow-slate-900/25'
+                      : isPast
+                        ? 'text-slate-300/70 cursor-not-allowed'
+                        : isToday
+                          ? 'text-indigo-600 ring-1 ring-indigo-200 hover:bg-indigo-50'
+                          : c.inMonth
+                            ? 'text-slate-700 hover:bg-slate-100'
+                            : 'text-slate-300 hover:text-slate-500'}`}
+                >
+                  {c.day}
+                  {hasMark && !selected && (
+                    <span className="absolute bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-amber-400" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function TimeSlotPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const listRef = useRef<HTMLDivElement>(null);
+/* ================================================================
+   TimeSlotPicker
+================================================================ */
+
+function TimeSlotPicker({ value, onChange, meetingDate }: {
+  value: string; onChange: (v: string) => void; meetingDate: string;
+}) {
+  const [hour, setHour] = useState(() => splitTo12(value).hour);
+  const [minute, setMinute] = useState(() => splitTo12(value).minute);
+  const [ampm, setAmpm] = useState<'AM' | 'PM'>(() => splitTo12(value).ampm);
 
   useEffect(() => {
-    if (!value || !listRef.current) return;
-    const el = listRef.current.querySelector(`[data-slot="${value}"]`);
-    el?.scrollIntoView({ block: 'nearest' });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const p = splitTo12(value);
+    setHour(p.hour);
+    setMinute(p.minute);
+    setAmpm(p.ampm);
+  }, [value]);
+
+  const isOptionPast = (h: string, m: string, ap: string) =>
+    isPastTimeToday(meetingDate, to24Hour(h, m, ap));
+
+  const firstAvailableMinute = (h: string, ap: string) =>
+    MINUTE_OPTIONS.find((m) => !isOptionPast(h, m, ap)) ?? '';
+
+  const pickHour = (h: string) => {
+    setHour(h);
+    if (!h) return;
+    let m = minute;
+    if (isOptionPast(h, m, ampm)) {
+      m = firstAvailableMinute(h, ampm);
+      setMinute(m || '00');
+    }
+    if (m && !isOptionPast(h, m, ampm)) onChange(to24Hour(h, m, ampm));
+  };
+
+  const pickMinute = (m: string) => {
+    setMinute(m);
+    if (!hour) return;
+    if (!isOptionPast(hour, m, ampm)) onChange(to24Hour(hour, m, ampm));
+  };
+
+  const pickAmpm = (ap: 'AM' | 'PM') => {
+    setAmpm(ap);
+    if (!hour) return;
+    let m = minute;
+    if (isOptionPast(hour, m, ap)) {
+      m = firstAvailableMinute(hour, ap);
+      if (!m) { setHour(''); setMinute('00'); return; }
+      setMinute(m);
+    }
+    onChange(to24Hour(hour, m, ap));
+  };
+
+  const visibleSlots = QUICK_TIME_SLOTS.filter((t) => !isPastTimeToday(meetingDate, t));
+
+  const selectCls = 'bg-transparent text-xs font-bold text-slate-700 outline-none cursor-pointer py-1 px-1';
 
   return (
-    <div className="space-y-3 min-w-0">
-      <div ref={listRef} className="max-h-52 overflow-y-auto pr-1 space-y-3">
-        {TIME_PERIODS.map((p) => {
-          const slots: number[] = [];
-          for (let h = p.from; h < p.to; h++) slots.push(h * 60, h * 60 + 30);
-          const Icon = p.icon;
-          return (
-            <div key={p.label}>
-              <div className="flex items-center gap-1.5 mb-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                <Icon className="w-3 h-3" /> {p.label}
-              </div>
-              <div className="grid grid-cols-4 gap-1.5">
-                {slots.map((m) => {
-                  const t = minutesToTime(m);
-                  const selected = value === t;
-                  return (
-                    <button
-                      key={t}
-                      data-slot={t}
-                      type="button"
-                      onClick={() => onChange(t)}
-                      className={`py-1.5 rounded-lg text-xs font-bold tabular-nums transition-all
-                        ${selected
-                          ? 'bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/30 scale-[1.04]'
-                          : 'bg-slate-50 text-slate-600 ring-1 ring-slate-200/70 hover:ring-indigo-300 hover:text-indigo-700 hover:bg-indigo-50/50'}`}
-                    >
-                      {formatSlot(m)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+    <div className="flex-1 min-w-0 space-y-2.5">
+      {visibleSlots.length > 0 && (
+        <div className="grid grid-cols-3 gap-1.5">
+          {visibleSlots.map((t) => {
+            const selected = value === t;
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => onChange(t)}
+                className={`py-2.5 rounded-xl text-[11px] font-bold tabular-nums whitespace-nowrap transition-all active:scale-95
+                  ${selected
+                    ? 'bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/30 scale-[1.02]'
+                    : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:ring-indigo-300 hover:text-indigo-700 hover:bg-indigo-50/50 hover:-translate-y-px'}`}
+              >
+                {to12Hour(t)}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
-      <div className="flex items-center justify-between pt-2.5 border-t border-slate-100">
-        <span className="text-[11px] font-medium text-slate-400">Need a different time?</span>
-        <input
-          type="time"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="px-2.5 py-1.5 rounded-lg ring-1 ring-slate-200 text-xs font-bold text-slate-700 bg-white outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow"
-        />
+      <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-slate-100">
+        <span className="text-[11px] font-medium text-slate-400 shrink-0">Different time?</span>
+        <div className="flex items-center rounded-xl bg-white ring-1 ring-slate-200 p-1 shadow-sm focus-within:ring-2 focus-within:ring-indigo-500 transition-shadow">
+          <select value={hour} onChange={(e) => pickHour(e.target.value)} aria-label="Hour" className={selectCls}>
+            <option value="">HH</option>
+            {HOUR_OPTIONS.map((h) => (
+              <option key={h} value={h} disabled={firstAvailableMinute(h, ampm) === ''}>{h}</option>
+            ))}
+          </select>
+          <span className="text-xs font-bold text-slate-300">:</span>
+          <select value={minute} onChange={(e) => pickMinute(e.target.value)} aria-label="Minute" className={selectCls}>
+            {MINUTE_OPTIONS.map((m) => (
+              <option key={m} value={m} disabled={!!hour && isOptionPast(hour, m, ampm)}>{m}</option>
+            ))}
+          </select>
+          <div className="flex rounded-lg bg-slate-100 p-0.5 ml-1">
+            {(['AM', 'PM'] as const).map((ap) => (
+              <button
+                key={ap}
+                type="button"
+                onClick={() => pickAmpm(ap)}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-bold transition-all ${
+                  ampm === ap ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                {ap}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -369,7 +650,7 @@ function TimeSlotPicker({ value, onChange }: { value: string; onChange: (v: stri
    Main component
 ================================================================ */
 
-export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meetingToEdit, defaultDate }: CreateMeetingPanelProps) {
+export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meetingToEdit, defaultDate, markedDates }: CreateMeetingPanelProps) {
   const [step, setStep] = useState<1 | 2>(1);
   const [loading, setLoading] = useState(false);
   const [officerLoading, setOfficerLoading] = useState(false);
@@ -384,6 +665,10 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
   const [attendeeInput, setAttendeeInput] = useState('');
   const [attendeeList, setAttendeeList] = useState<string[]>([]);
 
+  const [isCustomMode, setIsCustomMode] = useState(false);
+  const [customHours, setCustomHours] = useState('');
+  const [customMinutes, setCustomMinutes] = useState('');
+
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [formData, setFormData] = useState(EMPTY_FORM);
@@ -393,6 +678,33 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
 
   const isEditMode = !!meetingToEdit;
   const inputCls = 'w-full px-3.5 py-2.5 rounded-xl ring-1 ring-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 outline-none transition-shadow focus:ring-2 focus:ring-indigo-500';
+
+  const miniNumCls = 'w-14 px-2 py-1.5 rounded-lg ring-1 ring-slate-200 bg-white text-sm font-bold text-slate-800 text-center outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow tabular-nums';
+
+  const dateMarks = useMemo(() => {
+    const s = new Set<string>(markedDates ?? []);
+    if (meetingToEdit?.meeting_date) {
+      const iso = String(meetingToEdit.meeting_date).slice(0, 10);
+      if (iso) s.add(iso);
+    }
+    return Array.from(s);
+  }, [markedDates, meetingToEdit]);
+
+  /* ═══════════════ FIX 1: populate ONLY once per record ═══════════════
+     Old code: effect depended on the whole `meetingToEdit` object. Every
+     parent re-render / refetch created a NEW object → effect re-ran →
+     populateForEdit() → setStep(1) → user snapped back to step 1.
+     Fix: depend on the record ID + a ref guard. Populate only fires when
+     the panel opens or the user switches to a DIFFERENT meeting. */
+  const lastLoadedIdRef = useRef<string | null>(null);
+  const editingId: string | null = meetingToEdit?.id ?? null;
+
+  /* ═══════════════ FIX 2: mirror `step` into a ref ═══════════════
+     handleSubmit reads stepRef so it can never act on a stale closure.
+     The ref is synced ONLY here — never set it manually in handleContinue,
+     otherwise a mis-typed submit button could save on step 1. */
+  const stepRef = useRef<1 | 2>(1);
+  useEffect(() => { stepRef.current = step; }, [step]);
 
   /* ---------------- data loading ---------------- */
 
@@ -432,17 +744,30 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
   /* ---------------- lifecycle ---------------- */
 
   useEffect(() => {
-    if (!isOpen) return;
-    if (meetingToEdit) {
-      populateForEdit(meetingToEdit);
-    } else {
-      resetForm();
-      if (defaultDate) {
-        setFormData((prev) => ({ ...prev, meeting_date: defaultDate, meeting_time: prev.meeting_time || suggestTime(defaultDate) }));
-      }
+    if (!isOpen) {
+      lastLoadedIdRef.current = null; // reset so reopening repopulates fresh
+      return;
     }
-    fetchOfficers();
-  }, [isOpen, meetingToEdit, defaultDate]);
+    if (editingId) {
+      // Only populate when switching to a DIFFERENT meeting — never on re-render
+      if (lastLoadedIdRef.current !== editingId) {
+        populateForEdit(meetingToEdit);
+        lastLoadedIdRef.current = editingId;
+      }
+    } else if (lastLoadedIdRef.current !== 'create') {
+      resetForm();
+      if (defaultDate && !isPastISODate(defaultDate)) {
+        setFormData((prev) => ({ ...prev, meeting_date: defaultDate }));
+      }
+      lastLoadedIdRef.current = 'create';
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editingId]);
+
+  // Officers fetch is a SEPARATE effect so it can never re-trigger populate
+  useEffect(() => {
+    if (isOpen) fetchOfficers();
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -452,25 +777,44 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
 
   useEffect(() => {
     if (!isOpen) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [isOpen, onClose]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const original = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = original; };
+  }, [isOpen]);
+
   /* ---------------- edit / reset ---------------- */
 
-  function populateForEdit(m: any) {
-    const rawDate: string = m.meeting_date || '';
-    let formattedDate = '';
-    let formattedTime = '';
-    if (rawDate) {
-      formattedDate = rawDate.split(' ')[0] || rawDate.split('T')[0];
-      const timePart = rawDate.split(' ')[1] || rawDate.split('T')[1];
-      if (timePart) formattedTime = timePart.substring(0, 5);
+  const syncDurationUI = (durationValue: string) => {
+    const n = Number(durationValue);
+    if (durationValue && n > 0 && !PRESET_DURATIONS.includes(n)) {
+      setIsCustomMode(true);
+      setCustomHours(String(Math.floor(n / 60)));
+      setCustomMinutes(String(n % 60));
+    } else {
+      setIsCustomMode(false);
+      setCustomHours('');
+      setCustomMinutes('');
     }
-    const followUp = m.follow_up_date ? String(m.follow_up_date).split(' ')[0] : '';
+  };
+
+  function populateForEdit(m: any) {
+    /* ═══════════════ FIX 3: robust datetime parsing ═══════════════
+       Old code: rawDate.split(' ')[0] — for "2025-01-15T10:30:00.000Z"
+       (no space) it returned the WHOLE string as the date.
+       slice() works for every format PocketBase uses:
+         "2025-01-15"               → date only
+         "2025-01-15T10:30:00.000Z" → date + "10:30"
+         "2025-01-15 10:30:00.000Z" → date + "10:30"                 */
+    const rawDate: string = m.meeting_date || '';
+    const formattedDate = rawDate ? rawDate.slice(0, 10) : '';
+    const formattedTime = rawDate && rawDate.length > 10 ? rawDate.slice(11, 16) : '';
 
     let attendeesArr: string[] = [];
     if (m.attendees) {
@@ -510,8 +854,6 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
       meeting_type: m.meeting_type || '',
       meeting_place: m.meeting_place || '',
       status_flag: m.status_flag || '',
-      notes: m.notes || '',
-      follow_up_date: followUp,
       send_invite: Boolean(m.send_invite),
       sync_gcal: Boolean(m.sync_gcal),
       add_meet: Boolean(m.add_meet),
@@ -520,6 +862,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
       gcal_event_id: m.gcal_event_id || '',
       gcal_link: m.gcal_link || '',
     });
+    syncDurationUI(String(m.duration ?? ''));
     setAttendeeList(attendeesArr);
     setAttendeeInput('');
 
@@ -541,7 +884,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
       setSelectedOfficer(null);
     }
     setShowOfficerEdit(false);
-    setShowMoreDetails(Boolean(m.notes || attendeesArr.length || m.meet_link || m.follow_up_date || m.send_invite || m.sync_gcal));
+    setShowMoreDetails(Boolean(m.meeting_type || m.status_flag || attendeesArr.length || m.meet_link || m.gcal_link || m.send_invite || m.sync_gcal || m.add_meet));
     setErrors({});
     setSubmitError(null);
     setStep(1);
@@ -559,6 +902,7 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
     setAttendeeInput('');
     setShowMoreDetails(false);
     setShowOfficerEdit(false);
+    syncDurationUI('');
     setErrors({});
     setSubmitError(null);
     setStep(1);
@@ -581,26 +925,11 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
     });
   }, [officers, officerSearch, typeFilter]);
 
-  const meetingEndTime = useMemo(() => {
-    if (!formData.meeting_time || !formData.duration) return '';
-    const [h, m] = formData.meeting_time.split(':').map(Number);
-    const total = (h * 60 + m + (Number(formData.duration) || 30)) % (24 * 60);
-    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-  }, [formData.meeting_time, formData.duration]);
-
-  /* Duration dropdown options — presets + the current value (edit mode
-     may hold a non-preset duration, keep it selectable) */
-  const durationOptions = useMemo(() => {
-    const current = Number(formData.duration);
-    const list = [...PRESET_DURATIONS];
-    if (current > 0 && !list.includes(current)) list.push(current);
-    return list.sort((a, b) => a - b);
-  }, [formData.duration]);
-
   const todayISO = toLocalISODate(new Date());
   const tomorrowISO = toLocalISODate(new Date(Date.now() + 86400000));
 
-  const priorityInfo = PRIORITIES.find((p) => p.value === formData.priority);
+  const customTotal =
+    (parseInt(customHours, 10) || 0) * 60 + (parseInt(customMinutes, 10) || 0);
 
   /* ---------------- handlers ---------------- */
 
@@ -640,826 +969,843 @@ export default function CreateMeetingPanel({ isOpen, onClose, onSuccess, meeting
     setTimeout(() => searchRef.current?.focus(), 50);
   };
 
-  const suggestTime = (dateStr: string) => {
-    if (dateStr === todayISO) {
-      const now = new Date();
-      const total = now.getHours() * 60 + now.getMinutes();
-      const next = Math.floor(total / 30) * 30 + 30;
-      return `${String(Math.floor(next / 60) % 24).padStart(2, '0')}:${String(next % 60).padStart(2, '0')}`;
-    }
-    return '10:00';
-  };
-
-  const applyQuickDate = (offset: number) => {
-    const d = new Date();
-    d.setDate(d.getDate() + offset);
-    const dateStr = toLocalISODate(d);
-    setFormData((prev) => ({
-      ...prev,
-      meeting_date: dateStr,
-      meeting_time: prev.meeting_time || suggestTime(dateStr),
-    }));
-    setErrors((p) => ({ ...p, date: '', time: '' }));
-  };
+  const handleOfficerField = (key: string, v: string) =>
+    setFormData((prev) => ({ ...prev, [key]: v }));
 
   const handleDateChange = (value: string) => {
-    setFormData((prev) => ({
-      ...prev,
-      meeting_date: value,
-      meeting_time: value ? prev.meeting_time || suggestTime(value) : prev.meeting_time,
+    if (value && isPastISODate(value) && value !== formData.meeting_date) {
+      setErrors((p) => ({ ...p, date: PAST_DATE_MSG }));
+      return;
+    }
+    setFormData((prev) => ({ ...prev, meeting_date: value }));
+    setErrors((p) => ({
+      ...p,
+      date: '',
+      time: isPastTimeToday(value, formData.meeting_time) ? PAST_TIME_MSG : '',
     }));
-    setErrors((p) => ({ ...p, date: '' }));
   };
 
   const handleTimeChange = (value: string) => {
     setFormData((prev) => ({ ...prev, meeting_time: value }));
-    setErrors((p) => ({ ...p, time: '' }));
+    setErrors((p) => ({
+      ...p,
+      time: isPastTimeToday(formData.meeting_date, value) ? PAST_TIME_MSG : '',
+    }));
   };
 
-  const addAttendee = (name: string) => {
-    const trimmed = name.trim().replace(/,$/, '');
-    if (trimmed && !attendeeList.includes(trimmed)) {
-      setAttendeeList((list) => [...list, trimmed]);
+  const handlePresetDuration = (minutes: number) => {
+    setIsCustomMode(false);
+    setCustomHours('');
+    setCustomMinutes('');
+    setFormData((prev) => ({ ...prev, duration: String(minutes) }));
+    if (errors.duration) setErrors((p) => ({ ...p, duration: '' }));
+  };
+
+  const handleOpenCustom = () => {
+    const n = Number(formData.duration);
+    if (n > 0 && !PRESET_DURATIONS.includes(n)) {
+      setCustomHours(String(Math.floor(n / 60)));
+      setCustomMinutes(String(n % 60));
+    } else {
+      setCustomHours('');
+      setCustomMinutes('');
     }
+    setIsCustomMode(true);
+  };
+
+  const handleCustomDuration = (hours: string, minutes: string) => {
+    setCustomHours(hours);
+    setCustomMinutes(minutes);
+    const h = parseInt(hours, 10) || 0;
+    const m = parseInt(minutes, 10) || 0;
+    const total = h * 60 + m;
+    setFormData((prev) => ({ ...prev, duration: total > 0 ? String(total) : '' }));
+    if (total > 0 && errors.duration) setErrors((p) => ({ ...p, duration: '' }));
+  };
+
+  const handleCustomDone = () => {
+    if (customTotal <= 0) {
+      setIsCustomMode(false);
+      setCustomHours('');
+      setCustomMinutes('');
+      setFormData((prev) => ({ ...prev, duration: '' }));
+      return;
+    }
+    setIsCustomMode(false);
+  };
+
+  const addAttendee = () => {
+    const v = attendeeInput.trim();
+    if (!v) return;
+    if (!attendeeList.includes(v)) setAttendeeList((p) => [...p, v]);
     setAttendeeInput('');
   };
 
-  /* Step 1 owns the agenda — validate it before moving on */
-  const goToSchedule = () => {
+  const removeAttendee = (a: string) =>
+    setAttendeeList((p) => p.filter((x) => x !== a));
+
+  /* navigation — step 1 requires officer + agenda */
+  const handleContinue = () => {
     const e: Record<string, string> = {};
-    if (!selectedOfficer) e.officer = 'Please select a participant to continue';
-    if (!formData.agenda.trim()) e.agenda = 'Add a short agenda for this meeting';
-    setErrors(e);
-    if (Object.keys(e).length > 0) return;
+    if (!formData.officer_name.trim()) e.officer = 'Please select who the meeting is with';
+    if (!formData.agenda.trim()) e.agenda = 'Agenda is required';
+    if (Object.keys(e).length) { setErrors(e); return; }
+    setErrors({});
     setStep(2);
+    scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleSubmit = async () => {
-    // Step-1 requirements — bounce back if anything is missing
-    if (!selectedOfficer || !formData.agenda.trim()) {
-      setStep(1);
-      setErrors({
-        ...(selectedOfficer ? {} : { officer: 'Please select a participant to continue' }),
-        ...(formData.agenda.trim() ? {} : { agenda: 'Add a short agenda for this meeting' }),
-      });
+  /* ---------------- submit (with automations) ---------------- */
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (loading) return;
+
+    /* ═══════════════ FIX 2 (hard lock) ═══════════════
+       Saving is ONLY allowed from step 2. If a submit event somehow fires
+       on step 1 (Enter key in an input, mis-typed button), treat it as
+       "Continue" — it can NEVER save from step 1. This is why the edit
+       mode was saving on Continue before: in edit mode every field is
+       pre-filled, so validation passed and it saved immediately. */
+    if (stepRef.current !== 2) {
+      handleContinue();
       return;
     }
 
-    // Main-flow fields are compulsory (no defaults).
-    // Fields inside "More details" (status, type, …) are optional.
-    const e: Record<string, string> = {};
-    if (!formData.meeting_date) e.date = 'Pick a date';
-    if (!formData.meeting_time) e.time = 'Pick a time';
-    if (!formData.duration) e.duration = 'Select a duration';
-    if (!formData.meeting_place) e.meeting_place = 'Choose the meeting place';
-    if (!formData.priority) e.priority = 'Select a priority';
-    setErrors(e);
-    if (Object.keys(e).length > 0) return;
+    const nextErrors: Record<string, string> = {};
+    if (!formData.officer_name.trim()) nextErrors.officer = 'Please select who the meeting is with';
+    if (!formData.agenda.trim()) nextErrors.agenda = 'Agenda is required';
+    if (!formData.meeting_date) nextErrors.date = 'Please pick a date';
+    if (!formData.meeting_time) nextErrors.time = 'Please pick a time';
+    if (Object.keys(nextErrors).length) { setErrors(nextErrors); return; }
+
+    setLoading(true);
+    setSubmitError(null);
 
     try {
-      setLoading(true);
-      setSubmitError(null);
-
-      const formattedDateTime = `${formData.meeting_date} ${formData.meeting_time}:00.000Z`;
-
-      const meetingData: any = {
-        agenda: formData.agenda,
-        meeting_date: formattedDateTime,
-        meeting_time: formData.meeting_time,
-        duration: Number(formData.duration) || 30,
-        location: formData.location || '',
-        status: formData.status || 'Scheduled',
-        officer_type: formData.officer_type || '',
-        officer_name: formData.officer_name || '',
-        officer_id: formData.officer_id || '',
-        designation: formData.designation || '',
-        department: formData.department || '',
-        officer_category: formData.officer_category || '',
-        contact_number: formData.contact_number || '',
-        email: formData.email || '',
-        address: formData.address || '',
-        website: formData.website || '',
-        cadre: formData.cadre || '',
-        state: formData.state || '',
-        batch_year: formData.batch_year || '',
-        current_position: formData.current_position || '',
-        previous_postings: formData.previous_postings || '',
-        date_of_birth: formData.date_of_birth || '',
-        priority: formData.priority,
-        meeting_type: formData.meeting_type || '',
-        meeting_place: formData.meeting_place,
-        status_flag: formData.status_flag || '',
-        attendees: { attendees: attendeeList },
-        notes: formData.notes || '',
-        follow_up_date: formData.follow_up_date ? `${formData.follow_up_date} 00:00:00.000Z` : null,
-        send_invite: Boolean(formData.send_invite),
-        sync_gcal: Boolean(formData.sync_gcal),
-        add_meet: Boolean(formData.add_meet),
-        created_by: formData.created_by || '',
-        meet_link: formData.meet_link || '',
-        gcal_event_id: formData.gcal_event_id || '',
-        gcal_link: formData.gcal_link || '',
-        documents: [],
-        mom_documents: [],
-      };
-
-      if (isEditMode && meetingToEdit) {
-        await pb.collection('meetings').update(meetingToEdit.id, meetingData);
-        showToast('Meeting updated successfully', formData.agenda);
-      } else {
-        await pb.collection('meetings').create(meetingData);
-        showToast('Meeting created successfully', formData.agenda);
+      const payload: Record<string, any> = { ...formData, attendees: attendeeList };
+      if (!isEditMode) {
+        const auth: any = (pb as any).authStore;
+        payload.created_by = auth?.record?.id || auth?.model?.id || '';
       }
 
-      setLoading(false);
+      const record = isEditMode
+        ? await pb.collection('meetings').update(meetingToEdit.id, payload)
+        : await pb.collection('meetings').create(payload);
+
+      /* ── AUTOMATIONS: the toggles actually do things now ── */
+      const wantsInvite = formData.send_invite && !!formData.email;
+      const wantsMeet = formData.add_meet;
+      const wantsCalendar = formData.sync_gcal;
+      const needsGoogle = wantsInvite || wantsMeet || wantsCalendar;
+
+      if (needsGoogle) {
+        try {
+          const res = await fetch('/api/google', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              meetingId: record.id,
+              gcalEventId: record.gcal_event_id || '',
+              existingMeetLink: record.meet_link || '',
+              agenda: formData.agenda,
+              date: formData.meeting_date,
+              time: formData.meeting_time,
+              duration: Number(formData.duration) || 30,
+              location: formData.location,
+              officerName: formData.officer_name,
+              officerEmail: formData.email,
+              includeMeet: wantsMeet,
+              sendInvite: wantsInvite,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Automation failed');
+
+          const patch: Record<string, any> = {};
+          if (data.meetLink) patch.meet_link = data.meetLink;
+          if (data.eventId) patch.gcal_event_id = data.eventId;
+          if (data.htmlLink) patch.gcal_link = data.htmlLink;
+          if (Object.keys(patch).length) {
+            await pb.collection('meetings').update(record.id, patch);
+          }
+        } catch (err: any) {
+          showToast(`Meeting saved, but automation failed: ${err.message}`, 'error');
+          onSuccess();
+          onClose();
+          return;
+        }
+      }
+
+      showToast(isEditMode ? 'Meeting updated' : 'Meeting created', 'success');
       onSuccess();
       onClose();
-
-    } catch (error: any) {
-      console.error('Meeting save failed:', error?.response?.data || error);
-      setLoading(false);
-
-      let msg = 'Something went wrong while saving. Please try again.';
-      const fieldErrors = error?.response?.data?.data;
-      if (fieldErrors && typeof fieldErrors === 'object') {
-        msg = 'Could not save — ' + Object.entries(fieldErrors).map(([k, v]: any) => `${k}: ${v?.message || v}`).join(' · ');
-      } else if (error?.response?.data?.message) {
-        msg = error.response.data.message;
-      } else if (error?.message) {
-        msg = error.message;
-      }
+    } catch (err: any) {
+      console.error('Save failed:', err);
+      const pbError = err?.response?.data;
+      const fieldMsg = pbError
+        ? Object.entries(pbError)
+            .map(([k, v]) => `${k}: ${(v as any)?.message || v}`)
+            .join(' · ')
+        : null;
+      const msg = fieldMsg || err?.message || 'Something went wrong. Please try again.';
       setSubmitError(msg);
-      scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+      showToast(msg, 'error');
+    } finally {
+      setLoading(false);
     }
-  };
+  }
 
-  const handleDelete = async () => {
-    if (!meetingToEdit) return;
-    if (!window.confirm('Delete this meeting permanently?')) return;
-    try {
-      setLoading(true);
-      await pb.collection('meetings').delete(meetingToEdit.id);
-      setLoading(false);
-      onSuccess();
-      onClose();
-    } catch {
-      setLoading(false);
-      setSubmitError('Failed to delete the meeting. Please try again.');
-    }
-  };
+  /* ================================================================
+     Render
+  ================================================================ */
 
   if (!isOpen) return null;
 
-  /* ================================================================
-     Render — Step 1: Who + Agenda
-  ================================================================ */
-
-  const renderStep1 = () => (
-    <div className="p-6 space-y-5 animate-in fade-in slide-in-from-right-4 duration-300">
-      <div>
-        <div className="flex items-center gap-2.5">
-          <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white text-xs font-bold flex items-center justify-center shadow-md shadow-indigo-500/30">1</span>
-          <h3 className="text-base font-bold text-slate-900">Who is the meeting with?</h3>
-        </div>
-        <p className="text-xs text-slate-500 mt-1 ml-9">Search the directory — their details auto-fill</p>
-      </div>
-
-      <FieldError message={errors.officer} />
-
-      {!selectedOfficer ? (
-        <div className="space-y-3">
-          <div className="relative">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-            <input
-              ref={searchRef}
-              value={officerSearch}
-              onChange={(e) => setOfficerSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && filteredOfficers.length > 0) {
-                  e.preventDefault();
-                  handleSelectOfficer(filteredOfficers[0]);
-                }
-              }}
-              placeholder="Search by name, designation, department…"
-              className="w-full pl-10 pr-10 py-3 rounded-xl ring-1 ring-slate-200 bg-white text-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow"
-            />
-            {officerSearch && (
-              <button type="button" onClick={() => setOfficerSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600">
-                <X className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {(['All', 'IAS', 'IPS', 'Other'] as const).map((t) => {
-              const count = t === 'All' ? officers.length : officers.filter((o) => o.type === t).length;
-              const active = typeFilter === t;
-              return (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setTypeFilter(t)}
-                  className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${active ? 'bg-slate-900 text-white shadow' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:ring-slate-400'}`}
-                >
-                  {t === 'Other' ? 'Contacts' : t}
-                  <span className="ml-1.5 text-slate-400">{count}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-            <div className="max-h-[46vh] overflow-y-auto divide-y divide-slate-100/80">
-              {officerLoading ? (
-                <div className="p-8 flex flex-col items-center gap-2 text-slate-400">
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  <p className="text-xs">Loading directory…</p>
-                </div>
-              ) : filteredOfficers.length === 0 ? (
-                <div className="p-8 text-center">
-                  <User className="w-6 h-6 mx-auto text-slate-300 mb-2" />
-                  <p className="text-sm text-slate-500 font-medium">No matches found</p>
-                  <p className="text-xs text-slate-400 mt-0.5">Try a different name or category</p>
-                </div>
-              ) : (
-                filteredOfficers.slice(0, 60).map((officer) => (
-                  <button
-                    key={officer.id}
-                    type="button"
-                    onClick={() => handleSelectOfficer(officer)}
-                    className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-indigo-50/70 transition-colors group"
-                  >
-                    <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${typeStyle(officer.type).gradient} text-white text-sm font-bold flex items-center justify-center shrink-0`}>
-                      {officer.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-semibold text-slate-900 truncate group-hover:text-indigo-700">{officer.name}</p>
-                        <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ring-1 shrink-0 ${typeStyle(officer.type).badge}`}>{officer.type}</span>
-                      </div>
-                      <p className="text-xs text-slate-500 truncate mt-0.5">{officer.designation || '—'}</p>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-500 group-hover:translate-x-0.5 transition-all shrink-0" />
-                  </button>
-                ))
-              )}
-            </div>
-            {filteredOfficers.length > 60 && (
-              <div className="px-4 py-2 bg-slate-50 text-[11px] text-slate-400 border-t border-slate-100">
-                Showing 60 of {filteredOfficers.length} — refine your search to see more
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4 animate-in fade-in zoom-in-95 duration-200">
-          <div className="rounded-2xl ring-1 ring-indigo-100 bg-gradient-to-br from-indigo-50/80 via-white to-white p-4 shadow-sm">
-            <div className="flex items-start gap-3">
-              <div className={`w-12 h-12 rounded-2xl bg-gradient-to-br ${typeStyle(selectedOfficer.type).gradient} text-white text-base font-bold flex items-center justify-center shrink-0 shadow-md`}>
-                {formData.officer_name?.charAt(0).toUpperCase()}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <p className="font-bold text-slate-900 truncate">{formData.officer_name}</p>
-                  <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ring-1 shrink-0 ${typeStyle(selectedOfficer.type).badge}`}>{selectedOfficer.type}</span>
-                </div>
-                <p className="text-xs text-slate-500 mt-0.5 truncate">{formData.designation || selectedOfficer.current_position || '—'}</p>
-                <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-slate-500">
-                  {formData.contact_number && (
-                    <span className="inline-flex items-center gap-1"><Phone className="w-3 h-3" />{formData.contact_number}</span>
-                  )}
-                  {formData.email && (
-                    <span className="inline-flex items-center gap-1 truncate"><Mail className="w-3 h-3" />{formData.email}</span>
-                  )}
-                  {formData.department && (
-                    <span className="inline-flex items-center gap-1"><Building2 className="w-3 h-3" />{formData.department}</span>
-                  )}
-                </div>
-              </div>
-              <div className="flex flex-col gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={handleClearOfficer}
-                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-600 bg-white ring-1 ring-indigo-200 hover:bg-indigo-50 transition-colors inline-flex items-center gap-1"
-                >
-                  <RefreshCw className="w-3 h-3" /> Change
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowOfficerEdit((v) => !v)}
-                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-slate-500 hover:bg-white transition-colors"
-                >
-                  {showOfficerEdit ? 'Hide details' : 'Edit details'}
-                </button>
-              </div>
-            </div>
-
-            {showOfficerEdit && (
-              <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-indigo-100/60 animate-in fade-in duration-200">
-                {OFFICER_EDIT_FIELDS.map((f) => (
-                  <div key={f.key}>
-                    <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">{f.label}</label>
-                    <input
-                      value={(formData as any)[f.key] || ''}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, [f.key]: e.target.value }))}
-                      className="w-full px-2.5 py-1.5 rounded-lg ring-1 ring-slate-200 text-xs outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow"
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 text-[11px] text-indigo-600/80 px-1">
-            <Sparkles className="w-3.5 h-3.5" />
-            Contact details are attached automatically — no extra typing needed
-          </div>
-        </div>
-      )}
-
-      {/* Agenda — lives in Step 1 */}
-      <div>
-        <label className="block text-sm font-semibold text-slate-800 mb-1.5">
-          Agenda <span className="text-rose-500">*</span>
-        </label>
-        <input
-          value={formData.agenda}
-          onChange={(e) => {
-            setFormData((p) => ({ ...p, agenda: e.target.value }));
-            if (errors.agenda) setErrors((p) => ({ ...p, agenda: '' }));
-          }}
-          placeholder="e.g. Quarterly infrastructure review"
-          className={`${inputCls} font-medium`}
-        />
-        <FieldError message={errors.agenda} />
-      </div>
-    </div>
-  );
-
-  /* ================================================================
-     Render — Step 2: When / Where / What
-  ================================================================ */
-
-  const renderStep2 = () => (
-    <div className="p-6 space-y-5 animate-in fade-in slide-in-from-right-4 duration-300">
-      <div>
-        <div className="flex items-center gap-2.5">
-          <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white text-xs font-bold flex items-center justify-center shadow-md shadow-indigo-500/30">2</span>
-          <h3 className="text-base font-bold text-slate-900">Schedule the meeting</h3>
-        </div>
-        <p className="text-xs text-slate-500 mt-1 ml-9">Just the essentials — everything else is optional</p>
-      </div>
-
-      {/* When — calendar, time slots and the duration dropdown */}
-      <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-            <Calendar className="w-3.5 h-3.5" /> When
-          </div>
-          <div className="flex gap-1.5">
-            {[
-              { label: 'Today', offset: 0, match: todayISO },
-              { label: 'Tomorrow', offset: 1, match: tomorrowISO },
-              { label: 'Next week', offset: 7, match: '' },
-            ].map((q) => (
-              <button
-                key={q.label}
-                type="button"
-                onClick={() => applyQuickDate(q.offset)}
-                className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${
-                  q.match && formData.meeting_date === q.match
-                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30'
-                    : 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
-                }`}
-              >
-                {q.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="p-4 grid grid-cols-1 sm:grid-cols-[252px_1fr] gap-4">
-          <MiniCalendar value={formData.meeting_date} onChange={handleDateChange} />
-
-          <div className="min-w-0">
-            <div className="flex items-center gap-2.5 mb-3">
-              <div className="w-9 h-9 rounded-xl bg-indigo-50 flex items-center justify-center shrink-0">
-                <Clock className="w-4 h-4 text-indigo-600" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-bold text-slate-900 tabular-nums leading-tight">
-                  {formData.meeting_time
-                    ? `${to12Hour(formData.meeting_time)}${meetingEndTime ? ` – ${to12Hour(meetingEndTime)}` : ''}`
-                    : 'Select a time'}
-                </p>
-                <p className="text-[10px] text-slate-400 font-medium mt-0.5">{prettyDate(formData.meeting_date)}</p>
-              </div>
-            </div>
-
-            {/* Duration — inside "When" as a dropdown */}
-            <div className="flex items-center justify-between gap-3 mb-3">
-              <label htmlFor="meeting-duration" className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                Duration <span className="text-rose-500">*</span>
-              </label>
-              <div className="relative">
-                <select
-                  id="meeting-duration"
-                  value={formData.duration}
-                  onChange={(e) => {
-                    setFormData((p) => ({ ...p, duration: e.target.value }));
-                    if (errors.duration) setErrors((p) => ({ ...p, duration: '' }));
-                  }}
-                  className={`appearance-none pl-3 pr-8 py-1.5 rounded-lg ring-1 text-xs font-bold bg-white outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow cursor-pointer ${
-                    errors.duration ? 'ring-rose-300 text-rose-600' : formData.duration ? 'text-slate-800 ring-slate-200' : 'text-slate-400 ring-slate-200'
-                  }`}
-                >
-                  <option value="">Select duration</option>
-                  {durationOptions.map((d) => (
-                    <option key={d} value={String(d)}>{formatDuration(d)}</option>
-                  ))}
-                </select>
-                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
-              </div>
-            </div>
-
-            <TimeSlotPicker value={formData.meeting_time} onChange={handleTimeChange} />
-          </div>
-        </div>
-
-        {(errors.date || errors.time || errors.duration) && (
-          <div className="px-4 pb-3">
-            <FieldError message={[errors.date, errors.time, errors.duration].filter(Boolean).join(' · ')} />
-          </div>
-        )}
-      </div>
-
-      {/* Where */}
-      <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 text-xs font-bold uppercase tracking-wider text-slate-400">
-          <MapPin className="w-3.5 h-3.5" /> Where
-        </div>
-        <div className="p-4 space-y-3.5">
-          <div className="relative">
-            <MapPin className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-            <input
-              value={formData.location}
-              onChange={(e) => setFormData((p) => ({ ...p, location: e.target.value }))}
-              placeholder="e.g. Conference Room A, Secretariat"
-              className={`${inputCls} pl-10`}
-            />
-          </div>
-
-          {/* Meeting place — compulsory, no default */}
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-              Place <span className="text-rose-500">*</span>
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              {PLACE_OPTIONS.map((p) => {
-                const Icon = p.icon;
-                const active = formData.meeting_place === p.value;
-                return (
-                  <button
-                    key={p.value}
-                    type="button"
-                    onClick={() => {
-                      setFormData((prev) => ({ ...prev, meeting_place: p.value }));
-                      if (errors.meeting_place) setErrors((prev) => ({ ...prev, meeting_place: '' }));
-                    }}
-                    className={`flex items-center gap-3 p-3 rounded-xl ring-1 transition-all text-left ${
-                      active ? 'ring-2 ring-indigo-500 bg-indigo-50/70' : 'ring-slate-200 bg-white hover:ring-slate-300'
-                    }`}
-                  >
-                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-colors ${active ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>
-                      <Icon className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className={`text-sm font-bold ${active ? 'text-indigo-700' : 'text-slate-700'}`}>{p.value}</p>
-                      <p className="text-[11px] text-slate-400 truncate">{p.hint}</p>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-            <FieldError message={errors.meeting_place} />
-          </div>
-        </div>
-      </div>
-
-      {/* Priority — compulsory, no default */}
-      <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-            <Flag className="w-3.5 h-3.5" /> Priority <span className="text-rose-500">*</span>
-          </div>
-          {priorityInfo && (
-            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold ring-1 ${priorityInfo.bg} ${priorityInfo.text} ${priorityInfo.ring}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${priorityInfo.dot}`} />
-              {priorityInfo.value}
-            </span>
-          )}
-        </div>
-        <div className="p-4 grid grid-cols-3 gap-2">
-          {PRIORITIES.map((p) => {
-            const Icon = p.icon;
-            const active = formData.priority === p.value;
-            return (
-              <button
-                key={p.value}
-                type="button"
-                onClick={() => {
-                  setFormData((prev) => ({ ...prev, priority: p.value }));
-                  if (errors.priority) setErrors((prev) => ({ ...prev, priority: '' }));
-                }}
-                className={`relative overflow-hidden flex flex-col items-center gap-1.5 py-3.5 rounded-xl ring-1 transition-all ${
-                  active ? `ring-2 ${p.ring} ${p.bg}` : 'ring-slate-200 bg-white hover:ring-slate-300'
-                }`}
-              >
-                {active && <span className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${p.bar}`} />}
-                <Icon className={`w-4 h-4 ${active ? p.text : 'text-slate-400'}`} />
-                <span className={`text-xs font-bold ${active ? p.text : 'text-slate-600'}`}>{p.value}</span>
-                <span className={`w-2 h-2 rounded-full ${p.dot}`} />
-              </button>
-            );
-          })}
-        </div>
-        <div className="px-4 pb-3">
-          <FieldError message={errors.priority} />
-        </div>
-      </div>
-
-      {/* More details — all fields optional */}
-      <div className="rounded-2xl ring-1 ring-slate-200 bg-white overflow-hidden">
-        <button
-          type="button"
-          onClick={() => setShowMoreDetails((v) => !v)}
-          className="w-full flex items-center justify-between px-4 py-3 text-xs font-bold uppercase tracking-wider text-slate-400 hover:text-slate-600 transition-colors"
-        >
-          <span className="flex items-center gap-2">
-            <Sparkles className="w-3.5 h-3.5" /> More details
-          </span>
-          <ChevronDown className={`w-4 h-4 transition-transform ${showMoreDetails ? 'rotate-180' : ''}`} />
-        </button>
-
-        {showMoreDetails && (
-          <div className="p-4 pt-3.5 border-t border-slate-100 space-y-4 animate-in fade-in duration-200">
-            {/* Status — optional */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                Status
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {STATUS_FLAGS.map((s) => {
-                  const active = formData.status_flag === s.value;
-                  return (
-                    <button
-                      key={s.value}
-                      type="button"
-                      onClick={() => setFormData((prev) => ({ ...prev, status_flag: s.value }))}
-                      className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold ring-1 transition-all ${
-                        active
-                          ? 'ring-2 ring-indigo-500 bg-indigo-50 text-indigo-700'
-                          : 'ring-slate-200 bg-white text-slate-600 hover:ring-slate-300'
-                      }`}
-                    >
-                      <span className={`w-2 h-2 rounded-full ${s.dot}`} />
-                      {s.value}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Meeting type — optional */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                Type
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                {MEETING_TYPES.map((t) => {
-                  const Icon = t.icon;
-                  const active = formData.meeting_type === t.value;
-                  return (
-                    <button
-                      key={t.value}
-                      type="button"
-                      onClick={() => setFormData((prev) => ({ ...prev, meeting_type: t.value }))}
-                      className={`flex items-center gap-3 p-3 rounded-xl ring-1 transition-all text-left ${
-                        active ? 'ring-2 ring-indigo-500 bg-indigo-50/70' : 'ring-slate-200 bg-white hover:ring-slate-300'
-                      }`}
-                    >
-                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-colors ${active ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>
-                        <Icon className="w-4 h-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className={`text-sm font-bold ${active ? 'text-indigo-700' : 'text-slate-700'}`}>{t.value}</p>
-                        <p className="text-[11px] text-slate-400 truncate">{t.hint}</p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Attendees */}
-            <div>
-              <label className="block text-sm font-semibold text-slate-800 mb-1.5">Attendees</label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Users className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                  <input
-                    value={attendeeInput}
-                    onChange={(e) => setAttendeeInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ',') {
-                        e.preventDefault();
-                        addAttendee(attendeeInput);
-                      }
-                    }}
-                    placeholder="Add attendee names"
-                    className={`${inputCls} pl-10`}
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => addAttendee(attendeeInput)}
-                  className="px-3.5 rounded-xl ring-1 ring-slate-200 text-slate-600 hover:ring-indigo-300 hover:text-indigo-600 transition-all shrink-0"
-                >
-                  <Plus className="w-4 h-4" />
-                </button>
-              </div>
-              {attendeeList.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-2">
-                  {attendeeList.map((a) => (
-                    <span key={a} className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-full bg-slate-100 text-xs font-semibold text-slate-700">
-                      {a}
-                      <button
-                        type="button"
-                        onClick={() => setAttendeeList((list) => list.filter((x) => x !== a))}
-                        className="w-4 h-4 rounded-full hover:bg-slate-300 flex items-center justify-center text-slate-500 transition-colors"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Notes */}
-            <div>
-              <label className="block text-sm font-semibold text-slate-800 mb-1.5">Notes</label>
-              <textarea
-                value={formData.notes}
-                onChange={(e) => setFormData((p) => ({ ...p, notes: e.target.value }))}
-                rows={3}
-                placeholder="Talking points, context, preparation…"
-                className={`${inputCls} resize-none`}
-              />
-            </div>
-
-            {/* Follow-up date */}
-            <div>
-              <label className="block text-sm font-semibold text-slate-800 mb-1.5">Follow-up date</label>
-              <input
-                type="date"
-                value={formData.follow_up_date}
-                onChange={(e) => setFormData((p) => ({ ...p, follow_up_date: e.target.value }))}
-                className={inputCls}
-              />
-            </div>
-
-            {/* Toggles */}
-            <div className="space-y-2">
-              <ToggleRow
-                icon={Mail}
-                title="Send invite"
-                description="Email the participant"
-                checked={formData.send_invite}
-                onChange={(v) => setFormData((p) => ({ ...p, send_invite: v }))}
-              />
-              <ToggleRow
-                icon={Calendar}
-                title="Sync to Google Calendar"
-                description="Create a matching GCal event"
-                checked={formData.sync_gcal}
-                onChange={(v) => setFormData((p) => ({ ...p, sync_gcal: v }))}
-              />
-              <ToggleRow
-                icon={Video}
-                title="Add Google Meet"
-                description="Attach a Meet link"
-                checked={formData.add_meet}
-                onChange={(v) => setFormData((p) => ({ ...p, add_meet: v }))}
-              />
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  /* ================================================================
-     Render — panel shell
-  ================================================================ */
+  const st = typeStyle(selectedOfficer?.type);
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
+    <>
       <div
-        className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px] animate-in fade-in duration-200"
+        className="fixed inset-0 z-[60] bg-slate-900/40 backdrop-blur-[2px] animate-in fade-in duration-200"
         onClick={onClose}
       />
 
-      <div className="relative h-full w-full sm:max-w-xl bg-white shadow-2xl flex flex-col animate-in slide-in-from-right duration-300">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-4 border-b border-slate-100">
-          <div className="min-w-0">
-            <h2 className="text-lg font-bold text-slate-900">{isEditMode ? 'Edit meeting' : 'Create a meeting'}</h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Step {step} of 2 · {step === 1 ? 'Who & agenda' : 'When & where'}
+      <div className="fixed inset-y-0 right-0 z-[61] w-full sm:max-w-xl bg-white shadow-2xl flex flex-col animate-in slide-in-from-right duration-300">
+        {/* header */}
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-100 shrink-0">
+          {step === 2 ? (
+            <button
+              type="button"
+              onClick={() => setStep(1)}
+              className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors shrink-0"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+          ) : (
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-indigo-500/25">
+              <Calendar className="w-4 h-4" />
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-bold text-slate-900">
+              {isEditMode ? 'Edit meeting' : 'Create meeting'}
+            </h3>
+            <p className="text-[11px] text-slate-400">
+              {step === 1 ? 'Who & why' : 'When & where'}
             </p>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            {[1, 2].map((s) => (
+              <span
+                key={s}
+                className={`w-1.5 h-1.5 rounded-full transition-colors ${step >= s ? 'bg-indigo-500' : 'bg-slate-200'}`}
+              />
+            ))}
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 -mr-1 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500 transition-colors shrink-0"
+            className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Step progress */}
-        <div className="px-6 pt-4 flex items-center gap-2">
-          {[
-            { n: 1 as const, label: 'Who & agenda' },
-            { n: 2 as const, label: 'When & where' },
-          ].map((s) => (
-            <div key={s.n} className="flex-1">
-              <div className={`h-1.5 rounded-full transition-colors ${step >= s.n ? 'bg-gradient-to-r from-indigo-500 to-violet-600' : 'bg-slate-200'}`} />
-              <p className={`text-[10px] font-bold mt-1.5 ${step >= s.n ? 'text-indigo-600' : 'text-slate-400'}`}>{s.label}</p>
-            </div>
-          ))}
-        </div>
+        <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto p-5 space-y-7 nice-scroll">
 
-        {/* Scrollable body */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          {step === 1 ? renderStep1() : renderStep2()}
-        </div>
+            {/* ================= STEP 1 ================= */}
+            {step === 1 && (
+              <>
+                {/* [1] who is this meeting with */}
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <StepBadge n={1} />
+                      <p className="text-sm font-bold text-slate-900">Who is this meeting with?</p>
+                    </div>
+                    {selectedOfficer && !showOfficerEdit && (
+                      <button
+                        type="button"
+                        onClick={() => setShowOfficerEdit(true)}
+                        className="text-xs font-bold text-indigo-600 hover:text-indigo-700 transition-colors"
+                      >
+                        Edit details
+                      </button>
+                    )}
+                  </div>
 
-        {/* Footer actions */}
-        <div className="border-t border-slate-100 p-4 bg-white">
-          {submitError && (
-            <div className="mb-3">
-              <FieldError message={submitError} />
-            </div>
-          )}
+                  {!selectedOfficer || showOfficerEdit ? (
+                    <div className="space-y-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                          <input
+                            ref={searchRef}
+                            value={officerSearch}
+                            onChange={(e) => setOfficerSearch(e.target.value)}
+                            /* ═══ FIX 5: Enter here must never submit the form ═══ */
+                            onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault(); }}
+                            placeholder="Search name, department, cadre…"
+                            className={`${inputCls} pl-9`}
+                          />
+                        </div>
+                        <div className="flex bg-slate-100 rounded-full p-1 shrink-0">
+                          {(['All', 'IAS', 'IPS', 'Other'] as const).map((t) => (
+                            <button
+                              key={t}
+                              type="button"
+                              onClick={() => setTypeFilter(t)}
+                              className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition-all ${
+                                typeFilter === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                              }`}
+                            >
+                              {t}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
 
-          <div className="flex items-center gap-2">
+                      <div className="max-h-64 overflow-y-auto rounded-2xl ring-1 ring-slate-200 divide-y divide-slate-100 nice-scroll">
+                        {officerLoading ? (
+                          <div className="flex items-center justify-center gap-2 py-10 text-xs text-slate-400">
+                            <Loader2 className="w-4 h-4 animate-spin" /> Loading directory…
+                          </div>
+                        ) : filteredOfficers.length === 0 ? (
+                          <div className="flex flex-col items-center gap-2 py-10 text-xs text-slate-400">
+                            <span>No officers found</span>
+                            <button
+                              type="button"
+                              onClick={fetchOfficers}
+                              className="flex items-center gap-1.5 font-bold text-indigo-600 hover:text-indigo-700"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" /> Retry
+                            </button>
+                          </div>
+                        ) : (
+                          filteredOfficers.slice(0, 50).map((o) => {
+                            const s = typeStyle(o.type);
+                            return (
+                              <button
+                                key={o.id}
+                                type="button"
+                                onClick={() => handleSelectOfficer(o)}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-indigo-50/50 transition-colors text-left"
+                              >
+                                <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${s.gradient} text-white text-xs font-bold flex items-center justify-center shrink-0`}>
+                                  {o.name?.slice(0, 2).toUpperCase() || '?'}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-semibold text-slate-800 truncate">{o.name}</p>
+                                  <p className="text-[11px] text-slate-400 truncate">{o.designation || o.department || o.type}</p>
+                                </div>
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ring-1 shrink-0 ${s.badge}`}>
+                                  {o.type}
+                                </span>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+
+                      {/* inline officer detail editor */}
+                      {selectedOfficer && showOfficerEdit && (
+                        <div className="rounded-2xl ring-1 ring-indigo-100 bg-indigo-50/40 p-3 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+                              Details saved with this meeting
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setShowOfficerEdit(false)}
+                              className="text-xs font-bold text-indigo-600 hover:text-indigo-700"
+                            >
+                              Done
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {OFFICER_EDIT_FIELDS.map((f) => (
+                              <div key={f.key} className={f.key === 'officer_name' ? 'col-span-2' : ''}>
+                                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1">
+                                  {f.label}
+                                </label>
+                                <input
+                                  type="text"
+                                  value={(formData as any)[f.key] || ''}
+                                  onChange={(e) => handleOfficerField(f.key, e.target.value)}
+                                  className={inputCls}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl ring-1 ring-indigo-100 bg-gradient-to-br from-indigo-50/80 via-white to-white p-4">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-11 h-11 rounded-2xl bg-gradient-to-br ${st.gradient} text-white text-sm font-bold flex items-center justify-center shrink-0 shadow-md`}>
+                          {selectedOfficer.name?.slice(0, 2).toUpperCase() || '?'}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <p className="text-sm font-bold text-slate-900 truncate">{selectedOfficer.name}</p>
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ring-1 shrink-0 ${st.badge}`}>
+                              {selectedOfficer.type}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 truncate">
+                            {selectedOfficer.designation || selectedOfficer.department || '—'}
+                          </p>
+                          <div className="flex items-center gap-3 mt-1 min-w-0">
+                            {formData.contact_number && (
+                              <span className="flex items-center gap-1 text-[11px] text-slate-400 shrink-0">
+                                <Phone className="w-3 h-3" /> {formData.contact_number}
+                              </span>
+                            )}
+                            {formData.email && (
+                              <span className="flex items-center gap-1 text-[11px] text-slate-400 truncate">
+                                <Mail className="w-3 h-3 shrink-0" /> {formData.email}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleClearOfficer}
+                          title="Choose someone else"
+                          className="p-2 rounded-xl text-slate-300 hover:bg-rose-50 hover:text-rose-500 transition-colors shrink-0"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <FieldError message={errors.officer} />
+                </section>
+
+                {/* [2] agenda */}
+                <section className="space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <StepBadge n={2} />
+                    <p className="text-sm font-bold text-slate-900">What&apos;s the agenda?</p>
+                  </div>
+                  <textarea
+                    value={formData.agenda}
+                    onChange={(e) => {
+                      setFormData((prev) => ({ ...prev, agenda: e.target.value }));
+                      if (errors.agenda) setErrors((p) => ({ ...p, agenda: '' }));
+                    }}
+                    rows={3}
+                    placeholder="e.g. Review of district development projects, fund allocation…"
+                    className={`${inputCls} resize-none`}
+                  />
+                  <FieldError message={errors.agenda} />
+                </section>
+
+                {/* [3] more details (optional) */}
+                <section className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowMoreDetails((v) => !v)}
+                    className="w-full flex items-center justify-between rounded-xl ring-1 ring-slate-200 bg-white px-3.5 py-2.5 hover:ring-slate-300 transition-all"
+                  >
+                    <span className="flex items-center gap-2.5">
+                      <span className="w-8 h-8 rounded-xl bg-violet-50 text-violet-600 flex items-center justify-center">
+                        <Sparkles className="w-4 h-4" />
+                      </span>
+                      <span className="text-sm font-bold text-slate-900">More details</span>
+                      <span className="text-[10px] font-medium text-slate-400">(optional)</span>
+                    </span>
+                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showMoreDetails ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showMoreDetails && (
+                    <div className="space-y-4 rounded-2xl ring-1 ring-slate-100 bg-slate-50/50 p-3.5">
+                      {/* meeting type */}
+                      <div className="space-y-2">
+                        <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Meeting type</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {MEETING_TYPES.map((t) => {
+                            const selected = formData.meeting_type === t.value;
+                            const Icon = t.icon;
+                            return (
+                              <button
+                                key={t.value}
+                                type="button"
+                                onClick={() => setFormData((prev) => ({ ...prev, meeting_type: selected ? '' : t.value }))}
+                                className={`flex items-center gap-2.5 p-3 rounded-xl ring-1 text-left transition-all ${
+                                  selected ? 'ring-indigo-300 bg-indigo-50/60' : 'bg-white ring-slate-200 hover:ring-slate-300'
+                                }`}
+                              >
+                                <Icon className={`w-4 h-4 shrink-0 ${selected ? 'text-indigo-600' : 'text-slate-400'}`} />
+                                <span className="min-w-0">
+                                  <span className={`block text-xs font-bold ${selected ? 'text-indigo-700' : 'text-slate-700'}`}>
+                                    {t.value}
+                                  </span>
+                                  <span className="block text-[10px] text-slate-400 truncate">{t.hint}</span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* status flag */}
+                      <div className="space-y-2">
+                        <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Status</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {STATUS_FLAGS.map((s) => {
+                            const selected = formData.status_flag === s.value;
+                            return (
+                              <button
+                                key={s.value}
+                                type="button"
+                                onClick={() => setFormData((prev) => ({ ...prev, status_flag: selected ? '' : s.value }))}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold ring-1 transition-all active:scale-95 ${
+                                  selected
+                                    ? 'bg-slate-900 text-white ring-slate-900'
+                                    : 'bg-white text-slate-600 ring-slate-200 hover:ring-slate-300'
+                                }`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${selected ? 'bg-white' : s.dot}`} />
+                                {s.value}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* attendees */}
+                      <div className="space-y-2">
+                        <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Attendees</p>
+                        <div className="flex items-center gap-2">
+                          <input
+                            value={attendeeInput}
+                            onChange={(e) => setAttendeeInput(e.target.value)}
+                            /* ═══ FIX 5: Enter adds an attendee, never submits ═══ */
+                            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAttendee(); } }}
+                            placeholder="name@example.com, press Enter to add"
+                            className={inputCls}
+                          />
+                          <button
+                            type="button"
+                            onClick={addAttendee}
+                            className="p-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shrink-0"
+                          >
+                            <Plus className="w-4 h-4" />
+                          </button>
+                        </div>
+                        {attendeeList.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {attendeeList.map((a) => (
+                              <span
+                                key={a}
+                                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-50 ring-1 ring-indigo-100 text-[11px] font-semibold text-indigo-700"
+                              >
+                                {a}
+                                <button
+                                  type="button"
+                                  onClick={() => removeAttendee(a)}
+                                  className="text-indigo-400 hover:text-rose-500 transition-colors"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* meet link */}
+                      <div className="space-y-2">
+                        <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Meeting link</p>
+                        <input
+                          value={formData.meet_link}
+                          onChange={(e) => setFormData((prev) => ({ ...prev, meet_link: e.target.value }))}
+                          placeholder="https://meet.google.com/…"
+                          className={inputCls}
+                        />
+                      </div>
+
+                      {/* automations */}
+                      <div className="space-y-2">
+                        <ToggleRow
+                          icon={Mail}
+                          title="Send invite"
+                          description="Email a calendar invite to the officer"
+                          checked={formData.send_invite}
+                          onChange={(v) => setFormData((prev) => ({ ...prev, send_invite: v }))}
+                        />
+                        <ToggleRow
+                          icon={Video}
+                          title="Add Google Meet"
+                          description="Generate and attach a Meet link"
+                          checked={formData.add_meet}
+                          onChange={(v) => setFormData((prev) => ({ ...prev, add_meet: v }))}
+                        />
+                        <ToggleRow
+                          icon={RefreshCw}
+                          title="Sync to Google Calendar"
+                          description="Create / update the calendar event"
+                          checked={formData.sync_gcal}
+                          onChange={(v) => setFormData((prev) => ({ ...prev, sync_gcal: v }))}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
+
+            {/* ================= STEP 2 ================= */}
             {step === 2 && (
-              <button
-                type="button"
-                onClick={() => setStep(1)}
-                className="px-4 py-2.5 rounded-xl text-sm font-bold text-slate-600 ring-1 ring-slate-200 hover:ring-slate-400 transition-all inline-flex items-center gap-1.5"
-              >
-                <ArrowLeft className="w-4 h-4" /> Back
-              </button>
-            )}
+              <>
+                {/* context summary */}
+                <div className="flex items-center gap-2.5 rounded-xl bg-slate-50 ring-1 ring-slate-100 p-3">
+                  <div className={`w-8 h-8 rounded-lg bg-gradient-to-br ${st.gradient} text-white text-[10px] font-bold flex items-center justify-center shrink-0`}>
+                    {(formData.officer_name || '?').slice(0, 2).toUpperCase()}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-bold text-slate-800 truncate">{formData.officer_name}</p>
+                    <p className="text-[11px] text-slate-400 truncate">{formData.agenda}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setStep(1)}
+                    className="text-[11px] font-bold text-indigo-600 hover:text-indigo-700 shrink-0"
+                  >
+                    Edit
+                  </button>
+                </div>
 
-            <div className="flex-1" />
+                {/* when */}
+                <section className="space-y-3">
+                  <SectionLabel icon={Clock} text="When is it happening?" />
+                  <WeekStrip
+                    value={formData.meeting_date}
+                    onChange={handleDateChange}
+                    markedDates={dateMarks}
+                  />
+                  <div className="rounded-2xl ring-1 ring-slate-200 bg-white p-3 shadow-sm">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Clock className="w-3.5 h-3.5 text-slate-400" />
+                      <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Time</p>
+                      <div className="ml-auto flex items-center gap-1.5 min-w-0">
+                        {formData.meeting_date && <SummaryPill>{prettyDate(formData.meeting_date)}</SummaryPill>}
+                        {formData.meeting_time && <SummaryPill>{to12Hour(formData.meeting_time)}</SummaryPill>}
+                      </div>
+                    </div>
+                    <TimeSlotPicker
+                      value={formData.meeting_time}
+                      onChange={handleTimeChange}
+                      meetingDate={formData.meeting_date}
+                    />
+                  </div>
+                  <FieldError message={errors.date} />
+                  <FieldError message={errors.time} />
+                </section>
 
-            {isEditMode && (
-              <button
-                type="button"
-                onClick={handleDelete}
-                disabled={loading}
-                className="px-3.5 py-2.5 rounded-xl text-sm font-bold text-rose-600 ring-1 ring-rose-200 hover:bg-rose-50 transition-all inline-flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Trash2 className="w-4 h-4" /> Delete
-              </button>
-            )}
+                {/* duration */}
+                <section className="space-y-3">
+                  <SectionLabel icon={Activity} text="How long?" optional />
+                  {isCustomMode ? (
+                    <div className="flex items-center gap-2 rounded-xl ring-1 ring-indigo-200 bg-indigo-50/40 p-2.5">
+                      <input
+                        type="number"
+                        min={0}
+                        max={23}
+                        inputMode="numeric"
+                        value={customHours}
+                        onChange={(e) => handleCustomDuration(clampInt(e.target.value, 23), customMinutes)}
+                        placeholder="0"
+                        className={miniNumCls}
+                      />
+                      <span className="text-xs font-bold text-slate-500">hr</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={59}
+                        inputMode="numeric"
+                        value={customMinutes}
+                        onChange={(e) => handleCustomDuration(customHours, clampInt(e.target.value, 59))}
+                        placeholder="0"
+                        className={miniNumCls}
+                      />
+                      <span className="text-xs font-bold text-slate-500">min</span>
+                      <div className="flex-1" />
+                      <button
+                        type="button"
+                        onClick={handleCustomDone}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 transition-colors flex items-center gap-1"
+                      >
+                        <Check className="w-3.5 h-3.5" /> Done
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setIsCustomMode(false); setCustomHours(''); setCustomMinutes(''); }}
+                        className="p-1.5 rounded-lg text-slate-400 hover:bg-white hover:text-rose-500 transition-colors"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {PRESET_DURATIONS.map((m) => {
+                        const selected = Number(formData.duration) === m;
+                        return (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => handlePresetDuration(m)}
+                            className={`px-3 py-2 rounded-xl text-[11px] font-bold tabular-nums whitespace-nowrap transition-all active:scale-95 ${
+                              selected
+                                ? 'bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/30'
+                                : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:ring-indigo-300 hover:text-indigo-700'
+                            }`}
+                          >
+                            {formatDuration(m)}
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        onClick={handleOpenCustom}
+                        className={`px-3 py-2 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all active:scale-95 flex items-center gap-1 ${
+                          Number(formData.duration) > 0 && !PRESET_DURATIONS.includes(Number(formData.duration))
+                            ? 'bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/30'
+                            : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:ring-indigo-300 hover:text-indigo-700'
+                        }`}
+                      >
+                        <Plus className="w-3 h-3" />
+                        {Number(formData.duration) > 0 && !PRESET_DURATIONS.includes(Number(formData.duration))
+                          ? formatDuration(Number(formData.duration))
+                          : 'Custom'}
+                      </button>
+                    </div>
+                  )}
+                  <FieldError message={errors.duration} />
+                </section>
 
-            {step === 1 ? (
-              <button
-                type="button"
-                onClick={goToSchedule}
-                className="px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-br from-indigo-500 to-violet-600 shadow-lg shadow-indigo-500/30 hover:shadow-xl hover:shadow-indigo-500/40 transition-all inline-flex items-center gap-1.5"
-              >
-                Next <ChevronRight className="w-4 h-4" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleSubmit}
-                disabled={loading}
-                className="px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-br from-indigo-500 to-violet-600 shadow-lg shadow-indigo-500/30 hover:shadow-xl hover:shadow-indigo-500/40 transition-all inline-flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                {isEditMode ? 'Save changes' : 'Create meeting'}
-              </button>
+                {/* where */}
+                <section className="space-y-3">
+                  <SectionLabel icon={MapPin} text="Where is it happening?" optional />
+                  <div className="grid grid-cols-2 gap-2">
+                    {PLACE_OPTIONS.map((p) => {
+                      const selected = formData.meeting_place === p.value;
+                      const Icon = p.icon;
+                      return (
+                        <button
+                          key={p.value}
+                          type="button"
+                          onClick={() => setFormData((prev) => ({ ...prev, meeting_place: selected ? '' : p.value }))}
+                          className={`flex items-center gap-2.5 p-3 rounded-xl ring-1 text-left transition-all ${
+                            selected ? 'ring-indigo-300 bg-indigo-50/60' : 'bg-white ring-slate-200 hover:ring-slate-300'
+                          }`}
+                        >
+                          <Icon className={`w-4 h-4 shrink-0 ${selected ? 'text-indigo-600' : 'text-slate-400'}`} />
+                          <span className="min-w-0">
+                            <span className={`block text-xs font-bold ${selected ? 'text-indigo-700' : 'text-slate-700'}`}>
+                              {p.value}
+                            </span>
+                            <span className="block text-[10px] text-slate-400 truncate">{p.hint}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <input
+                    value={formData.location}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, location: e.target.value }))}
+                    placeholder="Venue, room or address…"
+                    className={inputCls}
+                  />
+                </section>
+
+                {/* priority */}
+                <section className="space-y-3">
+                  <SectionLabel icon={Flag} text="Priority" optional />
+                  <div className="grid grid-cols-3 gap-2">
+                    {PRIORITIES.map((p) => {
+                      const selected = formData.priority === p.value;
+                      const Icon = p.icon;
+                      return (
+                        <button
+                          key={p.value}
+                          type="button"
+                          onClick={() => setFormData((prev) => ({ ...prev, priority: selected ? '' : p.value }))}
+                          className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-xs font-bold ring-1 transition-all active:scale-95 ${
+                            selected
+                              ? `${p.bg} ${p.text} ring-2 ${p.ring}`
+                              : 'bg-white text-slate-500 ring-slate-200 hover:ring-slate-300'
+                          }`}
+                        >
+                          <Icon className="w-3.5 h-3.5" /> {p.value}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              </>
             )}
           </div>
-        </div>
+
+          {/* ═══════════════ FIX 4: footer buttons ═══════════════
+              Step 1 → "Continue" is type="button" (CANNOT submit the form).
+              Step 2 → the ONLY type="submit" button in the whole form.
+              Combined with the stepRef hard lock in handleSubmit, it is now
+              impossible to save while on step 1 — even in edit mode where
+              every field is pre-filled. */}
+          <div className="border-t border-slate-100 p-4 shrink-0 bg-white">
+            {submitError && (
+              <div className="mb-3 flex items-start gap-2 rounded-xl bg-rose-50 ring-1 ring-rose-200 p-3">
+                <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                <p className="text-xs text-rose-700 flex-1">{submitError}</p>
+                <button
+                  type="button"
+                  onClick={() => setSubmitError(null)}
+                  className="text-rose-400 hover:text-rose-600"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+            <div className="flex items-center gap-2.5">
+              {step === 2 && (
+                <button
+                  type="button"
+                  onClick={() => setStep(1)}
+                  className="px-4 py-3 rounded-xl ring-1 ring-slate-200 bg-white text-sm font-bold text-slate-600 hover:ring-slate-300 hover:text-slate-800 transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]"
+                >
+                  <ChevronLeft className="w-4 h-4" /> Back
+                </button>
+              )}
+              {step === 1 ? (
+                <button
+                  type="button"
+                  onClick={handleContinue}
+                  className="flex-1 py-3 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white text-sm font-bold shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:-translate-y-px transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
+                >
+                  Continue <ChevronRight className="w-4 h-4" />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="flex-1 py-3 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white text-sm font-bold shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:-translate-y-px transition-all flex items-center justify-center gap-2 active:scale-[0.98] disabled:opacity-60 disabled:pointer-events-none"
+                >
+                  {loading ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
+                  ) : (
+                    <><Check className="w-4 h-4" /> {isEditMode ? 'Update meeting' : 'Create meeting'}</>
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+        </form>
       </div>
-    </div>
+    </>
   );
-} 
+}

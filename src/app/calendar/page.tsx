@@ -75,6 +75,48 @@ export default function CalendarPage() {
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [offCanvasMode, setOffCanvasMode] = useState<OffCanvasMode>(null);
 
+// ── Delete confirmation (custom UI modal, replaces window.confirm) ──
+const [confirmDelete, setConfirmDelete] = useState(false);
+const [deleting, setDeleting] = useState(false);
+const [deleteError, setDeleteError] = useState('');
+
+const requestDelete = () => {
+  setDeleteError('');
+  setConfirmDelete(true);
+};
+
+const cancelDelete = () => {
+  if (deleting) return;
+  setConfirmDelete(false);
+  setDeleteError('');
+};
+
+const confirmDeleteMeeting = async () => {
+  if (!selectedMeeting || deleting) return;
+  setDeleting(true);
+  setDeleteError('');
+  try {
+    await pb.collection('meetings').delete(selectedMeeting.id);
+    setConfirmDelete(false);
+    closeOffCanvas();
+    await loadData();
+  } catch (err: any) {
+    console.error('Delete error:', err);
+
+    // ── ✅ AUTH: session expired → secure sign-out + redirect ──
+    if (err?.status === 401) {
+      logout();
+      router.replace('/login');
+      return;
+    }
+    setDeleteError(err?.message || 'Failed to delete the meeting. Please try again.');
+  } finally {
+    setDeleting(false);
+  }
+};
+
+
+
   // ── Shared CreateMeetingPanel state ──
   const [panelOpen, setPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<any>(null);
@@ -88,8 +130,11 @@ export default function CalendarPage() {
   // ── Upcoming Meetings — list view expansion ──
   const [showAllUpcoming, setShowAllUpcoming] = useState(false);
 
+
+
+
   const AGENDA_PAGE_SIZE = 5;
-  const UPCOMING_PAGE_SIZE = 6;
+  const UPCOMING_PAGE_SIZE = 4;
 
   const AGENDA_FILTERS = [
     { value: 'all', label: 'All' },
@@ -116,29 +161,77 @@ export default function CalendarPage() {
   // Collapse the upcoming list back to its first page on refresh
   useEffect(() => { setShowAllUpcoming(false); }, [meetings]);
 
-  useEffect(() => { loadData(); }, []);
+ // ✅ Function declaration at component scope — hoisted, so it's
+// available to the JSX refresh button, delete handler, and panel success.
+async function loadData() {
+  try {
+    setLoading(true);
+    setError('');
 
-  async function loadData() {
-    try {
-      setLoading(true);
-      setError('');
-      const data = await pb.collection('meetings').getFullList({ sort: '-created' });
-      setMeetings(data);
-    } catch (err: any) {
-      console.error('Error:', err);
+    console.log('[calendar] authStore valid?', pb.authStore.isValid);
 
-      // ── ✅ AUTH: session expired / revoked → secure sign-out + redirect ──
-      if (err?.status === 401) {
-        logout();
-        router.replace('/login');
-        return;
+    // Try progressively simpler queries — the first that succeeds wins.
+    // 1) sort by -created (preferred)
+    // 2) sort by -id (fallback: view collections / missing `created` field)
+    // 3) no sort at all (last resort)
+    const attempts = [{ sort: '-created' }, { sort: '-id' }, {}];
+
+    let data: any[] = [];
+    let lastError: any = null;
+
+    for (const attempt of attempts) {
+      try {
+        data = await pb.collection('meetings').getFullList({
+          requestKey: null,
+          ...attempt,
+        });
+        console.log('[calendar] ✅ success with:', attempt, '→', data.length, 'records');
+        lastError = null;
+        break;
+      } catch (e: any) {
+        console.warn('[calendar] ❌ attempt failed:', attempt, '| status:', e?.status, '| msg:', e?.message);
+        lastError = e;
+        // Auth/permission errors won't be fixed by changing the sort — stop early
+        if (e?.status === 401 || e?.status === 403) break;
       }
-
-      setError(err.message || 'Failed to load meetings');
-    } finally {
-      setLoading(false);
     }
+
+    if (lastError) throw lastError;
+
+    console.log('[calendar] loaded meetings:', data.length);
+    if (data.length > 0) {
+      console.log('[calendar] sample record:', data[0]); // shows real field names + date format
+    } else {
+      console.warn('[calendar] 0 records returned → likely the List/Search API rule is filtering everything out');
+    }
+
+    setMeetings(data);
+  } catch (err: any) {
+    // Full JSON dump — reveals the actual 400 response body from PocketBase
+    console.error('[calendar] load error:', JSON.stringify(
+      { status: err?.status, message: err?.message, url: err?.url, response: err?.response },
+      null, 2
+    ));
+
+    if (err?.status === 401) {
+      logout();
+      router.replace('/login');
+      return;
+    }
+
+    if (err?.status === 400) {
+      setError('Server rejected the request (400). See browser console + PocketBase terminal for the exact cause — usually a broken API rule or an invalid sort/filter field.');
+    } else if (err?.status === 403) {
+      setError('You do not have permission to view meetings. Check the collection API rules.');
+    } else {
+      setError(err?.message || 'Failed to load meetings');
+    }
+  } finally {
+    setLoading(false);
   }
+}
+
+useEffect(() => { loadData(); }, []);
 
   /* ── Field normalizers ── */
 
@@ -407,23 +500,8 @@ export default function CalendarPage() {
     setSelectedDate(null);
   };
 
-  const handleDeleteMeeting = async () => {
-    if (!selectedMeeting) return;
-    if (!confirm('Delete this meeting?')) return;
-    try {
-      await pb.collection('meetings').delete(selectedMeeting.id);
-      closeOffCanvas();
-      await loadData();
-    } catch (err: any) {
-      console.error('Delete error:', err);
+  
 
-      // ── ✅ AUTH: session expired / revoked → secure sign-out + redirect ──
-      if (err?.status === 401) {
-        logout();
-        router.replace('/login');
-      }
-    }
-  };
 
   /* ─── Month View ─── */
   const renderMonthView = () => {
@@ -1287,13 +1365,13 @@ export default function CalendarPage() {
             >
               <Edit3 className="w-3.5 h-3.5" /> Edit meeting
             </button>
-            <button
-              type="button"
-              onClick={handleDeleteMeeting}
-              className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" /> Delete
-            </button>
+           <button
+  type="button"
+  onClick={requestDelete}
+  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 transition-colors"
+>
+  <Trash2 className="w-3.5 h-3.5" /> Delete
+</button>
           </div>
         </div>
       </>
@@ -1472,17 +1550,65 @@ export default function CalendarPage() {
         {/* Off-canvas panels (meeting details / day details) */}
         {renderOffCanvas()}
 
+        {/* Delete confirmation modal — replaces the browser confirm() dialog */}
+{confirmDelete && selectedMeeting && (
+  <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+    {/* Backdrop */}
+    <div className="absolute inset-0 bg-slate-900/50" onClick={cancelDelete} />
+
+    {/* Dialog */}
+    <div className="relative bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 sm:p-6">
+      <div className="w-11 h-11 rounded-full bg-red-50 flex items-center justify-center mx-auto mb-3">
+        <AlertCircle className="w-5 h-5 text-red-500" />
+      </div>
+
+      <h3 className="text-sm font-bold text-slate-900 text-center">Delete this meeting?</h3>
+      <p className="text-xs text-slate-500 text-center mt-1.5 leading-relaxed">
+        <span className="font-semibold text-slate-700">"{getMeetingTitle(selectedMeeting)}"</span> will be
+        permanently removed. This action can't be undone.
+      </p>
+
+      {deleteError && (
+        <div className="mt-3 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-2">
+          <AlertCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+          <p className="text-[11px] font-medium text-red-700">{deleteError}</p>
+        </div>
+      )}
+
+      <div className="flex gap-2 mt-5">
+        <button
+          type="button"
+          onClick={cancelDelete}
+          disabled={deleting}
+          className="flex-1 px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={confirmDeleteMeeting}
+          disabled={deleting}
+          className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-60 transition-colors"
+        >
+          {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+          {deleting ? 'Deleting…' : 'Delete'}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+
         {/* ⚠️ RECONSTRUCTED — keep whatever props your original file passes to
             CreateMeetingPanel. Adjust the prop names below to match yours. */}
         {panelOpen && (
-          <CreateMeetingPanel
-            isOpen={panelOpen}
-            onClose={closePanel}
-            onSuccess={handlePanelSuccess}
-            editingMeeting={editingMeeting}
-            preselectedDate={panelDate}
-          />
-        )}
+  <CreateMeetingPanel
+    isOpen={panelOpen}
+    onClose={closePanel}
+    onSuccess={handlePanelSuccess}
+    meetingToEdit={editingMeeting}   // ✅ renamed
+    defaultDate={panelDate}          // ✅ renamed
+  />
+)}
       </div>
     </ProtectedRoute>
   );

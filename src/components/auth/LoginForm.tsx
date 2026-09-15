@@ -1,314 +1,209 @@
+// src/components/auth/LoginForm.tsx
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import type { FormEvent, KeyboardEvent } from 'react';
-import type { LucideIcon } from 'lucide-react';
-import {
-  AlertCircle, CheckCircle2, Clock, Eye, EyeOff,
-  Loader2, Lock, Mail, ShieldCheck,
-} from 'lucide-react';
+import { AlertCircle, Eye, EyeOff, Loader2, LogIn, ShieldCheck } from 'lucide-react';
+import { ClientResponseError } from 'pocketbase';
 import pb from '@/lib/pocketbase';
 
-/* ─────────────────────────── types ─────────────────────────── */
+type AccountType = 'user' | 'superuser';
 
-type NoticeType = 'error' | 'success' | 'info';
-type Notice = { type: NoticeType; message: string } | null;
-type FieldErrors = Partial<Record<'email' | 'password', string>>;
-
-interface LoginFormProps {
-  /** Validates credentials. Throw an error to count a failed attempt. */
-  onLogin?: (credentials: { email: string; password: string }) => Promise<void>;
-  /** Where the user is sent after a successful sign-in. */
-  redirectTo?: string;
-}
-
-/* ───────────────────────── constants ───────────────────────── */
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const EMAIL_KEY = 'civillist_email';
-const MAX_ATTEMPTS = 3;
-const LOCK_SECONDS = 45;
-
-const NOTICE_STYLES: Record<NoticeType, string> = {
-  error: 'border-red-200 bg-red-50 text-red-700',
-  success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  info: 'border-blue-200 bg-blue-50 text-blue-700',
-};
-
-const NOTICE_ICONS: Record<NoticeType, LucideIcon> = {
-  error: AlertCircle,
-  success: CheckCircle2,
-  info: Mail,
-};
-
-/** Demo stand-in for an API call — replace where marked 👈 */
-const simulateApi = (ms: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/* ────────────────────────── component ──────────────────────── */
-
-export default function LoginForm({ onLogin, redirectTo = '/' }: LoginFormProps) {
+export default function LoginForm() {
   const router = useRouter();
 
+  const [accountType, setAccountType] = useState<AccountType>('user');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [remember, setRemember] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [capsOn, setCapsOn] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const [errors, setErrors] = useState<FieldErrors>({});
-  const [notice, setNotice] = useState<Notice>(null);
-
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [succeeded, setSucceeded] = useState(false);
-
-  const [attempts, setAttempts] = useState(0);
-  const [lockLeft, setLockLeft] = useState(0);
-
-  const formRef = useRef<HTMLFormElement>(null);
-
-  /* ── restore remembered email ── */
+  /* Reflect existing sessions (picked up from localStorage) */
+  const [auth, setAuth] = useState({ isValid: false, record: null as typeof pb.authStore.record });
   useEffect(() => {
-    const saved = localStorage.getItem(EMAIL_KEY);
-    if (saved) {
-      setEmail(saved);
-      setRemember(true);
-    }
+    const sync = () => setAuth({ isValid: pb.authStore.isValid, record: pb.authStore.record });
+    sync();
+    return pb.authStore.onChange(sync);
   }, []);
 
-  /* ── lockout countdown ── */
-  useEffect(() => {
-    if (lockLeft <= 0) return;
-    const t = setInterval(() => setLockLeft((s) => Math.max(0, s - 1)), 1000);
-    return () => clearInterval(t);
-  }, [lockLeft]);
+  const authRecord = auth.record as { id: string; email?: string; collectionName?: string } | null;
+  const isSuperuser = authRecord?.collectionName === '_superusers';
 
-  /* unlock once the countdown finishes */
-  useEffect(() => {
-    if (lockLeft === 0 && attempts >= MAX_ATTEMPTS) {
-      setAttempts(0);
-      setNotice({ type: 'info', message: 'You can try signing in again.' });
-    }
-  }, [lockLeft, attempts]);
-
-  /* ── utilities ── */
-  const clearFieldError = (field: 'email' | 'password') =>
-    setErrors((prev) => (prev[field] ? { ...prev, [field]: undefined } : prev));
-
-  /** Re-triggers the CSS shake animation on an element. */
-  const shake = (el: HTMLElement | null) => {
-    if (!el) return;
-    el.classList.remove('animate-shake');
-    void el.offsetWidth; // force reflow so the animation restarts
-    el.classList.add('animate-shake');
-  };
-
-  const detectCapsLock = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (typeof e.getModifierState === 'function') {
-      setCapsOn(e.getModifierState('CapsLock'));
-    }
-  };
-
-  const handleForgot = () => {
-    setNotice({ type: 'info', message: 'Password resets are handled by your department IT administrator.' });
-  };
-
-  /* ── submit ── */
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting || lockLeft > 0) return;
+    setError(null);
 
-    const next: FieldErrors = {};
-    if (!EMAIL_RE.test(email.trim())) next.email = 'Enter a valid email address.';
-    if (password.length < 6) next.password = 'Password must be at least 6 characters.';
-    setErrors(next);
-    if (next.email || next.password) {
-      shake(formRef.current);
+    if (!email.trim() || !password) {
+      setError('Please enter your email and password.');
       return;
     }
 
-    if (remember) localStorage.setItem(EMAIL_KEY, email.trim());
-    else localStorage.removeItem(EMAIL_KEY);
-
-    setIsSubmitting(true);
-    setNotice(null);
+    setBusy(true);
     try {
-      if (onLogin) await onLogin({ email: email.trim(), password });
-      else await pb.collection('users').authWithPassword(email.trim(), password);
-
-      setSucceeded(true);
-      setTimeout(() => router.push(redirectTo), 1600);
-    } catch {
-      const nextAttempt = attempts + 1;
-      setAttempts(nextAttempt);
-      shake(formRef.current);
-      if (nextAttempt >= MAX_ATTEMPTS) {
-        setLockLeft(LOCK_SECONDS);
-        setNotice({ type: 'error', message: 'Too many failed attempts — sign-in temporarily locked.' });
+      if (accountType === 'superuser') {
+        // PocketBase 0.23+ (older versions: pb.admins.authWithPassword(email, password))
+        await pb.collection('_superusers').authWithPassword(email.trim(), password);
       } else {
-        const left = MAX_ATTEMPTS - nextAttempt;
-        setNotice({
-          type: 'error',
-          message: `Incorrect email or password. ${left} attempt${left === 1 ? '' : 's'} remaining.`,
-        });
+        // ⚠️ If your auth collection isn't named "users", change it here —
+        // check your OLD LoginForm for the pb.collection('...') call it used.
+        await pb.collection('users').authWithPassword(email.trim(), password);
+      }
+
+      // Token is stored automatically. CreateOfficerPanel detects it via
+      // pb.authStore.onChange and enables saving — no props needed.
+      router.push('/'); // change to your dashboard route if different
+      router.refresh();
+    } catch (err) {
+      if (err instanceof ClientResponseError) {
+        if (err.status === 0) setError('Cannot reach the server — is PocketBase running?');
+        else if (err.status === 400) setError('Invalid email or password.');
+        else setError(err.message);
+      } else {
+        setError('Something went wrong. Please try again.');
       }
     } finally {
-      setIsSubmitting(false);
+      setBusy(false);
     }
   };
 
-  const NoticeIcon = notice ? NOTICE_ICONS[notice.type] : null;
+  const signOut = () => {
+    pb.authStore.clear();
+    setEmail('');
+    setPassword('');
+  };
 
-  /* ── success screen ── */
-  if (succeeded) {
+  /* ---------------- Already signed in? ---------------- */
+  if (auth.isValid) {
     return (
-      <div className="animate-pop-in flex flex-col items-center rounded-2xl border border-emerald-200 bg-gradient-to-b from-emerald-50 to-white px-6 py-12 text-center shadow-sm">
-        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 ring-8 ring-emerald-50">
-          <CheckCircle2 className="h-8 w-8 text-emerald-600" />
+      <div className="rounded-2xl border border-gray-200 bg-gray-50 p-6">
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white">
+            <ShieldCheck className="h-5 w-5" />
+          </span>
+          <div>
+            <p className="text-sm font-semibold text-gray-900">
+              Signed in as {authRecord?.email ?? authRecord?.id}
+            </p>
+            <p className="text-xs text-gray-500">
+              {isSuperuser ? 'Superuser account' : 'User account'}
+            </p>
+          </div>
         </div>
-        <h2 className="mt-6 text-xl font-bold text-gray-900">Signed in successfully</h2>
-        <p className="mt-1.5 text-sm text-gray-500">Redirecting to your dashboard…</p>
-        <Loader2 className="mt-6 h-5 w-5 animate-spin text-emerald-500" />
+        <div className="mt-5 flex gap-2.5">
+          <button
+            type="button"
+            onClick={() => { router.push('/'); router.refresh(); }}
+            className="flex-1 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-blue-600/25 transition-colors hover:bg-blue-700"
+          >
+            Go to dashboard
+          </button>
+          <button
+            type="button"
+            onClick={signOut}
+            className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-600 transition-colors hover:bg-white"
+          >
+            Sign out
+          </button>
+        </div>
       </div>
     );
   }
 
+  /* ---------------- Sign-in form ---------------- */
   return (
-    <div>
+    <form onSubmit={handleSubmit} className="space-y-5" noValidate>
+      {/* Account type toggle */}
+      <div>
+        <span className="mb-1.5 block text-[13px] font-medium text-gray-700">Account type</span>
+        <div role="radiogroup" aria-label="Account type" className="grid grid-cols-2 gap-1 rounded-xl bg-gray-100 p-1">
+          {([['user', 'User'], ['superuser', 'Superuser']] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={accountType === value}
+              onClick={() => { setAccountType(value); setError(null); }}
+              className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-all ${
+                accountType === value
+                  ? 'bg-white text-gray-900 shadow-sm ring-1 ring-gray-200'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {value === 'superuser' && <ShieldCheck className="h-4 w-4" />}
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[11px] text-gray-400">
+          {accountType === 'superuser'
+            ? 'Full access — bypasses all PocketBase rules.'
+            : 'Access depends on the collection API rules.'}
+        </p>
+      </div>
 
-      {/* Notices */}
-      {notice && NoticeIcon && (
-        <div
-          role="status"
-          aria-live="polite"
-          className={`animate-fade-up mb-5 flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-xs leading-relaxed ${NOTICE_STYLES[notice.type]}`}
-        >
-          <NoticeIcon className="mt-px h-4 w-4 shrink-0" />
-          <p>{notice.message}</p>
+      {/* Email */}
+      <div>
+        <label htmlFor="login-email" className="mb-1.5 block text-[13px] font-medium text-gray-700">
+          Email address
+        </label>
+        <input
+          id="login-email"
+          type="email"
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com"
+          className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none transition-all placeholder:text-gray-400 hover:border-gray-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-600/10"
+        />
+      </div>
+
+      {/* Password */}
+      <div>
+        <label htmlFor="login-password" className="mb-1.5 block text-[13px] font-medium text-gray-700">
+          Password
+        </label>
+        <div className="relative">
+          <input
+            id="login-password"
+            type={showPassword ? 'text' : 'password'}
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••"
+            className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 pr-11 text-sm text-gray-900 shadow-sm outline-none transition-all placeholder:text-gray-400 hover:border-gray-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-600/10"
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword((v) => !v)}
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
+            className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-gray-400 transition-colors hover:text-gray-600"
+          >
+            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div role="alert" className="flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+          <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
+          <p className="text-[13px] text-red-700">{error}</p>
         </div>
       )}
 
-      <form ref={formRef} onSubmit={handleSubmit} noValidate className="space-y-5">
-
-        {/* Email */}
-        <div>
-          <label htmlFor="email" className="mb-2 block text-sm font-medium text-gray-700">
-            Email address
-          </label>
-          <div className={`relative rounded-xl border transition-all duration-150 ${
-            errors.email
-              ? 'border-red-300 ring-4 ring-red-500/10'
-              : 'border-gray-200 focus-within:border-blue-600 focus-within:ring-4 focus-within:ring-blue-600/10'
-          }`}>
-            <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-            <input
-              type="email"
-              id="email"
-              name="email"
-              autoComplete="email"
-              placeholder="name@office.gov"
-              value={email}
-              disabled={isSubmitting || lockLeft > 0}
-              onChange={(e) => { setEmail(e.target.value); clearFieldError('email'); }}
-              className="w-full bg-transparent py-3 pl-11 pr-4 text-sm text-gray-900 outline-none placeholder:text-gray-400 disabled:opacity-60"
-            />
-          </div>
-          {errors.email && (
-            <p className="mt-1.5 flex items-center gap-1 text-xs text-red-600">
-              <AlertCircle className="h-3.5 w-3.5" /> {errors.email}
-            </p>
-          )}
-        </div>
-
-        {/* Password */}
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <label htmlFor="password" className="text-sm font-medium text-gray-700">Password</label>
-            <button
-              type="button"
-              onClick={handleForgot}
-              className="text-xs font-medium text-blue-600 transition-colors hover:text-blue-800 hover:underline"
-            >
-              Forgot password?
-            </button>
-          </div>
-          <div className={`relative rounded-xl border transition-all duration-150 ${
-            errors.password
-              ? 'border-red-300 ring-4 ring-red-500/10'
-              : 'border-gray-200 focus-within:border-blue-600 focus-within:ring-4 focus-within:ring-blue-600/10'
-          }`}>
-            <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-            <input
-              type={showPassword ? 'text' : 'password'}
-              id="password"
-              name="password"
-              autoComplete="current-password"
-              placeholder="••••••••"
-              value={password}
-              disabled={isSubmitting || lockLeft > 0}
-              onKeyDown={detectCapsLock}
-              onKeyUp={detectCapsLock}
-              onChange={(e) => { setPassword(e.target.value); clearFieldError('password'); }}
-              className="w-full bg-transparent py-3 pl-11 pr-12 text-sm text-gray-900 outline-none placeholder:text-gray-400 disabled:opacity-60"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword((s) => !s)}
-              aria-label={showPassword ? 'Hide password' : 'Show password'}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
-            >
-              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
-          </div>
-          {capsOn && !errors.password && (
-            <p className="mt-1.5 flex items-center gap-1 text-xs text-amber-600">
-              <AlertCircle className="h-3.5 w-3.5" /> Caps Lock is on
-            </p>
-          )}
-          {errors.password && (
-            <p className="mt-1.5 flex items-center gap-1 text-xs text-red-600">
-              <AlertCircle className="h-3.5 w-3.5" /> {errors.password}
-            </p>
-          )}
-        </div>
-
-        {/* Remember + lockout status */}
-        <div className="flex items-center justify-between">
-          <label className="flex cursor-pointer select-none items-center gap-2.5 text-sm text-gray-600">
-            <input
-              type="checkbox"
-              checked={remember}
-              disabled={lockLeft > 0}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="h-4 w-4 cursor-pointer rounded accent-blue-700"
-            />
-            Remember my email
-          </label>
-          {lockLeft > 0 && (
-            <p className="flex items-center gap-1 text-xs font-medium text-red-600">
-              <Clock className="h-3.5 w-3.5" /> Retry in {lockLeft}s
-            </p>
-          )}
-        </div>
-
-        {/* Submit */}
-        <button
-          type="submit"
-          disabled={isSubmitting || lockLeft > 0}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-700 to-indigo-700 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-900/25 transition-all duration-200 hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
-        >
-          {isSubmitting ? (
-            <><Loader2 className="h-4 w-4 animate-spin" /> Verifying credentials…</>
-          ) : (
-            <><ShieldCheck className="h-4 w-4" /> Sign in securely</>
-          )}
-        </button>
-
-        <p className="text-center text-[11px] leading-relaxed text-gray-400">
-          All sign-in attempts are logged and monitored
-        </p>
-      </form>
-    </div>
+      {/* Submit */}
+      <button
+        type="submit"
+        disabled={busy}
+        className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-600/25 transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {busy ? (
+          <><Loader2 className="h-4 w-4 animate-spin" /> Signing in...</>
+        ) : (
+          <><LogIn className="h-4 w-4" /> Sign in as {accountType === 'superuser' ? 'Superuser' : 'User'}</>
+        )}
+      </button>
+    </form>
   );
 }

@@ -1,8 +1,11 @@
-import type { NextConfig } from "next";
-
-const nextConfig: NextConfig = {
-  /* config options here */
-  reactCompiler: true,
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  async rewrites() {
+    const pbUrl = (process.env.POCKETBASE_URL || 'http://172.30.0.200:8091').replace(/\/+$/, '');
+    return [
+      { source: '/pb/:path*', destination: `${pbUrl}/:path*` },
+    ];
+  },
 };
 
-export default nextConfig;
+module.exports = nextConfig;

@@ -21,17 +21,23 @@ export const AUTH_COLLECTION = 'users';
  * Note: restart the dev server after changing .env.local —
  * NEXT_PUBLIC_* values are inlined at startup/build time.
  */
-export function getPocketBaseURL(): string {
-  const url = process.env.NEXT_PUBLIC_POCKETBASE_URL;
+/**
+ * Browser: same-origin '/pb' path, proxied by the Next.js rewrite
+ * (see next.config.js) — no CORS, ever.
+ * Server (Node): direct URL — Node has no CORS restrictions.
+ */
+const BROWSER_BASE = '/pb';
 
+export function getPocketBaseURL(): string {
+  if (typeof window !== 'undefined') return BROWSER_BASE;
+
+  const url = process.env.POCKETBASE_URL || process.env.NEXT_PUBLIC_POCKETBASE_URL;
   if (!url) {
     throw new Error(
-      'NEXT_PUBLIC_POCKETBASE_URL is not set. Add it to your .env.local file:\n' +
-        'NEXT_PUBLIC_POCKETBASE_URL=http://172.30.0.200:8091'
+      'POCKETBASE_URL is not set. Add it to your .env.local file:\n' +
+        'POCKETBASE_URL=http://172.30.0.200:8091'
     );
   }
-
-  // Trim any trailing slash so API paths build correctly.
   return url.replace(/\/+$/, '');
 }
 
