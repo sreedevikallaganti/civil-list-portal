@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import {
   X, Save, Loader2, AlertCircle, ChevronDown, UserPlus, Pencil,
-  User, Briefcase, Phone, FileText, LogIn, LogOut,
+  User, Briefcase, Shield, Building2, Phone, FileText, LogIn, LogOut, Check,
 } from 'lucide-react';
 import { ClientResponseError } from 'pocketbase';
 import pb from '@/lib/pocketbase';
@@ -82,19 +82,47 @@ const CONTACT_KEYS = Object.keys(INITIAL_CONTACT_FORM) as (keyof FormShape)[];
 const TYPE_KEYS = ['IAS', 'IPS', 'Other'] as const;
 
 const TYPE_META = {
-  IAS:   { label: 'IAS',     dot: 'bg-blue-400',   collection: 'ias_officers',   desc: 'Indian Administrative Service' },
-  IPS:   { label: 'IPS',     dot: 'bg-indigo-400', collection: 'ips_officers',   desc: 'Indian Police Service' },
-  Other: { label: 'Contact', dot: 'bg-amber-400',  collection: 'other_contacts', desc: 'External / other contact' },
+  IAS: {
+    label: 'IAS', dot: 'bg-sky-500', collection: 'ias_officers', desc: 'Indian Administrative Service',
+    gradient: 'from-sky-600 via-blue-700 to-indigo-800', glow: 'shadow-blue-700/25',
+    iconTint: 'bg-sky-100 text-sky-600 ring-sky-600/10', cardIcon: Briefcase,
+    cardSelected: 'border-sky-300 bg-gradient-to-br from-sky-50/90 via-white to-white ring-2 ring-sky-400/40',
+    checkBg: 'bg-sky-500',
+    button: 'from-sky-500 to-blue-600', buttonGlow: 'shadow-blue-600/25',
+  },
+  IPS: {
+    label: 'IPS', dot: 'bg-indigo-500', collection: 'ips_officers', desc: 'Indian Police Service',
+    gradient: 'from-indigo-600 via-violet-700 to-purple-800', glow: 'shadow-indigo-700/25',
+    iconTint: 'bg-indigo-100 text-indigo-600 ring-indigo-600/10', cardIcon: Shield,
+    cardSelected: 'border-indigo-300 bg-gradient-to-br from-indigo-50/90 via-white to-white ring-2 ring-indigo-400/40',
+    checkBg: 'bg-indigo-500',
+    button: 'from-indigo-500 to-violet-600', buttonGlow: 'shadow-indigo-600/25',
+  },
+  Other: {
+    label: 'Contact', dot: 'bg-amber-500', collection: 'other_contacts', desc: 'External / other contact',
+    gradient: 'from-amber-500 via-orange-500 to-rose-600', glow: 'shadow-amber-600/25',
+    iconTint: 'bg-amber-100 text-amber-600 ring-amber-600/10', cardIcon: Building2,
+    cardSelected: 'border-amber-300 bg-gradient-to-br from-amber-50/90 via-white to-white ring-2 ring-amber-400/40',
+    checkBg: 'bg-amber-500',
+    button: 'from-amber-500 to-orange-600', buttonGlow: 'shadow-amber-600/25',
+  },
 } as const;
+
+/* Neutral look while no type is chosen yet (general mode) */
+const FALLBACK_META = {
+  gradient: 'from-slate-800 via-slate-900 to-indigo-950',
+  button: 'from-slate-800 to-slate-900', buttonGlow: 'shadow-slate-900/25',
+};
 
 const CADRE_OPTIONS = ['Andhra Pradesh', 'Telangana', 'Tamil Nadu', 'Karnataka', 'Kerala', 'Maharashtra', 'Gujarat', 'Rajasthan', 'Madhya Pradesh', 'Uttar Pradesh', 'Bihar', 'West Bengal', 'Odisha', 'Punjab', 'Haryana', 'Delhi', 'Central', 'Other'];
 const STATE_OPTIONS = ['Andhra Pradesh', 'Telangana', 'Tamil Nadu', 'Karnataka', 'Kerala', 'Maharashtra', 'Gujarat', 'Rajasthan', 'Madhya Pradesh', 'Uttar Pradesh', 'Bihar', 'West Bengal', 'Odisha', 'Punjab', 'Haryana', 'Delhi', 'Other'];
 
+/* Each status gets its own soft selected tint */
 const STATUS_OPTIONS = [
-  { value: 'Active',    dot: 'bg-emerald-500' },
-  { value: 'Retired',   dot: 'bg-slate-400' },
-  { value: 'On Leave',  dot: 'bg-amber-500' },
-  { value: 'Suspended', dot: 'bg-red-500' },
+  { value: 'Active',    dot: 'bg-emerald-500', selected: 'border-emerald-400 bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-500/30' },
+  { value: 'Retired',   dot: 'bg-slate-400',   selected: 'border-slate-400 bg-slate-100 text-slate-700 ring-1 ring-inset ring-slate-500/25' },
+  { value: 'On Leave',  dot: 'bg-amber-500',   selected: 'border-amber-400 bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-500/30' },
+  { value: 'Suspended', dot: 'bg-rose-500',    selected: 'border-rose-400 bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-500/30' },
 ];
 
 /* EDIT MODE — map a PocketBase record onto the form state.
@@ -122,6 +150,34 @@ function recordToForm(record: Record<string, any>): FormShape {
     out[key] = String(v);
   });
   return out;
+}
+
+/* ------------------------------ Panel styles ------------------------------ */
+
+function PanelStyles() {
+  return (
+    <style>{`
+      @keyframes cofPanel   { from { transform: translateX(100%); } to { transform: translateX(0); } }
+      @keyframes cofOverlay { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes cofFadeUp  { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes cofFadeIn  { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes cofPop     { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
+      @keyframes cofSlideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes cofPulse   { 0%,100% { box-shadow: 0 0 0 0 rgba(14,165,233,.22); } 50% { box-shadow: 0 0 0 7px rgba(14,165,233,0); } }
+
+      .cof-panel    { animation: cofPanel .45s cubic-bezier(.32,.72,0,1) both; }
+      .cof-overlay  { animation: cofOverlay .3s ease both; }
+      .cof-fade-up  { opacity: 0; animation: cofFadeUp .55s cubic-bezier(.22,1,.36,1) forwards; }
+      .cof-fade-in  { opacity: 0; animation: cofFadeIn .3s ease forwards; }
+      .cof-pop      { opacity: 0; animation: cofPop .45s cubic-bezier(.34,1.56,.64,1) forwards; }
+      .cof-slide-up { opacity: 0; animation: cofSlideUp .25s ease forwards; }
+      .cof-highlight{ animation: cofPulse 1.2s ease-in-out 1; }
+
+      @media (prefers-reduced-motion: reduce) {
+        .cof-panel, .cof-overlay, .cof-fade-up, .cof-fade-in, .cof-pop, .cof-slide-up, .cof-highlight { animation: none; opacity: 1; }
+      }
+    `}</style>
+  );
 }
 
 /* ------------------------------- UI Atoms -------------------------------- */
@@ -160,7 +216,7 @@ function Field({
       {label}
       {required && (
         <>
-          <span className="ml-0.5 text-red-500" aria-hidden="true">*</span>
+          <span className="ml-0.5 text-rose-500" aria-hidden="true">*</span>
           <span className="sr-only"> (required)</span>
         </>
       )}
@@ -178,7 +234,7 @@ function Field({
       )}
       {children}
       {error && (
-        <p id={id ? `${id}-error` : undefined} className="mt-1.5 flex items-center gap-1 text-xs font-medium text-red-600">
+        <p id={id ? `${id}-error` : undefined} className="cof-fade-in mt-1.5 flex items-center gap-1 text-xs font-medium text-rose-600">
           <AlertCircle className="h-3 w-3 flex-shrink-0" />
           {error}
         </p>
@@ -188,34 +244,47 @@ function Field({
 }
 
 function Section({
-  id, icon: Icon, title, description, highlighted = false, children,
+  id, icon: Icon, title, description, step, accent, highlighted = false, delay = 0, children,
 }: {
   id?: string;
   icon: React.ComponentType<{ className?: string }>;
   title: string;
   description: string;
+  step: number;
+  /** Soft tint classes for the icon tile, e.g. "bg-sky-100 text-sky-600 ring-sky-600/10" */
+  accent: string;
   highlighted?: boolean;
+  delay?: number;
   children: React.ReactNode;
 }) {
   return (
     <>
-      <div id={id} tabIndex={-1} className="col-span-full scroll-mt-6 pt-4 first:pt-0 focus:outline-none">
+      <div
+        id={id}
+        tabIndex={-1}
+        className="cof-fade-up col-span-full scroll-mt-6 pt-2 first:pt-0 focus:outline-none"
+        style={{ animationDelay: `${delay}ms` }}
+      >
         <div
-          className={`-mx-3 flex items-center gap-3 rounded-xl px-3 py-2 ring-1 transition-all duration-300 ${
-            highlighted ? 'bg-slate-100/90 ring-slate-200' : 'bg-transparent ring-transparent'
+          className={`-mx-3 flex items-center gap-3 rounded-xl px-3 py-2.5 ring-1 transition-all duration-300 ${
+            highlighted ? 'cof-highlight bg-sky-50/90 ring-sky-200' : 'bg-transparent ring-transparent'
           }`}
         >
           <span
-            className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg shadow-sm ring-1 ring-inset transition-colors duration-300 ${
-              highlighted ? 'bg-slate-900 ring-slate-900' : 'bg-white ring-slate-200'
+            className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl shadow-sm ring-1 ring-inset transition-all duration-300 ${
+              highlighted ? 'scale-105 bg-sky-600 text-white ring-sky-600' : accent
             }`}
           >
-            <Icon className={`h-4 w-4 transition-colors duration-300 ${highlighted ? 'text-white' : 'text-slate-500'}`} />
+            <Icon className="h-4 w-4" />
           </span>
-          <div>
-            <h3 className="text-sm font-semibold leading-none text-slate-900">{title}</h3>
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-[10px] font-bold tracking-widest text-slate-300">{String(step).padStart(2, '0')}</span>
+              <h3 className="text-sm font-semibold leading-none text-slate-900">{title}</h3>
+            </div>
             <p className="mt-1 text-xs leading-none text-slate-400">{description}</p>
           </div>
+          <div className="ml-2 hidden h-px flex-1 bg-gradient-to-r from-slate-200 to-transparent sm:block" />
         </div>
       </div>
       {children}
@@ -263,12 +332,13 @@ function StatusPillGroup({ value, onChange }: { value: string; onChange: (v: str
               onClick={() => onChange(s.value)}
               className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-2 text-xs font-medium shadow-sm transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 ${
                 selected
-                  ? 'border-slate-900 bg-slate-900 text-white'
-                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900'
+                  ? `${s.selected} -translate-y-px`
+                  : 'border-slate-200 bg-white text-slate-600 hover:-translate-y-0.5 hover:border-slate-300 hover:text-slate-900 hover:shadow-sm'
               }`}
             >
-              <span className={`h-1.5 w-1.5 rounded-full ${selected ? 'bg-white' : s.dot}`} />
+              <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
               {s.value}
+              {selected && <Check className="h-3 w-3" strokeWidth={3} />}
             </button>
           );
         })}
@@ -326,6 +396,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
   const baselineForm = editOfficer ? recordToForm(editOfficer) : INITIAL_ALL;
 
   const selectedMeta = activeType ? TYPE_META[activeType] : null;
+  const headerMeta = selectedMeta ?? FALLBACK_META;
   const isContact = activeType === 'Other';
   const heading = isEditMode
     ? (isContact ? 'Edit Contact' : 'Edit Officer')
@@ -388,6 +459,14 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
     (Object.keys(INITIAL_ALL) as (keyof FormShape)[]).some(
       (k) => formData[k] !== baselineForm[k]
     );
+
+  /* Visual only — % of relevant fields that are filled (drives the header progress bar) */
+  const trackedKeys: (keyof FormShape)[] = activeType
+    ? (isContact ? CONTACT_KEYS : OFFICER_KEYS)
+    : (Object.keys(INITIAL_ALL) as (keyof FormShape)[]);
+  const completion = Math.round(
+    (trackedKeys.filter((k) => (formData[k] || '').trim() !== '').length / trackedKeys.length) * 100
+  );
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -585,10 +664,10 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
   /* ------------------------------ Input styling ----------------------------- */
 
   const inputCls = (invalid = false) =>
-    `w-full rounded-lg border bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition-all duration-150 placeholder:text-slate-400 hover:border-slate-300 focus:ring-4 ${
+    `w-full rounded-xl border bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 hover:border-slate-300 focus:ring-4 ${
       invalid
-        ? 'border-red-300 focus:border-red-400 focus:ring-red-500/10'
-        : 'border-slate-200 focus:border-slate-500 focus:ring-slate-900/5'
+        ? 'border-rose-300 bg-rose-50/40 focus:border-rose-400 focus:ring-rose-500/10'
+        : 'border-slate-200 focus:border-sky-400 focus:ring-sky-500/10'
     }`;
 
   const selectCls = (invalid = false) => `${inputCls(invalid)} cursor-pointer appearance-none pr-9`;
@@ -598,14 +677,22 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
     <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
   );
 
+  /* Section accents (soft tints) + stagger delays */
+  const S1 = { accent: 'bg-sky-100 text-sky-600 ring-sky-600/10',     delay: 120 };
+  const S2 = { accent: 'bg-indigo-100 text-indigo-600 ring-indigo-600/10', delay: 190 };
+  const S3 = { accent: 'bg-emerald-100 text-emerald-600 ring-emerald-600/10', delay: 260 };
+  const S4 = { accent: 'bg-amber-100 text-amber-600 ring-amber-600/10', delay: 330 };
+
   /* --------------------------------- Render --------------------------------- */
 
   return (
     <>
+      <PanelStyles />
+
       {/* Backdrop */}
       <div
         aria-hidden="true"
-        className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-[2px] animate-in fade-in duration-300"
+        className="cof-overlay fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-[2px]"
         onClick={() => !loading && onClose()}
       />
 
@@ -616,19 +703,20 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
         aria-modal="true"
         aria-labelledby={`${uid}-heading`}
         tabIndex={-1}
-        className="fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col bg-white shadow-2xl outline-none animate-in fade-in slide-in-from-right duration-300"
+        className="cof-panel fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col bg-white shadow-2xl outline-none"
       >
 
         {/* ------------------------------- Header ------------------------------- */}
-        <header className="relative flex-shrink-0 overflow-hidden border-b border-slate-800 bg-slate-900 px-6 py-5 lg:px-8">
-          <div className="pointer-events-none absolute -top-28 -right-12 h-72 w-72 rounded-full bg-indigo-500/10 blur-3xl" />
+        <header className={`relative flex-shrink-0 overflow-hidden bg-gradient-to-br ${headerMeta.gradient} px-6 py-5 lg:px-8`}>
+          {/* Decorative light */}
+          <div className="pointer-events-none absolute -top-28 -right-12 h-72 w-72 rounded-full bg-white/10 blur-3xl" />
+          <div className="pointer-events-none absolute -bottom-24 -left-16 h-56 w-56 rounded-full bg-white/5 blur-3xl" />
+          <div className="pointer-events-none absolute -top-12 left-1/3 h-32 w-32 rounded-full border border-white/10" />
 
           <div className="relative flex items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3.5">
-              <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-inset ring-white/15">
-                {isEditMode
-                  ? <Pencil className="h-5 w-5 text-white" />
-                  : <UserPlus className="h-5 w-5 text-white" />}
+              <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-white/10 ring-1 ring-inset ring-white/20 backdrop-blur-sm transition-transform duration-300 hover:scale-105">
+                {isEditMode ? <Pencil className="h-5 w-5 text-white" /> : <UserPlus className="h-5 w-5 text-white" />}
               </div>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2.5">
@@ -636,19 +724,19 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                     {heading}
                   </h2>
                   {selectedMeta ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-md bg-white/10 px-2 py-0.5 text-[11px] font-medium text-slate-200 ring-1 ring-inset ring-white/10">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-semibold text-white ring-1 ring-inset ring-white/20 backdrop-blur-sm">
                       <span className={`h-1.5 w-1.5 rounded-full ${selectedMeta.dot}`} />
                       {selectedMeta.label}
                     </span>
                   ) : (
-                    <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-400/10 px-2 py-0.5 text-[11px] font-medium text-amber-300 ring-1 ring-inset ring-amber-400/20">
-                      <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-200 ring-1 ring-inset ring-amber-300/25 backdrop-blur-sm">
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-300" />
                       Select type
                     </span>
                   )}
                 </div>
-                <p className="mt-1 text-[13px] text-slate-400">
-                  Fields marked with <span className="font-medium text-red-400">*</span> are required
+                <p className="mt-1 text-[13px] text-white/60">
+                  Fields marked with <span className="font-medium text-rose-300">*</span> are required
                 </p>
               </div>
             </div>
@@ -657,15 +745,26 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
               type="button"
               onClick={onClose}
               aria-label="Close panel"
-              className="-mr-2 -mt-1 flex-shrink-0 rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+              className="-mr-2 -mt-1 flex-shrink-0 rounded-lg p-2 text-white/60 transition-all duration-200 hover:rotate-90 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
             >
               <X className="h-5 w-5" />
             </button>
           </div>
+
+          {/* Animated completion progress — purely visual */}
+          <div className="relative mt-4 flex items-center gap-3" aria-hidden="true">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/15">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-white/95 to-white/60 transition-all duration-500 ease-out"
+                style={{ width: `${completion}%` }}
+              />
+            </div>
+            <span className="text-[11px] font-semibold tabular-nums text-white/70">{completion}% filled</span>
+          </div>
         </header>
 
         {/* ----------------------------- Form Body ----------------------------- */}
-        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-slate-50">
+        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-gradient-to-b from-slate-50 via-slate-50/60 to-blue-50/30">
           <form id="create-officer-form" onSubmit={handleSubmit}>
             <div className="px-6 py-6 lg:px-8 lg:py-7">
               <div className="grid grid-cols-1 gap-x-5 gap-y-4 md:grid-cols-2">
@@ -674,19 +773,22 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                 {error && (
                   <div
                     role="alert"
-                    className="col-span-full flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 animate-in fade-in duration-200"
+                    className="cof-fade-in col-span-full flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50/90 px-4 py-3 ring-1 ring-inset ring-rose-600/10"
                   >
-                    <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
-                    <p className="text-[13px] leading-relaxed text-red-700">{error}</p>
+                    <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-rose-500" />
+                    <p className="text-[13px] leading-relaxed text-rose-700">{error}</p>
                   </div>
                 )}
 
                 {/* Auth status */}
                 <div
                   role="status"
-                  className={`col-span-full flex items-center gap-2.5 rounded-xl border px-4 py-3 ${
-                    auth.isValid ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'
+                  className={`cof-fade-up col-span-full flex flex-wrap items-center gap-2.5 rounded-xl border px-4 py-3 ${
+                    auth.isValid
+                      ? 'border-emerald-200/80 bg-emerald-50/80 ring-1 ring-inset ring-emerald-600/10'
+                      : 'border-amber-200/80 bg-amber-50/80 ring-1 ring-inset ring-amber-600/10'
                   }`}
+                  style={{ animationDelay: '60ms' }}
                 >
                   {auth.isValid ? (
                     <>
@@ -697,7 +799,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                       <button
                         type="button"
                         onClick={() => pb.authStore.clear()}
-                        className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-slate-500 hover:bg-white hover:text-slate-700"
+                        className="ml-auto inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-500 transition-colors hover:bg-white hover:text-slate-700"
                       >
                         <LogOut className="h-3.5 w-3.5" /> Sign out
                       </button>
@@ -715,11 +817,16 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                 {/* ---------------------- Record Type (general mode) ---------------------- */}
                 {isGeneralMode && (
-                  <div className="col-span-full">
-                    <span id={`${uid}-type-label`} className="mb-1.5 flex items-center gap-0.5 text-[13px] font-medium text-slate-700">
-                      Record Type
-                      <span className="ml-0.5 text-red-500" aria-hidden="true">*</span>
-                      <span className="sr-only"> (required)</span>
+                  <div className="cof-fade-up col-span-full" style={{ animationDelay: '100ms' }}>
+                    <span id={`${uid}-type-label`} className="mb-2 flex items-center justify-between text-[13px] font-medium text-slate-700">
+                      <span className="flex items-center gap-0.5">
+                        Record Type
+                        <span className="ml-0.5 text-rose-500" aria-hidden="true">*</span>
+                        <span className="sr-only"> (required)</span>
+                      </span>
+                      <span className="hidden items-center gap-1 text-[11px] font-normal text-slate-400 sm:flex">
+                        <Kbd>Alt</Kbd><Kbd>T</Kbd> focus
+                      </span>
                     </span>
 
                     <div
@@ -735,10 +842,11 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                         setSelectedType(next);
                         document.getElementById(`${uid}-type-${next}`)?.focus();
                       }}
-                      className="grid grid-cols-1 gap-2 sm:grid-cols-3"
+                      className="grid grid-cols-1 gap-2.5 sm:grid-cols-3"
                     >
-                      {TYPE_KEYS.map((t) => {
+                      {TYPE_KEYS.map((t, i) => {
                         const m = TYPE_META[t];
+                        const TypeIcon = m.cardIcon;
                         const selected = selectedType === t;
                         return (
                           <button
@@ -748,17 +856,23 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                             role="radio"
                             aria-checked={selected}
                             onClick={() => setSelectedType(t)}
-                            className={`flex flex-col items-center gap-1 rounded-xl border px-3 py-3.5 shadow-sm transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 ${
+                            style={{ animationDelay: `${140 + i * 70}ms` }}
+                            className={`cof-fade-up group relative flex flex-col items-center gap-1.5 rounded-xl border px-3 py-4 shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 ${
                               selected
-                                ? 'border-slate-900 bg-slate-900 text-white'
-                                : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                                ? `${m.cardSelected} -translate-y-0.5 shadow-md`
+                                : 'border-slate-200 bg-white text-slate-700 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm'
                             }`}
                           >
-                            <span className="flex items-center gap-2">
-                              <span className={`h-2 w-2 rounded-full ${m.dot}`} />
-                              <span className="text-sm font-semibold">{m.label}</span>
+                            {selected && (
+                              <span className={`cof-pop absolute right-2 top-2 flex h-4.5 w-4.5 h-[18px] w-[18px] items-center justify-center rounded-full ${m.checkBg}`}>
+                                <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />
+                              </span>
+                            )}
+                            <span className={`flex h-9 w-9 items-center justify-center rounded-xl ring-1 ring-inset ${m.iconTint} transition-transform duration-200 group-hover:scale-110`}>
+                              <TypeIcon className="h-4 w-4" />
                             </span>
-                            <span className={`text-[11px] ${selected ? 'text-slate-300' : 'text-slate-400'}`}>
+                            <span className="text-sm font-semibold">{m.label}</span>
+                            <span className={`text-center text-[11px] leading-tight ${selected ? 'text-slate-500' : 'text-slate-400'}`}>
                               {m.desc}
                             </span>
                           </button>
@@ -767,12 +881,12 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                     </div>
 
                     {typeError ? (
-                      <p id={`${uid}-type-error`} className="mt-1.5 flex items-center gap-1 text-xs font-medium text-red-600">
+                      <p id={`${uid}-type-error`} className="cof-fade-in mt-1.5 flex items-center gap-1 text-xs font-medium text-rose-600">
                         <AlertCircle className="h-3 w-3 flex-shrink-0" />
                         {typeError}
                       </p>
                     ) : (
-                      <p className="mt-1.5 text-[11px] text-slate-400">
+                      <p className="mt-2 text-[11px] text-slate-400">
                         {selectedType
                           ? selectedType === 'Other'
                             ? 'The form below switches to contact fields (name, category, organization, etc.).'
@@ -789,10 +903,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 01 Basic Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-1`}
-                      icon={User}
-                      title="Basic Information"
-                      description="Identity and service details"
+                      id={`${uid}-section-1`} icon={User} step={1} accent={S1.accent} delay={S1.delay}
+                      title="Basic Information" description="Identity and service details"
                       highlighted={jumpHighlight === `${uid}-section-1`}
                     >
                       <Field id={`${uid}-name`} label="Full Name" required error={nameError} className="col-span-full">
@@ -871,10 +983,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 02 Career Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-2`}
-                      icon={Briefcase}
-                      title="Career Information"
-                      description="Position and professional history"
+                      id={`${uid}-section-2`} icon={Briefcase} step={2} accent={S2.accent} delay={S2.delay}
+                      title="Career Information" description="Position and professional history"
                       highlighted={jumpHighlight === `${uid}-section-2`}
                     >
                       <Field id={`${uid}-current-position`} label="Current Position" className="col-span-full">
@@ -942,10 +1052,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 03 Contact Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-3`}
-                      icon={Phone}
-                      title="Contact Information"
-                      description="How to reach this person"
+                      id={`${uid}-section-3`} icon={Phone} step={3} accent={S3.accent} delay={S3.delay}
+                      title="Contact Information" description="How to reach this person"
                       highlighted={jumpHighlight === `${uid}-section-3`}
                     >
                       <Field id={`${uid}-contact-number`} label="Contact Number">
@@ -998,10 +1106,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 04 Additional Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-4`}
-                      icon={FileText}
-                      title="Additional Information"
-                      description="Any extra context worth noting"
+                      id={`${uid}-section-4`} icon={FileText} step={4} accent={S4.accent} delay={S4.delay}
+                      title="Additional Information" description="Any extra context worth noting"
                       highlighted={jumpHighlight === `${uid}-section-4`}
                     >
                       <Field id={`${uid}-notes`} label="Notes" className="col-span-full">
@@ -1025,10 +1131,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 01 Basic Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-1`}
-                      icon={User}
-                      title="Basic Information"
-                      description="Identity details"
+                      id={`${uid}-section-1`} icon={User} step={1} accent={S1.accent} delay={S1.delay}
+                      title="Basic Information" description="Identity details"
                       highlighted={jumpHighlight === `${uid}-section-1`}
                     >
                       <Field id={`${uid}-c-name`} label="Full Name" required error={nameError} className="col-span-full">
@@ -1080,10 +1184,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 02 Work Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-2`}
-                      icon={Briefcase}
-                      title="Work Information"
-                      description="Organization and role"
+                      id={`${uid}-section-2`} icon={Briefcase} step={2} accent={S2.accent} delay={S2.delay}
+                      title="Work Information" description="Organization and role"
                       highlighted={jumpHighlight === `${uid}-section-2`}
                     >
                       <Field id={`${uid}-c-organization`} label="Organization">
@@ -1128,10 +1230,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 03 Contact Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-3`}
-                      icon={Phone}
-                      title="Contact Information"
-                      description="How to reach this contact"
+                      id={`${uid}-section-3`} icon={Phone} step={3} accent={S3.accent} delay={S3.delay}
+                      title="Contact Information" description="How to reach this contact"
                       highlighted={jumpHighlight === `${uid}-section-3`}
                     >
                       <Field id={`${uid}-c-phone`} label="Contact Number">
@@ -1184,10 +1284,8 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
                     {/* ------------------------ 04 Additional Information ------------------------ */}
                     <Section
-                      id={`${uid}-section-4`}
-                      icon={FileText}
-                      title="Additional Information"
-                      description="Social profiles, photo and notes"
+                      id={`${uid}-section-4`} icon={FileText} step={4} accent={S4.accent} delay={S4.delay}
+                      title="Additional Information" description="Social profiles, photo and notes"
                       highlighted={jumpHighlight === `${uid}-section-4`}
                     >
                       <Field id={`${uid}-c-twitter`} label="Twitter (X)">
@@ -1255,13 +1353,15 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
         </div>
 
         {/* ------------------------------- Footer ------------------------------- */}
-        <footer className="flex-shrink-0 border-t border-slate-200 bg-white px-6 py-4 lg:px-8">
+        <footer className="flex-shrink-0 border-t border-slate-200/80 bg-white/95 px-6 py-4 lg:px-8">
 
           {(resetArmed || notice) && (
             <div
               role="status"
-              className={`mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border px-3.5 py-2.5 animate-in fade-in slide-in-from-bottom-1 duration-200 ${
-                resetArmed ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'
+              className={`cof-slide-up mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border px-3.5 py-2.5 ${
+                resetArmed
+                  ? 'border-amber-200 bg-amber-50 ring-1 ring-inset ring-amber-600/10'
+                  : 'border-emerald-200 bg-emerald-50 ring-1 ring-inset ring-emerald-600/10'
               }`}
             >
               <p className={`text-xs font-medium ${resetArmed ? 'text-amber-800' : 'text-emerald-700'}`}>
@@ -1289,7 +1389,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                 type="button"
                 onClick={onClose}
                 disabled={loading}
-                className="rounded-lg px-4 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-xl px-4 py-2.5 text-sm font-medium text-slate-600 transition-all duration-200 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -1297,7 +1397,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                 type="submit"
                 form="create-officer-form"
                 disabled={loading || !auth.isValid}
-                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-slate-800 hover:shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+                className={`inline-flex items-center gap-2 rounded-xl bg-gradient-to-r ${headerMeta.button} px-5 py-2.5 text-sm font-semibold text-white shadow-lg ${headerMeta.buttonGlow} ring-1 ring-inset ring-white/20 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 active:translate-y-0 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:translate-y-0 disabled:shadow-none`}
               >
                 {loading ? (
                   <>

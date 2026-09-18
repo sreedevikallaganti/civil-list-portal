@@ -105,21 +105,22 @@ type KpiAccent = "blue" | "violet" | "rose" | "emerald";
 ──────────────────────────────────────────────── */
 
 const PB_URL = process.env.NEXT_PUBLIC_POCKETBASE_URL;
-const UPCOMING_PAGE_SIZE = 5; // meetings per page — keeps the card compact
+const UPCOMING_PAGE_SIZE = 5;
 
 const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string }> = {
-  scheduled:   { label: 'Scheduled',   dot: 'bg-blue-400',    badge: 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-600/20' },
-  completed:   { label: 'Completed',   dot: 'bg-emerald-400', badge: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20' },
-  rescheduled: { label: 'Rescheduled', dot: 'bg-amber-400',   badge: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20' },
-  cancelled:   { label: 'Cancelled',   dot: 'bg-red-400',     badge: 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/20' },
-  rejected:    { label: 'Rejected',    dot: 'bg-rose-400',    badge: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20' },
+  scheduled:   { label: "Scheduled",   dot: "bg-violet-400",  badge: "bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-600/20" },
+  completed:   { label: "Completed",   dot: "bg-emerald-400", badge: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20" },
+  rescheduled: { label: "Rescheduled", dot: "bg-amber-400",   badge: "bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20" },
+  cancelled:   { label: "Cancelled",   dot: "bg-rose-400",    badge: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20" },
+  rejected:    { label: "Rejected",    dot: "bg-rose-400",    badge: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20" },
 };
 
-const KPI_THEME: Record<KpiAccent, { iconBox: string; hoverBorder: string; arrow: string }> = {
-  blue:    { iconBox: "bg-blue-50 text-blue-600",       hoverBorder: "hover:border-blue-300",    arrow: "group-hover:text-blue-500" },
-  violet:  { iconBox: "bg-violet-50 text-violet-600",   hoverBorder: "hover:border-violet-300",  arrow: "group-hover:text-violet-500" },
-  rose:    { iconBox: "bg-rose-50 text-rose-600",       hoverBorder: "hover:border-rose-300",    arrow: "group-hover:text-rose-500" },
-  emerald: { iconBox: "bg-emerald-50 text-emerald-600", hoverBorder: "hover:border-emerald-300", arrow: "group-hover:text-emerald-500" },
+/* Pastel KPI cards — reference style: blue / lavender / peach / green */
+const KPI_THEME: Record<KpiAccent, { card: string; icon: string; trend: string }> = {
+  blue:    { card: "bg-gradient-to-br from-sky-100 to-blue-100",      icon: "text-blue-600",    trend: "text-blue-700" },
+  violet:  { card: "bg-gradient-to-br from-violet-100 to-purple-100", icon: "text-violet-600",  trend: "text-violet-700" },
+  rose:    { card: "bg-gradient-to-br from-orange-100 to-rose-100",   icon: "text-rose-600",    trend: "text-rose-700" },
+  emerald: { card: "bg-gradient-to-br from-emerald-100 to-green-100", icon: "text-emerald-600", trend: "text-emerald-700" },
 };
 
 /* ────────────────────────────────────────────────
@@ -241,7 +242,6 @@ function parseMeetingDate(dateValue?: string, timeValue?: string): Date | null {
   const parsed = new Date(dateString);
   if (Number.isNaN(parsed.getTime())) return null;
 
-  // If meeting_date contains only YYYY-MM-DD, add meeting_time separately.
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateString) && timeValue) {
     const timeMatch = timeValue.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
     if (timeMatch) {
@@ -359,7 +359,7 @@ function buildActivityData(meetings: Meeting[], range: ActivityRange): ActivityB
 }
 
 /* ────────────────────────────────────────────────
-   PocketBase fetch (unchanged integration)
+   PocketBase fetch
 ──────────────────────────────────────────────── */
 
 async function fetchPocketBaseCollection<T>(
@@ -410,27 +410,34 @@ function StatCard({
     <button
       type="button"
       onClick={onClick}
-      className={`group w-full rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 ${theme.hoverBorder}`}
+      className={`group relative w-full overflow-hidden rounded-3xl p-5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/20 ${theme.card}`}
     >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${theme.iconBox}`}>
-            {icon}
-          </span>
-          <p className="truncate text-sm font-medium text-slate-500">{label}</p>
-        </div>
-        <ArrowRight
-          className={`h-4 w-4 shrink-0 text-slate-300 opacity-0 transition-all duration-200 group-hover:translate-x-0.5 group-hover:opacity-100 ${theme.arrow}`}
-        />
+      <span
+        aria-hidden
+        className="pointer-events-none absolute -right-6 -top-6 h-20 w-20 rounded-full bg-white/50 transition-transform duration-300 group-hover:scale-125"
+      />
+
+      <div className="relative flex items-start justify-between gap-3">
+        <p className="pt-1.5 text-sm font-semibold text-slate-600">{label}</p>
+        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/80 shadow-sm ${theme.icon}`}>
+          {icon}
+        </span>
       </div>
 
-      {loading ? (
-        <div className="mt-4 h-8 w-16 animate-pulse rounded-lg bg-slate-100" />
-      ) : (
-        <p className="mt-4 text-3xl font-bold tracking-tight text-slate-900">{value}</p>
-      )}
+      <div className="relative mt-3">
+        {loading ? (
+          <div className="h-9 w-20 animate-pulse rounded-xl bg-white/70" />
+        ) : (
+          <p className="text-[2rem] font-extrabold leading-none tracking-tight text-slate-900">{value}</p>
+        )}
 
-      {!loading && sub && <p className="mt-1 truncate text-xs text-slate-400">{sub}</p>}
+        {!loading && sub && (
+          <p className={`mt-2.5 inline-flex items-center gap-1 text-xs font-semibold ${theme.trend}`}>
+            <TrendingUp className="h-3.5 w-3.5" />
+            {sub}
+          </p>
+        )}
+      </div>
     </button>
   );
 }
@@ -439,12 +446,12 @@ function LoadingRows({ count = 4 }: { count?: number }) {
   return (
     <div className="space-y-3">
       {Array.from({ length: count }).map((_, index) => (
-        <div key={index} className="flex items-center gap-4 rounded-xl border border-slate-100 p-4">
-          <div className="hidden h-12 w-12 animate-pulse rounded-xl bg-slate-100 sm:block" />
+        <div key={index} className="flex items-center gap-4 rounded-2xl border border-slate-100 p-4">
+          <div className="hidden h-12 w-12 animate-pulse rounded-2xl bg-slate-100 sm:block" />
           <div className="flex-1 space-y-2">
-            <div className="h-4 w-2/5 animate-pulse rounded bg-slate-100" />
-            <div className="h-3 w-3/5 animate-pulse rounded bg-slate-100" />
-            <div className="h-3 w-1/4 animate-pulse rounded bg-slate-100" />
+            <div className="h-4 w-2/5 animate-pulse rounded-full bg-slate-100" />
+            <div className="h-3 w-3/5 animate-pulse rounded-full bg-slate-100" />
+            <div className="h-3 w-1/4 animate-pulse rounded-full bg-slate-100" />
           </div>
           <div className="hidden h-6 w-16 animate-pulse rounded-full bg-slate-100 md:block" />
         </div>
@@ -464,9 +471,9 @@ function EmptyMeetings({
 }) {
   if (isFiltered) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-6 py-8 text-center">
+      <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-8 text-center">
         <div className="flex h-11 w-11 items-center justify-center rounded-full bg-white shadow-sm">
-          <Search className="h-5 w-5 text-slate-400" />
+          <Search className="h-5 w-5 text-violet-400" />
         </div>
         <p className="mt-3 text-sm font-semibold text-slate-700">No matching meetings</p>
         <p className="mt-1 text-xs text-slate-500">
@@ -475,7 +482,7 @@ function EmptyMeetings({
         <button
           type="button"
           onClick={onClearSearch}
-          className="mt-4 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-colors hover:border-blue-200 hover:text-blue-600"
+          className="mt-4 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-colors hover:border-violet-200 hover:text-violet-600"
         >
           Clear search
         </button>
@@ -484,9 +491,9 @@ function EmptyMeetings({
   }
 
   return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-6 py-8 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-blue-50">
-        <CalendarDays className="h-6 w-6 text-blue-500" />
+    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-8 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm">
+        <CalendarDays className="h-6 w-6 text-violet-500" />
       </div>
       <p className="mt-3 text-sm font-semibold text-slate-700">No upcoming meetings</p>
       <p className="mt-1 max-w-xs text-xs leading-relaxed text-slate-500">
@@ -495,9 +502,9 @@ function EmptyMeetings({
       <button
         type="button"
         onClick={onCreate}
-        className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-blue-700"
+        className="mt-4 inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800"
       >
-        <Plus className="h-3.5 w-3.5" />
+        <Plus className="h-4 w-4" />
         New Meeting
       </button>
     </div>
@@ -525,11 +532,11 @@ function UpcomingMeetingRow({
       <button
         type="button"
         onClick={() => onOpen(meeting)}
-        className="group flex w-full items-center gap-3.5 rounded-xl border border-slate-100 bg-white p-3.5 text-left transition-all duration-200 hover:border-blue-200 hover:bg-blue-50/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+        className="group flex w-full items-center gap-3.5 rounded-2xl border border-slate-100 bg-white p-3.5 text-left transition-all duration-200 hover:border-violet-200 hover:bg-violet-50/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/30"
       >
         <div
-          className={`hidden h-12 w-12 shrink-0 flex-col items-center justify-center rounded-xl sm:flex ${
-            isToday ? "bg-blue-600 text-white shadow-sm" : "bg-slate-100 text-slate-700"
+          className={`hidden h-12 w-12 shrink-0 flex-col items-center justify-center rounded-2xl sm:flex ${
+            isToday ? "bg-slate-900 text-white shadow-sm" : "bg-violet-50 text-violet-900"
           }`}
         >
           <span className="text-[9px] font-bold uppercase tracking-wide">
@@ -542,11 +549,11 @@ function UpcomingMeetingRow({
 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h4 className="truncate text-sm font-semibold text-slate-900 group-hover:text-blue-700">
+            <h4 className="truncate text-sm font-semibold text-slate-900 group-hover:text-violet-700">
               {getMeetingTitle(meeting)}
             </h4>
             {isToday && (
-              <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-blue-700">
+              <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-violet-700">
                 Today
               </span>
             )}
@@ -581,7 +588,7 @@ function UpcomingMeetingRow({
           {statusStyle.label}
         </span>
 
-        <ChevronRight className="h-5 w-5 shrink-0 text-slate-300 transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-blue-500" />
+        <ChevronRight className="h-5 w-5 shrink-0 text-slate-300 transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-violet-500" />
       </button>
     </li>
   );
@@ -624,7 +631,7 @@ function UpcomingPagination({
             onClick={() => onPageChange(currentPage - 1)}
             disabled={currentPage <= 1}
             aria-label="Previous page"
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition-colors hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
           >
             <ChevronLeft className="h-4 w-4" />
           </button>
@@ -635,9 +642,9 @@ function UpcomingPagination({
               type="button"
               onClick={() => onPageChange(page)}
               aria-current={page === currentPage ? "page" : undefined}
-              className={`h-8 min-w-[2rem] rounded-lg px-2 text-xs font-semibold transition-colors ${
+              className={`h-8 min-w-[2rem] rounded-full px-2 text-xs font-semibold transition-colors ${
                 page === currentPage
-                  ? "bg-blue-600 text-white shadow-sm"
+                  ? "bg-slate-900 text-white shadow-sm"
                   : "text-slate-600 hover:bg-slate-100"
               }`}
             >
@@ -650,7 +657,7 @@ function UpcomingPagination({
             onClick={() => onPageChange(currentPage + 1)}
             disabled={currentPage >= totalPages}
             aria-label="Next page"
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition-colors hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
           >
             <ChevronRight className="h-4 w-4" />
           </button>
@@ -706,12 +713,12 @@ function ActivityChart({ data, range }: { data: ActivityBucket[]; range: Activit
               className="group relative flex h-full flex-1 cursor-default flex-col justify-end"
             >
               <div
-                className="pointer-events-none absolute left-1/2 z-20 hidden w-36 -translate-x-1/2 rounded-lg bg-slate-900/95 p-3 text-left shadow-xl group-hover:block sm:w-40"
+                className="pointer-events-none absolute left-1/2 z-20 hidden w-36 -translate-x-1/2 rounded-2xl bg-slate-900/95 p-3 text-left shadow-xl group-hover:block sm:w-40"
                 style={{ bottom: `calc(${barHeight}% + 10px)` }}
               >
                 <p className="text-xs font-semibold text-white">{bucket.fullLabel}</p>
                 <div className="mt-2 space-y-1">
-                  <TooltipRow label="Scheduled" value={bucket.scheduled} dotClass="bg-blue-400" />
+                  <TooltipRow label="Scheduled" value={bucket.scheduled} dotClass="bg-violet-400" />
                   <TooltipRow label="Completed" value={bucket.completed} dotClass="bg-emerald-400" />
                   <TooltipRow label="Cancelled" value={bucket.cancelled} dotClass="bg-slate-400" />
                 </div>
@@ -722,7 +729,7 @@ function ActivityChart({ data, range }: { data: ActivityBucket[]; range: Activit
               </div>
 
               <div
-                className="flex w-full flex-col justify-end overflow-hidden rounded-t-lg transition-all duration-300"
+                className="flex w-full flex-col justify-end overflow-hidden rounded-t-xl transition-all duration-300"
                 style={{ height: `${barHeight}%` }}
               >
                 {bucket.cancelled > 0 && (
@@ -739,7 +746,7 @@ function ActivityChart({ data, range }: { data: ActivityBucket[]; range: Activit
                 )}
                 {bucket.scheduled > 0 && (
                   <div
-                    className="w-full bg-blue-500"
+                    className="w-full bg-violet-500"
                     style={{ height: `${(bucket.scheduled / bucket.total) * 100}%` }}
                   />
                 )}
@@ -754,7 +761,7 @@ function ActivityChart({ data, range }: { data: ActivityBucket[]; range: Activit
           <div key={bucket.key} className="flex-1 text-center">
             <span
               className={`text-xs ${
-                bucket.key === todayKey ? "font-bold text-blue-600" : "font-medium text-slate-500"
+                bucket.key === todayKey ? "font-bold text-violet-600" : "font-medium text-slate-500"
               }`}
             >
               {bucket.shortLabel}
@@ -773,7 +780,7 @@ function ChartSkeleton() {
         {[75, 40, 90, 55, 30, 65, 45].map((height, index) => (
           <div key={index} className="flex h-full flex-1 flex-col justify-end">
             <div
-              className="w-full animate-pulse rounded-t-lg bg-slate-100"
+              className="w-full animate-pulse rounded-t-xl bg-slate-100"
               style={{ height: `${height}%` }}
             />
           </div>
@@ -781,7 +788,7 @@ function ChartSkeleton() {
       </div>
       <div className="mt-2 flex gap-1.5 sm:gap-3">
         {Array.from({ length: 7 }).map((_, index) => (
-          <div key={index} className="h-3 flex-1 animate-pulse rounded bg-slate-100" />
+          <div key={index} className="h-3 flex-1 animate-pulse rounded-full bg-slate-100" />
         ))}
       </div>
     </div>
@@ -790,8 +797,8 @@ function ChartSkeleton() {
 
 function ActivityEmpty({ range }: { range: ActivityRange }) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-6 py-10 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-100">
+    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 py-10 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm">
         <BarChart3 className="h-6 w-6 text-slate-400" />
       </div>
       <p className="mt-3 text-sm font-semibold text-slate-700">No meeting activity in this period</p>
@@ -816,9 +823,9 @@ function LegendDot({ label, dotClass }: { label: string; dotClass: string }) {
 
 function SummaryStat({ label, value }: { label: string; value: number | string }) {
   return (
-    <div>
-      <p className="text-sm font-bold text-slate-900">{value}</p>
-      <p className="text-[11px] text-slate-400">{label}</p>
+    <div className="rounded-2xl bg-slate-50/80 px-3.5 py-3">
+      <p className="text-lg font-extrabold leading-none text-slate-900">{value}</p>
+      <p className="mt-1 text-[11px] font-medium text-slate-400">{label}</p>
     </div>
   );
 }
@@ -841,13 +848,13 @@ function StatusRow({
   const percent = total > 0 ? Math.round((value / total) * 100) : 0;
 
   return (
-    <div className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-slate-50">
-      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${iconClass}`}>
+    <div className="flex items-center gap-3 rounded-2xl p-2 transition-colors hover:bg-slate-50">
+      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${iconClass}`}>
         {icon}
       </span>
       <p className="flex-1 truncate text-sm font-medium text-slate-600">{label}</p>
       {loading ? (
-        <div className="h-5 w-8 animate-pulse rounded bg-slate-100" />
+        <div className="h-5 w-8 animate-pulse rounded-full bg-slate-100" />
       ) : (
         <>
           <p className="text-sm font-bold text-slate-900">{value}</p>
@@ -871,10 +878,15 @@ function QuickActionButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600 transition-colors hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
+      className="group flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-xs font-semibold text-slate-600 transition-all hover:-translate-y-0.5 hover:border-violet-200 hover:bg-violet-50/60 hover:text-violet-700"
     >
-      <span className="text-slate-400">{icon}</span>
-      {label}
+      <span className="flex items-center gap-2.5">
+        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-50 text-slate-400 transition-colors group-hover:bg-white group-hover:text-violet-600">
+          {icon}
+        </span>
+        {label}
+      </span>
+      <ArrowRight className="h-3.5 w-3.5 text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-violet-500" />
     </button>
   );
 }
@@ -922,8 +934,8 @@ function MeetingDetailsPanel({
 
       <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-white shadow-2xl animate-in slide-in-from-right duration-300">
         {/* Gradient header */}
-        <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 px-6 pb-5 pt-6">
-          <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-blue-500/20 blur-3xl" />
+        <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-violet-900 px-6 pb-5 pt-6">
+          <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-violet-500/25 blur-3xl" />
           <div className="absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-indigo-400/10 blur-3xl" />
 
           <div className="relative">
@@ -966,33 +978,33 @@ function MeetingDetailsPanel({
         {/* Scrollable body */}
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-slate-50 p-5">
           <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
               <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <Calendar className="h-3.5 w-3.5 text-blue-500" /> Date
+                <Calendar className="h-3.5 w-3.5 text-violet-500" /> Date
               </p>
               <p className="mt-1.5 text-sm font-semibold text-slate-900">{dateInfo?.full || "—"}</p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
               <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <Clock className="h-3.5 w-3.5 text-blue-500" /> Time
+                <Clock className="h-3.5 w-3.5 text-violet-500" /> Time
               </p>
               <p className="mt-1.5 text-sm font-semibold text-slate-900">{formatTimeDisplay(time)}</p>
               {meeting.duration && (
                 <p className="mt-0.5 text-xs text-slate-400">{meeting.duration} min</p>
               )}
             </div>
-            <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
               <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <MapPin className="h-3.5 w-3.5 text-blue-500" /> Location
+                <MapPin className="h-3.5 w-3.5 text-violet-500" /> Location
               </p>
               <p className="mt-1.5 truncate text-sm font-semibold text-slate-900">
                 {meeting.location || meeting.meeting_place || "Not specified"}
               </p>
             </div>
             {meeting.meeting_type && (
-              <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
                 <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  <Briefcase className="h-3.5 w-3.5 text-blue-500" /> Type
+                  <Briefcase className="h-3.5 w-3.5 text-violet-500" /> Type
                 </p>
                 <p className="mt-1.5 text-sm font-semibold capitalize text-slate-900">
                   {meeting.meeting_type}
@@ -1000,9 +1012,9 @@ function MeetingDetailsPanel({
               </div>
             )}
             {meeting.priority && (
-              <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
                 <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  <Tag className="h-3.5 w-3.5 text-blue-500" /> Priority
+                  <Tag className="h-3.5 w-3.5 text-violet-500" /> Priority
                 </p>
                 <p className={`mt-1.5 text-sm font-semibold capitalize ${priorityColor}`}>
                   {meeting.priority}
@@ -1012,13 +1024,13 @@ function MeetingDetailsPanel({
           </div>
 
           {(meeting.officer_name || meeting.designation || meeting.officer_type) && (
-            <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
               <p className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <User className="h-3.5 w-3.5 text-indigo-500" /> Officer
+                <User className="h-3.5 w-3.5 text-violet-500" /> Officer
               </p>
               <div className="flex items-center gap-3">
                 {officerInitials && (
-                  <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white">
+                  <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold text-white">
                     {officerInitials}
                   </div>
                 )}
@@ -1033,7 +1045,7 @@ function MeetingDetailsPanel({
                   )}
                 </div>
                 {meeting.officer_type && (
-                  <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-700">
+                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-bold text-violet-700">
                     <ShieldCheck className="h-3 w-3" />
                     {meeting.officer_type}
                   </span>
@@ -1043,9 +1055,9 @@ function MeetingDetailsPanel({
           )}
 
           {meeting.agenda && (
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white">
               <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3">
-                <AlignLeft className="h-4 w-4 text-blue-500" />
+                <AlignLeft className="h-4 w-4 text-violet-500" />
                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Agenda</p>
               </div>
               <p className="whitespace-pre-line px-4 py-3 text-sm leading-relaxed text-slate-600">
@@ -1055,9 +1067,9 @@ function MeetingDetailsPanel({
           )}
 
           {meeting.description && (
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white">
               <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3">
-                <FileText className="h-4 w-4 text-blue-500" />
+                <FileText className="h-4 w-4 text-violet-500" />
                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
                   Description
                 </p>
@@ -1069,7 +1081,7 @@ function MeetingDetailsPanel({
           )}
 
           {(meeting.created || meeting.updated) && (
-            <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-[11px] text-slate-400">
+            <div className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-white px-4 py-3 text-[11px] text-slate-400">
               {meeting.created && (
                 <span>
                   Created{" "}
@@ -1099,7 +1111,7 @@ function MeetingDetailsPanel({
           <button
             type="button"
             onClick={() => onEdit(meeting)}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700"
+            className="flex flex-1 items-center justify-center gap-2 rounded-full bg-slate-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800"
           >
             <Edit2 className="h-4 w-4" />
             Edit Meeting
@@ -1107,7 +1119,7 @@ function MeetingDetailsPanel({
           <button
             type="button"
             onClick={onDeleteRequest}
-            className="flex items-center justify-center gap-2 rounded-xl border border-red-200 px-4 py-2.5 text-sm font-semibold text-red-600 transition-colors hover:border-red-300 hover:bg-red-50"
+            className="flex items-center justify-center gap-2 rounded-full border border-rose-200 px-4 py-2.5 text-sm font-semibold text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-50"
           >
             <Trash2 className="h-4 w-4" />
             Delete
@@ -1152,7 +1164,7 @@ export default function DashboardPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   /* ────────────────────────────────
-     Data loading (PocketBase — unchanged)
+     Data loading (PocketBase)
   ──────────────────────────────── */
 
   const loadDashboardData = async (options?: { silent?: boolean }) => {
@@ -1213,7 +1225,7 @@ export default function DashboardPage() {
   }, []);
 
   /* ────────────────────────────────
-     Create / Edit panel (CreateMeetingPanel)
+     Create / Edit panel
   ──────────────────────────────── */
 
   const openCreatePanel = () => {
@@ -1365,13 +1377,16 @@ export default function DashboardPage() {
   );
 
   const upcomingRangeStart =
-    filteredUpcomingMeetings.length === 0 ? 0 : (upcomingCurrentPage - 1) * UPCOMING_PAGE_SIZE + 1;
-  const upcomingRangeEnd = Math.min(
-    upcomingCurrentPage * UPCOMING_PAGE_SIZE,
-    filteredUpcomingMeetings.length
-  );
+    filteredUpcomingMeetings.length === 0
+      ? 0
+      : (upcomingCurrentPage - 1) * UPCOMING_PAGE_SIZE + 1;
+  const upcomingRangeEnd =
+    filteredUpcomingMeetings.length === 0
+      ? 0
+      : upcomingRangeStart + paginatedUpcomingMeetings.length - 1;
 
-  const stats = useMemo<DashboardStats>(() => {
+  /* ── Stats ── */
+  const dashboardStats: DashboardStats = useMemo(() => {
     let scheduled = 0;
     let completed = 0;
     let rescheduled = 0;
@@ -1379,75 +1394,36 @@ export default function DashboardPage() {
 
     meetings.forEach((meeting) => {
       const status = getMeetingStatus(meeting);
-
       if (status.includes("completed") || status.includes("done")) completed += 1;
-      else if (status.includes("rescheduled")) rescheduled += 1;
       else if (status.includes("cancelled") || status.includes("canceled")) cancelled += 1;
+      else if (status.includes("reschedule")) rescheduled += 1;
       else scheduled += 1;
     });
 
-    const total = meetings.length;
-    const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
+    const totalMeetings = meetings.length;
+    const completionRate = totalMeetings > 0 ? Math.round((completed / totalMeetings) * 100) : 0;
 
-    return { totalMeetings: total, scheduled, completed, rescheduled, cancelled, completionRate };
+    return { totalMeetings, scheduled, completed, rescheduled, cancelled, completionRate };
   }, [meetings]);
-
-  const meetingsThisMonth = useMemo(() => {
-    const now = new Date();
-    return meetings.filter((meeting) => {
-      const date = parseMeetingDate(meeting.meeting_date, meeting.meeting_time);
-      return (
-        date !== null && date.getMonth() === now.getMonth() && date.getFullYear() === now.getFullYear()
-      );
-    }).length;
-  }, [meetings]);
-
-  const nextMeetingInfo = useMemo(() => {
-    const next = upcomingMeetings[0];
-    if (!next) return null;
-
-    const date = parseMeetingDate(next.meeting_date, next.meeting_time);
-    const dayLabel = date ? getRelativeDayLabel(date) || formatShortDate(date) : "";
-    const timeLabel =
-      date && startOfDay(date).getTime() === startOfDay(new Date()).getTime()
-        ? getTimeUntilLabel(date)
-        : "";
-
-    return {
-      meeting: next,
-      label: [dayLabel, timeLabel].filter(Boolean).join(" · ") || "Scheduled",
-    };
-  }, [upcomingMeetings]);
 
   const activityData = useMemo(
     () => buildActivityData(meetings, activityRange),
     [meetings, activityRange]
   );
 
-  const activitySummary = useMemo(() => {
-    const total = activityData.reduce((sum, bucket) => sum + bucket.total, 0);
-    const completed = activityData.reduce((sum, bucket) => sum + bucket.completed, 0);
-    const scheduled = activityData.reduce((sum, bucket) => sum + bucket.scheduled, 0);
-    const unitCount = activityData.length || 1;
-
-    return {
-      total,
-      completed,
-      scheduled,
-      average: Math.round((total / unitCount) * 10) / 10,
-      unitLabel: activityRange === "week" ? "day" : "month",
-    };
-  }, [activityData, activityRange]);
-
-  const upcomingCount = upcomingMeetings.length;
-  const upcomingSubtitle = loadingMeetings
-    ? "Loading scheduled meetings…"
-    : upcomingCount === 0
-      ? "No meetings scheduled ahead"
-      : `${upcomingCount} scheduled ${upcomingCount === 1 ? "meeting" : "meetings"} ahead`;
-
-  const statusPercent = (value: number): number =>
-    stats.totalMeetings > 0 ? (value / stats.totalMeetings) * 100 : 0;
+  const activityTotals = useMemo(
+    () =>
+      activityData.reduce(
+        (acc, bucket) => ({
+          scheduled: acc.scheduled + bucket.scheduled,
+          completed: acc.completed + bucket.completed,
+          cancelled: acc.cancelled + bucket.cancelled,
+          total: acc.total + bucket.total,
+        }),
+        { scheduled: 0, completed: 0, cancelled: 0, total: 0 }
+      ),
+    [activityData]
+  );
 
   /* ────────────────────────────────
      Render
@@ -1455,477 +1431,452 @@ export default function DashboardPage() {
 
   return (
     <ProtectedRoute>
-      <div className="min-h-screen w-full bg-slate-50">
-        {/* =====================================================
-            UNIFIED HEADER — greeting + date + actions
-        ====================================================== */}
-        <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
-          <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4 sm:px-6 lg:px-8">
-            <div className="min-w-0">
-              <h1 className="truncate text-lg font-bold tracking-tight text-slate-900 sm:text-xl">
-                {greeting}, {userName} 👋
-              </h1>
-              <p className="mt-0.5 truncate text-xs text-slate-500">
-                {todayLabel || "Meeting management overview"}
-              </p>
-            </div>
+      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200">
+        {/* Soft decorative blobs */}
+        <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
+          <div className="absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" />
+          <div className="absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" />
+        </div>
 
-            <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-              {/* Mobile search toggle */}
-              <button
-                type="button"
-                onClick={() => setMobileSearchOpen((v) => !v)}
-                aria-label="Toggle search"
-                className={`flex h-10 w-10 items-center justify-center rounded-xl border transition-colors md:hidden ${
-                  mobileSearchOpen
-                    ? "border-blue-300 bg-blue-50 text-blue-600"
-                    : "border-slate-200 bg-white text-slate-500 hover:border-blue-300 hover:text-blue-600"
-                }`}
-              >
-                <Search className="h-4 w-4" />
-              </button>
+        <div className="relative px-2.5 py-2.5 sm:px-5 sm:py-5 lg:px-8 lg:py-7">
+          <div className="mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
 
-              {/* Desktop search */}
-              <div className="relative hidden w-56 md:block lg:w-72">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search officers, meetings…"
-                  className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-8 text-sm text-slate-700 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                />
-                {search !== "" && (
-                  <button
-                    type="button"
-                    onClick={() => setSearch("")}
-                    aria-label="Clear search"
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
+            {/* ── App bar ── */}
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
+                  <CalendarDays className="h-4 w-4" />
+                </span>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-slate-900">Meeting Dashboard</p>
+                  <p className="truncate text-[11px] text-slate-400">{todayLabel}</p>
+                </div>
               </div>
 
-              {/* Refresh */}
-              <button
-                type="button"
-                onClick={handleRefresh}
-                disabled={isRefreshing}
-                aria-label="Refresh data"
-                className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition-colors hover:border-blue-300 hover:text-blue-600 disabled:opacity-60"
-              >
-                <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Desktop search */}
+                <div className="relative hidden md:block">
+                  <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search meetings, officers…"
+                    className="h-10 w-56 rounded-full border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm text-slate-700 placeholder:text-slate-400 outline-none transition-all focus:border-violet-300 focus:bg-white focus:ring-4 focus:ring-violet-500/10 lg:w-72"
+                  />
+                </div>
 
-              {/* New meeting */}
-              <button
-                type="button"
-                onClick={openCreatePanel}
-                className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-blue-600 px-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 sm:px-4"
-              >
-                <Plus className="h-4 w-4" />
-                <span className="hidden sm:inline">New Meeting</span>
-              </button>
-            </div>
-          </div>
+                {/* Mobile search toggle */}
+                <button
+                  type="button"
+                  onClick={() => setMobileSearchOpen((v) => !v)}
+                  aria-label="Toggle search"
+                  className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 md:hidden"
+                >
+                  <Search className="h-4 w-4" />
+                </button>
 
-          {/* Mobile search row */}
-          {mobileSearchOpen && (
-            <div className="border-t border-slate-100 px-4 py-3 md:hidden">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search officers, meetings…"
-                  autoFocus
-                  className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-8 text-sm text-slate-700 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                />
-                {search !== "" && (
-                  <button
-                    type="button"
-                    onClick={() => setSearch("")}
-                    aria-label="Clear search"
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-400 hover:text-slate-600"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
+                {/* Refresh */}
+                <button
+                  type="button"
+                  onClick={handleRefresh}
+                  disabled={isRefreshing}
+                  aria-label="Refresh data"
+                  className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
+                </button>
+
+                {/* User chip */}
+                <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-white py-1 pl-1 pr-3">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-[11px] font-bold text-white">
+                    {userName.charAt(0).toUpperCase()}
+                  </span>
+                  <span className="hidden max-w-[120px] truncate text-xs font-semibold text-slate-700 sm:block">
+                    {userName}
+                  </span>
+                </div>
               </div>
             </div>
-          )}
-        </header>
 
-        <main className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
-          {/* Error banner */}
-          {error && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-              <p className="text-sm text-red-700">{error}</p>
-              <button
-                type="button"
-                onClick={() => loadDashboardData()}
-                className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-700"
-              >
-                Retry
-              </button>
-            </div>
-          )}
+            {/* Mobile search row */}
+            {mobileSearchOpen && (
+              <div className="border-b border-slate-100 bg-white px-4 py-3 md:hidden">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search meetings, officers…"
+                    autoFocus
+                    className="h-10 w-full rounded-full border border-slate-200 bg-slate-50 pl-11 pr-4 text-sm text-slate-700 placeholder:text-slate-400 outline-none focus:border-violet-300 focus:bg-white focus:ring-4 focus:ring-violet-500/10"
+                  />
+                </div>
+              </div>
+            )}
 
-          {/* =====================================================
-              KPI CARDS
-          ====================================================== */}
-          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard
-              icon={<CalendarDays className="h-5 w-5" />}
-              label="Total Meetings"
-              value={stats.totalMeetings}
-              sub={`${meetingsThisMonth} this month`}
-              accent="blue"
-              loading={loadingMeetings}
-              onClick={() => goTo("/meetings")}
-            />
-            <StatCard
-              icon={<Clock3 className="h-5 w-5" />}
-              label="Scheduled"
-              value={stats.scheduled}
-              sub={`${upcomingCount} upcoming`}
-              accent="violet"
-              loading={loadingMeetings}
-              onClick={() => goTo("/meetings")}
-            />
-            <StatCard
-              icon={<CheckCircle2 className="h-5 w-5" />}
-              label="Completed"
-              value={stats.completed}
-              sub={`${stats.completionRate}% completion rate`}
-              accent="emerald"
-              loading={loadingMeetings}
-              onClick={() => goTo("/reports")}
-            />
-            <StatCard
-              icon={<Users className="h-5 w-5" />}
-              label="Officers"
-              value={iasCount + ipsCount}
-              sub={`${iasCount} IAS · ${ipsCount} IPS`}
-              accent="rose"
-              loading={loadingOfficers}
-              onClick={() => goTo("/officers")}
-            />
-          </section>
+            {/* ── Content ── */}
+            <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
 
-          {/* =====================================================
-              MAIN GRID — upcoming (left) + status/quick actions (right)
-              items-start prevents the right column stretching
-              to match the left column height.
-          ====================================================== */}
-          <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
-            {/* ── Upcoming meetings (paginated) ── */}
-            <section className="rounded-2xl border border-slate-200 bg-white shadow-sm lg:col-span-2">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+              {/* Error banner */}
+              {error && (
+                <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3">
+                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-rose-700">Something went wrong</p>
+                    <p className="mt-0.5 break-words text-xs text-rose-600">{error}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => loadDashboardData({ silent: true })}
+                    className="shrink-0 rounded-full bg-white px-3.5 py-1.5 text-xs font-semibold text-rose-600 ring-1 ring-rose-200 transition-colors hover:bg-rose-100"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+
+              {/* Greeting row */}
+              <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
-                  <h2 className="text-base font-bold tracking-tight text-slate-900">
-                    Upcoming Meetings
-                  </h2>
-                  <p className="mt-0.5 text-xs text-slate-500">{upcomingSubtitle}</p>
+                  <h1 className="text-[1.65rem] font-extrabold leading-tight tracking-tight text-slate-900 sm:text-3xl">
+                    {greeting},{" "}
+                    <span className="bg-gradient-to-r from-violet-600 to-indigo-600 bg-clip-text text-transparent">
+                      {userName}
+                    </span>
+                  </h1>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {todayLabel} — here&apos;s your meeting overview.
+                  </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => goTo("/meetings")}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-600"
+                  onClick={openCreatePanel}
+                  className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all hover:-translate-y-0.5 hover:bg-slate-800"
                 >
-                  View all
-                  <ArrowRight className="h-3.5 w-3.5" />
+                  <Plus className="h-4 w-4" />
+                  New Meeting
                 </button>
               </div>
 
-              {/* Next-up banner */}
-              {!loadingMeetings && nextMeetingInfo && (
-                <div className="mx-4 mt-4 flex items-center gap-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-3">
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/15 text-white">
-                    <Clock3 className="h-4 w-4" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-blue-200">
-                      Next up · {nextMeetingInfo.label}
-                    </p>
-                    <p className="truncate text-sm font-semibold text-white">
-                      {getMeetingTitle(nextMeetingInfo.meeting)}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => openMeetingDetails(nextMeetingInfo.meeting)}
-                    className="shrink-0 rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold text-white ring-1 ring-inset ring-white/25 transition-colors hover:bg-white/25"
-                  >
-                    Details
-                  </button>
-                </div>
-              )}
-
-              {/* List — fixed page size keeps the card compact */}
-              <div className="p-4">
-                {loadingMeetings ? (
-                  <LoadingRows count={UPCOMING_PAGE_SIZE} />
-                ) : paginatedUpcomingMeetings.length === 0 ? (
-                  <EmptyMeetings
-                    isFiltered={search.trim() !== ""}
-                    onClearSearch={() => setSearch("")}
-                    onCreate={openCreatePanel}
-                  />
-                ) : (
-                  <ul className="space-y-2.5">
-                    {paginatedUpcomingMeetings.map((meeting) => (
-                      <UpcomingMeetingRow
-                        key={meeting.id}
-                        meeting={meeting}
-                        onOpen={openMeetingDetails}
-                      />
-                    ))}
-                  </ul>
-                )}
+              {/* KPI cards */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  accent="blue"
+                  icon={<Briefcase className="h-5 w-5" />}
+                  label="Total Meetings"
+                  value={dashboardStats.totalMeetings}
+                  sub={`${dashboardStats.completionRate}% completion rate`}
+                  loading={loadingMeetings}
+                  onClick={() => goTo("/meetings")}
+                />
+                <StatCard
+                  accent="violet"
+                  icon={<CalendarDays className="h-5 w-5" />}
+                  label="Scheduled"
+                  value={dashboardStats.scheduled}
+                  sub={`${dashboardStats.rescheduled} rescheduled`}
+                  loading={loadingMeetings}
+                  onClick={() => goTo("/meetings")}
+                />
+                <StatCard
+                  accent="emerald"
+                  icon={<CheckCircle2 className="h-5 w-5" />}
+                  label="Completed"
+                  value={dashboardStats.completed}
+                  sub={`${upcomingMeetings.length} upcoming`}
+                  loading={loadingMeetings}
+                  onClick={() => goTo("/meetings")}
+                />
+                <StatCard
+                  accent="rose"
+                  icon={<XCircle className="h-5 w-5" />}
+                  label="Cancelled"
+                  value={dashboardStats.cancelled}
+                  sub={`${dashboardStats.totalMeetings} total meetings`}
+                  loading={loadingMeetings}
+                  onClick={() => goTo("/meetings")}
+                />
               </div>
 
-              {/* Pagination footer */}
-              {!loadingMeetings && filteredUpcomingMeetings.length > 0 && (
-                <UpcomingPagination
-                  currentPage={upcomingCurrentPage}
-                  totalPages={upcomingTotalPages}
-                  totalItems={filteredUpcomingMeetings.length}
-                  rangeStart={upcomingRangeStart}
-                  rangeEnd={upcomingRangeEnd}
-                  onPageChange={setUpcomingPage}
-                />
-              )}
-            </section>
+              {/* Main grid */}
+              <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
 
-            {/* ── Right column — compact, content-sized cards ── */}
-            <div className="space-y-6">
-              {/* Meeting Status — compact */}
-              <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-                <div className="border-b border-slate-100 px-5 py-4">
-                  <div className="flex items-center gap-3">
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
-                      <TrendingUp className="h-5 w-5" />
-                    </span>
-                    <div className="min-w-0">
-                      <h2 className="text-base font-bold tracking-tight text-slate-900">
-                        Meeting Status
-                      </h2>
-                      <p className="truncate text-xs text-slate-500">
-                        Distribution across all meetings
-                      </p>
-                    </div>
-                  </div>
-                </div>
+                {/* ── Left column ── */}
+                <div className="space-y-5 xl:col-span-2">
 
-                <div className="p-5">
-                  {loadingMeetings ? (
-                    <div className="space-y-3" aria-hidden>
-                      <div className="h-2.5 w-full animate-pulse rounded-full bg-slate-100" />
-                      {[0, 1, 2, 3].map((i) => (
-                        <div key={i} className="flex items-center gap-3">
-                          <div className="h-8 w-8 animate-pulse rounded-lg bg-slate-100" />
-                          <div className="h-3 flex-1 animate-pulse rounded bg-slate-100" />
-                          <div className="h-4 w-8 animate-pulse rounded bg-slate-100" />
+                  {/* Activity chart */}
+                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100 sm:p-6">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-base font-bold text-slate-900">Meeting Activity</h3>
+                        <p className="mt-0.5 text-xs text-slate-400">
+                          {activityRange === "week" ? "Last 7 days" : "Last 6 months"}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="hidden items-center gap-3 sm:flex">
+                          <LegendDot label="Scheduled" dotClass="bg-violet-500" />
+                          <LegendDot label="Completed" dotClass="bg-emerald-500" />
+                          <LegendDot label="Cancelled" dotClass="bg-slate-300" />
                         </div>
-                      ))}
+
+                        {/* Week / Month pill toggle */}
+                        <div className="flex items-center rounded-full bg-slate-100 p-1">
+                          <button
+                            type="button"
+                            onClick={() => setActivityRange("week")}
+                            aria-pressed={activityRange === "week"}
+                            className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all duration-200 ${
+                              activityRange === "week"
+                                ? "bg-slate-900 text-white shadow-sm"
+                                : "text-slate-500 hover:text-slate-800"
+                            }`}
+                          >
+                            Week
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setActivityRange("month")}
+                            aria-pressed={activityRange === "month"}
+                            className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all duration-200 ${
+                              activityRange === "month"
+                                ? "bg-slate-900 text-white shadow-sm"
+                                : "text-slate-500 hover:text-slate-800"
+                            }`}
+                          >
+                            Month
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  ) : (
-                    <>
-                      {/* Stacked distribution bar */}
-                      <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
-                        {stats.scheduled > 0 && (
-                          <div
-                            className="bg-blue-500"
-                            style={{ width: `${statusPercent(stats.scheduled)}%` }}
-                            title={`Scheduled: ${stats.scheduled}`}
-                          />
-                        )}
-                        {stats.completed > 0 && (
-                          <div
-                            className="bg-emerald-500"
-                            style={{ width: `${statusPercent(stats.completed)}%` }}
-                            title={`Completed: ${stats.completed}`}
-                          />
-                        )}
-                        {stats.rescheduled > 0 && (
-                          <div
-                            className="bg-amber-400"
-                            style={{ width: `${statusPercent(stats.rescheduled)}%` }}
-                            title={`Rescheduled: ${stats.rescheduled}`}
-                          />
-                        )}
-                        {stats.cancelled > 0 && (
-                          <div
-                            className="bg-red-400"
-                            style={{ width: `${statusPercent(stats.cancelled)}%` }}
-                            title={`Cancelled: ${stats.cancelled}`}
-                          />
-                        )}
-                      </div>
-                      {stats.totalMeetings === 0 && (
-                        <p className="mt-2 text-xs text-slate-400">No meetings recorded yet.</p>
+
+                    <div className="mt-6">
+                      {loadingMeetings ? (
+                        <ChartSkeleton />
+                      ) : activityTotals.total === 0 ? (
+                        <ActivityEmpty range={activityRange} />
+                      ) : (
+                        <ActivityChart data={activityData} range={activityRange} />
                       )}
+                    </div>
 
-                      {/* Compact rows */}
-                      <div className="mt-3 space-y-1">
-                        <StatusRow
-                          icon={<Clock3 className="h-4 w-4" />}
-                          iconClass="bg-blue-50 text-blue-600"
-                          label="Scheduled"
-                          value={stats.scheduled}
-                          total={stats.totalMeetings}
-                          loading={loadingMeetings}
-                        />
-                        <StatusRow
-                          icon={<CheckCircle2 className="h-4 w-4" />}
-                          iconClass="bg-emerald-50 text-emerald-600"
-                          label="Completed"
-                          value={stats.completed}
-                          total={stats.totalMeetings}
-                          loading={loadingMeetings}
-                        />
-                        <StatusRow
-                          icon={<RefreshCw className="h-4 w-4" />}
-                          iconClass="bg-amber-50 text-amber-600"
-                          label="Rescheduled"
-                          value={stats.rescheduled}
-                          total={stats.totalMeetings}
-                          loading={loadingMeetings}
-                        />
-                        <StatusRow
-                          icon={<XCircle className="h-4 w-4" />}
-                          iconClass="bg-red-50 text-red-600"
-                          label="Cancelled"
-                          value={stats.cancelled}
-                          total={stats.totalMeetings}
-                          loading={loadingMeetings}
-                        />
+                    <div className="mt-6 grid grid-cols-2 gap-3 border-t border-slate-100 pt-4 sm:grid-cols-4">
+                      <SummaryStat label="Total meetings" value={activityTotals.total} />
+                      <SummaryStat label="Scheduled" value={activityTotals.scheduled} />
+                      <SummaryStat label="Completed" value={activityTotals.completed} />
+                      <SummaryStat label="Cancelled" value={activityTotals.cancelled} />
+                    </div>
+                  </section>
+
+                  {/* Upcoming meetings */}
+                  <section className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-100">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-6">
+                      <div className="flex items-center gap-2.5">
+                        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
+                          <CalendarDays className="h-4 w-4" />
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900">Upcoming Meetings</h3>
+                          <p className="text-[11px] text-slate-400">
+                            {filteredUpcomingMeetings.length} scheduled ahead
+                          </p>
+                        </div>
                       </div>
 
-                      {/* Footer summary */}
-                      <div className="mt-3 grid grid-cols-3 gap-2 border-t border-slate-100 pt-4">
-                        <SummaryStat label="Total" value={stats.totalMeetings} />
-                        <SummaryStat label="Completion" value={`${stats.completionRate}%`} />
-                        <SummaryStat label="Upcoming" value={upcomingCount} />
-                      </div>
-                    </>
-                  )}
-                </div>
-              </section>
+                      {search.trim() && (
+                        <button
+                          type="button"
+                          onClick={() => setSearch("")}
+                          className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition-colors hover:bg-slate-200"
+                        >
+                          <X className="h-3 w-3" />
+                          Clear search
+                        </button>
+                      )}
+                    </div>
 
-              {/* Quick actions */}
-              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <h2 className="text-sm font-bold tracking-tight text-slate-900">Quick Actions</h2>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <QuickActionButton
-                    icon={<Plus className="h-4 w-4" />}
-                    label="New Meeting"
-                    onClick={openCreatePanel}
-                  />
-                  <QuickActionButton
-                    icon={<CalendarDays className="h-4 w-4" />}
-                    label="Calendar"
-                    onClick={() => goTo("/calendar")}
-                  />
-                  <QuickActionButton
-                    icon={<Users className="h-4 w-4" />}
-                    label="Officers"
-                    onClick={() => goTo("/officers")}
-                  />
-                  <QuickActionButton
-                    icon={<FileText className="h-4 w-4" />}
-                    label="Reports"
-                    onClick={() => goTo("/reports")}
-                  />
+                    <div className="p-4 sm:p-5">
+                      {loadingMeetings ? (
+                        <LoadingRows count={4} />
+                      ) : paginatedUpcomingMeetings.length > 0 ? (
+                        <ul className="space-y-2.5">
+                          {paginatedUpcomingMeetings.map((meeting) => (
+                            <UpcomingMeetingRow
+                              key={meeting.id}
+                              meeting={meeting}
+                              onOpen={openMeetingDetails}
+                            />
+                          ))}
+                        </ul>
+                      ) : (
+                        <EmptyMeetings
+                          isFiltered={search.trim().length > 0}
+                          onClearSearch={() => setSearch("")}
+                          onCreate={openCreatePanel}
+                        />
+                      )}
+                    </div>
+
+                    <UpcomingPagination
+                      currentPage={upcomingCurrentPage}
+                      totalPages={upcomingTotalPages}
+                      totalItems={filteredUpcomingMeetings.length}
+                      rangeStart={upcomingRangeStart}
+                      rangeEnd={upcomingRangeEnd}
+                      onPageChange={setUpcomingPage}
+                    />
+                  </section>
                 </div>
-              </section>
+
+                {/* ── Right column ── */}
+                <div className="space-y-5">
+
+                  {/* Officers */}
+                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
+                    <h3 className="flex items-center gap-2.5 text-sm font-bold text-slate-900">
+                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
+                        <Users className="h-4 w-4" />
+                      </span>
+                      Officers
+                    </h3>
+
+                    <div className="mt-4 space-y-3">
+                      <button
+                        type="button"
+                        onClick={() => goTo("/officers/ias")}
+                        className="group flex w-full items-center gap-3.5 rounded-2xl bg-violet-50/80 p-4 text-left ring-1 ring-violet-100 transition-all hover:-translate-y-0.5 hover:ring-violet-200"
+                      >
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-600 text-[11px] font-extrabold tracking-wide text-white shadow-sm">
+                          IAS
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          {loadingOfficers ? (
+                            <div className="h-7 w-12 animate-pulse rounded-lg bg-violet-100" />
+                          ) : (
+                            <p className="text-2xl font-extrabold leading-none text-slate-900">{iasCount}</p>
+                          )}
+                          <p className="mt-1 text-xs font-medium text-slate-500">IAS Officers</p>
+                        </div>
+                        <ArrowRight className="h-4 w-4 shrink-0 text-violet-300 transition-all group-hover:translate-x-0.5 group-hover:text-violet-600" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => goTo("/officers/ips")}
+                        className="group flex w-full items-center gap-3.5 rounded-2xl bg-sky-50/80 p-4 text-left ring-1 ring-sky-100 transition-all hover:-translate-y-0.5 hover:ring-sky-200"
+                      >
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-600 text-[11px] font-extrabold tracking-wide text-white shadow-sm">
+                          IPS
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          {loadingOfficers ? (
+                            <div className="h-7 w-12 animate-pulse rounded-lg bg-sky-100" />
+                          ) : (
+                            <p className="text-2xl font-extrabold leading-none text-slate-900">{ipsCount}</p>
+                          )}
+                          <p className="mt-1 text-xs font-medium text-slate-500">IPS Officers</p>
+                        </div>
+                        <ArrowRight className="h-4 w-4 shrink-0 text-sky-300 transition-all group-hover:translate-x-0.5 group-hover:text-sky-600" />
+                      </button>
+                    </div>
+                  </section>
+
+                  {/* Status breakdown */}
+                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
+                    <h3 className="flex items-center gap-2.5 text-sm font-bold text-slate-900">
+                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
+                        <BarChart3 className="h-4 w-4" />
+                      </span>
+                      Meetings by Status
+                    </h3>
+
+                    <div className="mt-4 space-y-1">
+                      <StatusRow
+                        icon={<CalendarDays className="h-4 w-4" />}
+                        iconClass="bg-violet-50 text-violet-600"
+                        label="Scheduled"
+                        value={dashboardStats.scheduled}
+                        total={dashboardStats.totalMeetings}
+                        loading={loadingMeetings}
+                      />
+                      <StatusRow
+                        icon={<CheckCircle2 className="h-4 w-4" />}
+                        iconClass="bg-emerald-50 text-emerald-600"
+                        label="Completed"
+                        value={dashboardStats.completed}
+                        total={dashboardStats.totalMeetings}
+                        loading={loadingMeetings}
+                      />
+                      <StatusRow
+                        icon={<RefreshCw className="h-4 w-4" />}
+                        iconClass="bg-amber-50 text-amber-600"
+                        label="Rescheduled"
+                        value={dashboardStats.rescheduled}
+                        total={dashboardStats.totalMeetings}
+                        loading={loadingMeetings}
+                      />
+                      <StatusRow
+                        icon={<XCircle className="h-4 w-4" />}
+                        iconClass="bg-rose-50 text-rose-600"
+                        label="Cancelled"
+                        value={dashboardStats.cancelled}
+                        total={dashboardStats.totalMeetings}
+                        loading={loadingMeetings}
+                      />
+                    </div>
+                  </section>
+
+                  {/* Quick actions */}
+                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
+                    <h3 className="flex items-center gap-2.5 text-sm font-bold text-slate-900">
+                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
+                        <TrendingUp className="h-4 w-4" />
+                      </span>
+                      Quick Actions
+                    </h3>
+
+                    <div className="mt-4 space-y-2.5">
+                      <QuickActionButton
+                        icon={<Plus className="h-4 w-4" />}
+                        label="Create new meeting"
+                        onClick={openCreatePanel}
+                      />
+                      <QuickActionButton
+                        icon={<CalendarDays className="h-4 w-4" />}
+                        label="View all meetings"
+                        onClick={() => goTo("/meetings")}
+                      />
+                      <QuickActionButton
+                        icon={<Users className="h-4 w-4" />}
+                        label="IAS officers"
+                        onClick={() => goTo("/officers/ias")}
+                      />
+                      <QuickActionButton
+                        icon={<Users className="h-4 w-4" />}
+                        label="IPS officers"
+                        onClick={() => goTo("/officers/ips")}
+                      />
+                    </div>
+                  </section>
+                </div>
+              </div>
             </div>
           </div>
+        </div>
 
-          {/* =====================================================
-              ACTIVITY CHART — full width
-          ====================================================== */}
-          <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
-              <div className="flex items-center gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-                  <BarChart3 className="h-5 w-5" />
-                </span>
-                <div>
-                  <h2 className="text-base font-bold tracking-tight text-slate-900">
-                    Meeting Activity Overview
-                  </h2>
-                  <p className="text-xs text-slate-500">Track meeting activity and trends over time.</p>
-                </div>
-              </div>
+        {/* ── Create / Edit panel ── */}
+        <CreateMeetingPanel
+          isOpen={panelOpen}
+          onClose={closePanel}
+          onSuccess={handlePanelSuccess}
+          editingMeeting={editingMeeting}
+        />
 
-              <div className="flex rounded-lg bg-slate-100 p-1">
-                {(["week", "month"] as ActivityRange[]).map((range) => (
-                  <button
-                    key={range}
-                    type="button"
-                    onClick={() => setActivityRange(range)}
-                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
-                      activityRange === range
-                        ? "bg-white text-slate-900 shadow-sm"
-                        : "text-slate-500 hover:text-slate-700"
-                    }`}
-                  >
-                    {range === "week" ? "Last 7 Days" : "Last 6 Months"}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="p-5">
-              {loadingMeetings ? (
-                <ChartSkeleton />
-              ) : activitySummary.total === 0 ? (
-                <ActivityEmpty range={activityRange} />
-              ) : (
-                <ActivityChart data={activityData} range={activityRange} />
-              )}
-
-              <div className="mt-5 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-4">
-                <div className="flex flex-wrap items-center gap-4">
-                  <LegendDot label="Scheduled" dotClass="bg-blue-500" />
-                  <LegendDot label="Completed" dotClass="bg-emerald-500" />
-                  <LegendDot label="Cancelled" dotClass="bg-slate-300" />
-                </div>
-                <div className="flex items-center gap-6">
-                  <SummaryStat
-                    label={activityRange === "week" ? "This week" : "6 months"}
-                    value={activitySummary.total}
-                  />
-                  <SummaryStat
-                    label={`Avg per ${activitySummary.unitLabel}`}
-                    value={activitySummary.average}
-                  />
-                  <SummaryStat label="Completed" value={activitySummary.completed} />
-                </div>
-              </div>
-            </div>
-          </section>
-        </main>
-
-        {/* =====================================================
-            Create / Edit panel
-            ⚠️ Adjust these prop names to match your
-            CreateMeetingPanel component's API if different.
-        ====================================================== */}
-        {panelOpen && (
-          <CreateMeetingPanel
-            isOpen={panelOpen}
-            onClose={closePanel}
-            onSuccess={handlePanelSuccess}
-            meeting={editingMeeting}
-          />
-        )}
-
-        {/* Details off-canvas */}
+        {/* ── Details off-canvas ── */}
         {selectedMeeting && (
           <MeetingDetailsPanel
             meeting={selectedMeeting}
@@ -1935,34 +1886,34 @@ export default function DashboardPage() {
           />
         )}
 
-        {/* Delete confirmation modal */}
+        {/* ── Delete confirmation modal ── */}
         {showDeleteConfirm && selectedMeeting && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
             <div
-              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200"
               onClick={() => setShowDeleteConfirm(false)}
             />
-            <div className="relative w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-50">
-                <Trash2 className="h-6 w-6 text-red-600" />
+            <div className="relative w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl animate-in zoom-in-95 duration-200">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-100">
+                <Trash2 className="h-5 w-5 text-rose-600" />
               </div>
-              <h3 className="mt-4 text-lg font-bold text-slate-900">Delete this meeting?</h3>
-              <p className="mt-1 break-words text-sm text-slate-500">
-                “{getMeetingTitle(selectedMeeting)}” will be permanently removed. This action cannot
-                be undone.
+              <h3 className="mt-4 text-center text-lg font-bold text-slate-900">Delete meeting?</h3>
+              <p className="mt-1.5 text-center text-sm leading-relaxed text-slate-500">
+                &ldquo;{getMeetingTitle(selectedMeeting)}&rdquo; will be permanently removed. This
+                action can&apos;t be undone.
               </p>
-              <div className="mt-6 flex justify-end gap-3">
+              <div className="mt-5 flex gap-3">
                 <button
                   type="button"
                   onClick={() => setShowDeleteConfirm(false)}
-                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+                  className="flex-1 rounded-full border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
                   onClick={confirmDelete}
-                  className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700"
+                  className="flex-1 rounded-full bg-rose-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-rose-700"
                 >
                   Delete
                 </button>

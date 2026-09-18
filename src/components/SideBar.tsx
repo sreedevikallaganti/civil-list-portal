@@ -12,7 +12,8 @@ import {
   Settings,
   LogOut,
   Loader2,
-  Phone
+  Phone,
+  CalendarDays,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -27,7 +28,7 @@ export default function SideBar() {
     { href: '/meetings', label: 'Meetings', icon: Calendar },
     { href: '/officers', label: 'Officers', icon: Users },
     // { href: '/other-contacts', label: 'Other Contacts', icon: Phone },
-    { href: '/calendar', label: 'Calendar', icon: Calendar },
+    { href: '/calendar', label: 'Calendar', icon: CalendarDays },
     { href: '/reports', label: 'Reports', icon: FileText },
     // { href: '/settings', label: 'Settings', icon: Settings },
   ];
@@ -61,24 +62,33 @@ export default function SideBar() {
   };
 
   return (
-    /* ── ✅ FIXED SIDEBAR: completely removed from the page flow.
-          Locked to the viewport — it physically cannot move or scroll
-          when the page content scrolls.
-          - fixed left-0 top-0  → anchored to the top-left corner forever
-          - h-screen            → exactly one viewport tall
-          - z-30               → sits above page content, but BELOW the
-                                 calendar off-canvas panels (z-40/z-50) ── */
-    <aside className="fixed left-0 top-0 z-30 flex h-screen w-64 flex-col border-r border-gray-200 bg-white">
+    /* ── FIXED SIDEBAR — same positioning contract as before:
+          fixed / h-screen / z-30, above page content but below
+          the off-canvas panels (z-40/z-50). Width unchanged (w-64)
+          so your main-content offset keeps working. ── */
+    <aside className="fixed left-0 top-0 z-30 flex h-screen w-64 flex-col border-r border-violet-100/80 bg-white/95 shadow-[1px_0_24px_-12px_rgba(139,92,246,0.25)] backdrop-blur-md">
 
       {/* Logo */}
-      <div className="border-b border-gray-200 p-6">
-        <h1 className="text-2xl font-bold text-blue-600">Civillist</h1>
-        <p className="mt-1 text-xs text-gray-500">Meeting Management</p>
+      <div className="border-b border-slate-100 p-6">
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-md shadow-slate-900/20">
+            <CalendarDays className="h-5 w-5" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="bg-gradient-to-r from-violet-600 to-indigo-600 bg-clip-text text-xl font-extrabold tracking-tight text-transparent">
+              Civillist
+            </h1>
+            <p className="text-[11px] font-medium text-slate-400">Meeting Management</p>
+          </div>
+        </div>
       </div>
 
-      {/* Navigation — static list, no scrollbar (fits any screen with your menu size) */}
-      <nav className="flex-1 p-4">
-        <div className="space-y-1">
+      {/* Navigation — dark-pill active state, violet hover */}
+      <nav className="flex-1 overflow-y-auto p-4">
+        <p className="mb-2 px-4 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
+          Menu
+        </p>
+        <div className="space-y-1.5">
           {menuItems.map((item) => {
             const Icon = item.icon;
             const isActive = pathname === item.href;
@@ -87,30 +97,39 @@ export default function SideBar() {
               <Link
                 key={item.href}
                 href={item.href}
-                className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
+                aria-current={isActive ? 'page' : undefined}
+                className={`group flex items-center gap-3 rounded-full px-4 py-2.5 transition-all duration-200 ${
                   isActive
-                    ? 'bg-blue-50 text-blue-600 font-semibold'
-                    : 'text-gray-600 hover:bg-gray-50'
+                    ? 'bg-slate-900 font-semibold text-white shadow-lg shadow-slate-900/20'
+                    : 'font-medium text-slate-500 hover:bg-violet-50 hover:text-violet-700'
                 }`}
               >
-                <Icon className="w-5 h-5" />
-                <span>{item.label}</span>
+                <Icon
+                  className={`h-5 w-5 shrink-0 transition-transform duration-200 group-hover:scale-110 ${
+                    isActive ? 'text-white' : 'text-slate-400 group-hover:text-violet-600'
+                  }`}
+                />
+                <span className="truncate">{item.label}</span>
+
+                {/* Active indicator */}
+                {isActive && (
+                  <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-violet-400" />
+                )}
               </Link>
             );
           })}
         </div>
       </nav>
 
-      {/* User Profile — pinned to the bottom of the viewport, always visible,
-          never participates in any scrolling */}
-      <div className="border-t border-gray-200 p-4">
-        <div className="flex items-center gap-3 px-2 py-2">
-          <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-full flex items-center justify-center text-white font-bold">
+      {/* User Profile — pinned to the bottom, same as before */}
+      <div className="border-t border-slate-100 p-4">
+        <div className="flex items-center gap-3 rounded-2xl bg-[#f7f6fd] px-3 py-2.5 ring-1 ring-violet-100/70">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold text-white shadow-md shadow-violet-500/25">
             {initials}
           </div>
-          <div className="flex-1 min-w-0">
-            <p className="font-medium text-gray-900 truncate capitalize">{displayName}</p>
-            <p className="text-xs text-gray-500 truncate">{subLabel}</p>
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-semibold capitalize text-slate-900">{displayName}</p>
+            <p className="truncate text-xs text-slate-400">{subLabel}</p>
           </div>
           <button
             type="button"
@@ -118,12 +137,12 @@ export default function SideBar() {
             disabled={isLoggingOut}
             aria-label="Sign out"
             title="Sign out"
-            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded-full p-2 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isLoggingOut ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
+              <Loader2 className="h-5 w-5 animate-spin" />
             ) : (
-              <LogOut className="w-5 h-5" />
+              <LogOut className="h-5 w-5" />
             )}
           </button>
         </div>

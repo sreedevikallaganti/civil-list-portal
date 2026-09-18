@@ -8,6 +8,12 @@ import {
 import pb from '@/lib/pocketbase';
 import { showToast } from '@/components/Toaster';
 
+function getTodayString() {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 interface MeetingUpdatePanelProps {
   isOpen: boolean;
   meeting: any | null;
@@ -275,6 +281,7 @@ export default function MeetingUpdatePanel({ isOpen, meeting, onClose, onUpdated
 
             <input
               type="date"
+              min={getTodayString()}
               value={followUpDate}
               onChange={(e) => setFollowUpDate(e.target.value)}
               className="w-full px-3.5 py-2.5 rounded-xl ring-1 ring-slate-200 bg-white text-sm text-slate-900 outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow"

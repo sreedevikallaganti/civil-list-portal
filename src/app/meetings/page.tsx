@@ -1,24 +1,94 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Calendar, CalendarClock, CheckCircle2, RotateCcw, XCircle,
   Clock, MapPin, Search, Plus, Edit2, Trash2, X, ChevronRight, ChevronLeft,
-  User, Briefcase, Tag, AlignLeft, FileText, Phone, Mail, ArrowUpDown
+  ChevronDown, User, Briefcase, Tag, AlignLeft, FileText, Phone, Mail,
+  ArrowUpDown, Loader2, RefreshCw, CalendarDays
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import CreateMeetingPanel from '@/components/CreateMeetingPanel';
-import MeetingUpdatePanel from '@/components/MeetingUpdatePanel'; // ═══ NEW ═══
+import MeetingUpdatePanel from '@/components/MeetingUpdatePanel';
+
+/* ----------------------------- Global CSS / Animations ----------------------------- */
+
+const CUSTOM_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+.meetings-root { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+::selection { background: rgba(139, 92, 246, 0.18); }
+@keyframes mFadeUp   { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes mFadeIn   { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mScaleIn  { from { opacity: 0; transform: scale(0.94) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes mPanelIn  { from { opacity: 0; transform: translateX(64px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes mRowIn    { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes mShimmer  { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@keyframes mBob      { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+@keyframes mBlob     { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(14px, -18px) scale(1.07); } }
+.anim-fade-up  { animation: mFadeUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-fade-in  { animation: mFadeIn 0.4s ease both; }
+.anim-scale-in { animation: mScaleIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-panel    { animation: mPanelIn 0.38s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-overlay  { animation: mFadeIn 0.25s ease both; }
+.anim-row      { animation: mRowIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-bob      { animation: mBob 3.2s ease-in-out infinite; }
+.anim-blob     { animation: mBlob 9s ease-in-out infinite; }
+.skeleton { background: linear-gradient(90deg, #f1effc 25%, #e5e1f5 40%, #f1effc 55%); background-size: 200% 100%; animation: mShimmer 1.6s linear infinite; }
+.nice-scroll::-webkit-scrollbar { width: 8px; }
+.nice-scroll::-webkit-scrollbar-track { background: transparent; }
+.nice-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 999px; }
+.nice-scroll::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
+`;
+
+function CustomStyles() {
+  return <style dangerouslySetInnerHTML={{ __html: CUSTOM_CSS }} />;
+}
 
 /* ----------------------------- Status Styling ----------------------------- */
 
 const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string }> = {
-  scheduled:   { label: 'Scheduled',   dot: 'bg-blue-400',    badge: 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-600/20' },
+  scheduled:   { label: 'Scheduled',   dot: 'bg-violet-400',  badge: 'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-600/20' },
   completed:   { label: 'Completed',   dot: 'bg-emerald-400', badge: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20' },
   rescheduled: { label: 'Rescheduled', dot: 'bg-amber-400',   badge: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20' },
-  cancelled:   { label: 'Cancelled',   dot: 'bg-red-400',     badge: 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/20' },
-  rejected:    { label: 'Rejected',    dot: 'bg-rose-400',    badge: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20' },
+  cancelled:   { label: 'Cancelled',   dot: 'bg-rose-400',    badge: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20' },
+  rejected:    { label: 'Rejected',    dot: 'bg-slate-400',   badge: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-500/20' },
 };
+
+const TYPE_STYLES: Record<string, string> = {
+  internal: 'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-600/15',
+  external: 'bg-sky-50 text-sky-700 ring-1 ring-inset ring-sky-600/15',
+};
+const getTypeStyle = (t: any) =>
+  TYPE_STYLES[String(t || '').toLowerCase()] || 'bg-gray-100 text-gray-600 ring-1 ring-inset ring-gray-500/15';
+
+const PRIORITY_BADGE: Record<string, { badge: string; text: string; dot: string }> = {
+  high:   { badge: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20',   text: 'text-rose-600',   dot: 'bg-rose-300' },
+  medium: { badge: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20', text: 'text-amber-600', dot: 'bg-amber-300' },
+  low:    { badge: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20', text: 'text-emerald-600', dot: 'bg-emerald-300' },
+};
+
+/* ---------------------------- KPI / Stat card config (pastel, reference style) ---------------------------- */
+
+const STAT_CARDS = [
+  { key: 'all',          label: 'Total',        caption: 'All meetings',  icon: CalendarClock,
+    card: 'from-violet-100 to-purple-100',  iconTint: 'text-violet-600' },
+  { key: 'scheduled',    label: 'Scheduled',    caption: 'Upcoming',      icon: Calendar,
+    card: 'from-sky-100 to-blue-100',       iconTint: 'text-sky-600' },
+  { key: 'completed',    label: 'Completed',    caption: 'Finished',      icon: CheckCircle2,
+    card: 'from-emerald-100 to-green-100',  iconTint: 'text-emerald-600' },
+  { key: 'rescheduled',  label: 'Rescheduled',  caption: 'Moved dates',   icon: RotateCcw,
+    card: 'from-amber-100 to-orange-100',   iconTint: 'text-amber-600' },
+  { key: 'cancelled',    label: 'Cancelled',    caption: 'Called off',    icon: XCircle,
+    card: 'from-rose-100 to-pink-100',      iconTint: 'text-rose-600' },
+];
+
+const DIST_SEGMENTS = [
+  { key: 'scheduled',   label: 'Scheduled',   bar: 'bg-violet-400' },
+  { key: 'completed',   label: 'Completed',   bar: 'bg-emerald-400' },
+  { key: 'rescheduled', label: 'Rescheduled', bar: 'bg-amber-400' },
+  { key: 'cancelled',   label: 'Cancelled',   bar: 'bg-rose-400' },
+  { key: 'rejected',    label: 'Rejected',    bar: 'bg-slate-400' },
+];
 
 const PER_PAGE_OPTIONS = [8, 12, 24, 48];
 
@@ -89,6 +159,74 @@ function getPaginationRange(current: number, total: number): (number | 'dots')[]
   return [1, 'dots', current - 1, current, current + 1, 'dots', total];
 }
 
+/* --------------------------- Date helpers (module scope) --------------------------- */
+
+const toLocalISO = (d: Date) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+function dayTag(dateValue: any, statusKey: string): { label: string; cls: string } | null {
+  if (!dateValue) return null;
+  const raw = String(dateValue);
+  const iso = raw.length > 10 ? raw.slice(0, 10) : raw;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const today = toLocalISO(new Date());
+  const tomorrow = toLocalISO(new Date(Date.now() + 86400000));
+  if (iso === today)    return { label: 'Today',    cls: 'bg-violet-50 text-violet-700 ring-violet-500/15' };
+  if (iso === tomorrow) return { label: 'Tomorrow', cls: 'bg-sky-50 text-sky-700 ring-sky-500/15' };
+  if (statusKey === 'scheduled' && iso < today)
+    return { label: 'Overdue', cls: 'bg-rose-50 text-rose-700 ring-rose-500/15' };
+  return null;
+}
+
+/* ------------------------- Animated count-up number ------------------------- */
+
+function AnimatedNumber({ value, duration = 900 }: { value: number; duration?: number }) {
+  const [display, setDisplay] = useState(0);
+  const prevRef = useRef(0);
+
+  useEffect(() => {
+    const from = prevRef.current;
+    const to = value;
+    if (from === to) return;
+    let raf = 0;
+    const start = performance.now();
+    const step = (now: number) => {
+      const p = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const cur = Math.round(from + (to - from) * eased);
+      prevRef.current = cur;
+      setDisplay(cur);
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [value, duration]);
+
+  return <span className="tabular-nums">{display}</span>;
+}
+
+/* ------------------------------ Info tile (panel) ----------------------------- */
+
+function InfoTile({ icon: Icon, tint, label, children }: { icon: any; tint: string; label: string; children: ReactNode }) {
+  return (
+    <div className="group/tile rounded-2xl border border-slate-200/80 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md hover:shadow-slate-900/[0.04]">
+      <div className="flex items-center gap-2">
+        <span className={`flex h-6 w-6 items-center justify-center rounded-lg ${tint} transition-transform duration-300 group-hover/tile:scale-110`}>
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</p>
+      </div>
+      <div className="mt-2 text-sm font-semibold text-slate-900">{children}</div>
+    </div>
+  );
+}
+
+/* ================================================================================= */
+
 export default function MeetingsPage() {
   const [meetings, setMeetings] = useState<any[]>([]);
   const [selectedMeeting, setSelectedMeeting] = useState<any>(null);
@@ -101,15 +239,25 @@ export default function MeetingsPage() {
 
   const [sortBy, setSortBy] = useState<string>(DEFAULT_SORT);
 
+  /* Local create/edit panel state (global provider removed) */
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<any>(null);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
-  const [updateMeeting, setUpdateMeeting] = useState<any>(null); // ═══ NEW ═══
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const [updateMeeting, setUpdateMeeting] = useState<any>(null);
 
   /* Pagination state */
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(8);
+
+  /* Distribution-bar mount trigger (for width transition) */
+  const [distMounted, setDistMounted] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setDistMounted(true), 150);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => { loadData(); }, []);
 
@@ -125,6 +273,28 @@ export default function MeetingsPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedMeeting, showDeleteConfirm, isPanelOpen]);
 
+  /* ------------------------- Create action ------------------------- */
+
+  const openCreate = () => {
+    setEditingMeeting(null);
+    setIsPanelOpen(true);
+  };
+
+  /* Press "N" anywhere (outside inputs) to create a meeting */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement;
+      const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(t?.tagName) || t?.isContentEditable;
+      if (typing || isPanelOpen || selectedMeeting || updateMeeting || showDeleteConfirm) return;
+      if (e.key.toLowerCase() === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        openCreate();
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isPanelOpen, selectedMeeting, updateMeeting, showDeleteConfirm]);
+
   async function loadData() {
     try {
       setLoading(true);
@@ -138,22 +308,34 @@ export default function MeetingsPage() {
   }
 
   const handleEdit = () => {
-  if (!selectedMeeting) return;
-  const snapshot = selectedMeeting;   // keep a copy before closing
-  setSelectedMeeting(null);           // ← closes the details popup
-  setEditingMeeting(snapshot);
-  setIsPanelOpen(true);
-};
+    if (!selectedMeeting) return;
+    const snapshot = selectedMeeting;
+    setSelectedMeeting(null);
+    setEditingMeeting(snapshot);
+    setIsPanelOpen(true);
+  };
 
-const handleOpenUpdate = () => {
-  if (!selectedMeeting) return;
-  const snapshot = selectedMeeting;
-  setSelectedMeeting(null);           // ← closes the details popup
-  setUpdateMeeting(snapshot);
-};
+  const handleOpenUpdate = () => {
+    if (!selectedMeeting) return;
+    const snapshot = selectedMeeting;
+    setSelectedMeeting(null);
+    setUpdateMeeting(snapshot);
+  };
+
+  const handlePanelSaved = () => {
+    setIsPanelOpen(false);
+    setEditingMeeting(null);
+    loadData();
+  };
+
+  const handlePanelClosed = () => {
+    setIsPanelOpen(false);
+    setEditingMeeting(null);
+  };
 
   const confirmDelete = async () => {
-    if (!selectedMeeting) return;
+    if (!selectedMeeting || deleting) return;
+    setDeleting(true);
     try {
       await pb.collection('meetings').delete(selectedMeeting.id);
       setSelectedMeeting(null);
@@ -161,6 +343,8 @@ const handleOpenUpdate = () => {
       loadData();
     } catch {
       alert('Failed to delete meeting');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -196,9 +380,13 @@ const handleOpenUpdate = () => {
   const priorityWeight = (m: any) => PRIORITY_WEIGHT[String(m.priority || '').toLowerCase()] || 0;
 
   const formatTimeDisplay = (timeString: string): string => {
-    if (!timeString || !timeString.includes(':')) return '—';
-    const [hours, minutes] = timeString.split(':');
-    const hour = parseInt(hours);
+    if (!timeString) return '—';
+    const match = timeString.trim().match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+    if (!match) return timeString.includes(':') ? timeString : '—';
+    const hour = parseInt(match[1], 10);
+    const minutes = match[2];
+    const meridiem = match[3]?.toUpperCase();
+    if (meridiem) return `${hour % 12 || 12}:${minutes} ${meridiem}`;
     const modifier = hour >= 12 ? 'PM' : 'AM';
     return `${hour % 12 || 12}:${minutes} ${modifier}`;
   };
@@ -206,7 +394,13 @@ const handleOpenUpdate = () => {
   const formatDate = (dateString: any) => {
     if (!dateString) return null;
     try {
-      const date = new Date(dateString);
+      const raw = String(dateString).trim();
+      const isoDateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      const normalized = raw.includes(' ') ? raw.replace(' ', 'T') : raw;
+      const date = isoDateOnly
+        ? new Date(Number(isoDateOnly[1]), Number(isoDateOnly[2]) - 1, Number(isoDateOnly[3]))
+        : new Date(normalized);
+      if (Number.isNaN(date.getTime())) return null;
       return {
         day: date.getDate(),
         month: date.toLocaleString('default', { month: 'short' }),
@@ -295,39 +489,70 @@ const handleOpenUpdate = () => {
 
   const activeSortLabel = ALL_SORT_OPTIONS.find((o) => o.value === sortBy)?.label ?? 'Newest Created';
 
+  /* ------------------------------ Distribution ----------------------------- */
+
+  const totalAll = meetings.length || 1;
+  const distData = DIST_SEGMENTS
+    .map((s) => ({ ...s, count: statusCount(s.key) }))
+    .filter((s) => s.count > 0);
+
   /* ------------------------------ Skeleton View ----------------------------- */
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-50/70 p-6 lg:p-10">
-        <div className="max-w-7xl mx-auto space-y-6 animate-pulse">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-gray-200 rounded-2xl" />
+      <div className="meetings-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+        <CustomStyles />
+        <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
+          <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
+          <div className="absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" />
+        </div>
+
+        <div className="anim-fade-in relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+          {/* App bar skeleton */}
+          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5 sm:px-6">
+            <div className="flex items-center gap-3">
+              <div className="skeleton h-9 w-9 rounded-xl" />
               <div className="space-y-2">
-                <div className="h-7 w-40 bg-gray-200 rounded-lg" />
-                <div className="h-4 w-56 bg-gray-100 rounded" />
+                <div className="skeleton h-4 w-32 rounded-full" />
+                <div className="skeleton h-3 w-44 rounded-full" />
               </div>
             </div>
-            <div className="h-11 w-36 bg-gray-200 rounded-xl" />
+            <div className="skeleton h-10 w-36 rounded-full" />
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
-            {[...Array(5)].map((_, i) => (
-              <div key={i} className="h-[118px] bg-gray-100 rounded-2xl border border-gray-200" />
-            ))}
-          </div>
-          <div className="h-[70px] bg-gray-100 rounded-2xl" />
-          <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
-            {[...Array(6)].map((_, i) => (
-              <div key={i} className="flex items-center gap-4 p-5">
-                <div className="w-12 h-14 bg-gray-100 rounded-xl" />
-                <div className="flex-1 space-y-2">
-                  <div className="h-4 w-2/3 bg-gray-100 rounded" />
-                  <div className="h-3 w-1/3 bg-gray-50 rounded" />
-                </div>
-                <div className="h-6 w-24 bg-gray-100 rounded-full" />
+
+          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+            {/* Stats */}
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="skeleton h-[126px] rounded-3xl" style={{ animationDelay: `${i * 80}ms` }} />
+              ))}
+            </div>
+
+            {/* Distribution */}
+            <div className="space-y-2 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
+              <div className="skeleton h-3 w-40 rounded-full" />
+              <div className="skeleton h-2.5 w-full rounded-full" />
+            </div>
+
+            {/* Filter bar */}
+            <div className="skeleton h-[74px] rounded-3xl" />
+
+            {/* Table */}
+            <div className="rounded-3xl bg-white shadow-sm ring-1 ring-slate-100">
+              <div className="skeleton h-[60px] rounded-t-3xl" />
+              <div className="divide-y divide-slate-100">
+                {[...Array(6)].map((_, i) => (
+                  <div key={i} className="flex items-center gap-4 p-5">
+                    <div className="skeleton h-14 w-12 rounded-2xl" />
+                    <div className="flex-1 space-y-2.5">
+                      <div className="skeleton h-4 w-2/3 rounded-full" />
+                      <div className="skeleton h-3 w-1/3 rounded-full" />
+                    </div>
+                    <div className="skeleton h-6 w-24 rounded-full" />
+                  </div>
+                ))}
               </div>
-            ))}
+            </div>
           </div>
         </div>
       </div>
@@ -337,657 +562,761 @@ const handleOpenUpdate = () => {
   /* -------------------------------- Main View ------------------------------- */
 
   return (
-    <div className="min-h-screen bg-slate-50/70 p-6 lg:p-10">
-      <div className="max-w-7xl mx-auto space-y-6">
+    <div className="meetings-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+      <CustomStyles />
 
-        {/* ------------------------------ Page Header ----------------------------- */}
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-600/25">
-              <CalendarClock className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-slate-900">Meetings</h1>
-              <p className="text-sm text-gray-500 mt-0.5">Manage and track all your meetings</p>
+      {/* ------------------------- Decorative background ------------------------ */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div className="anim-blob absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
+        <div className="anim-blob absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" style={{ animationDelay: '-3s' }} />
+        <div className="anim-blob absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" style={{ animationDelay: '-6s' }} />
+      </div>
+
+      <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+
+        {/* ------------------------------- App bar ------------------------------ */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
+              <CalendarClock className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <p className="truncate text-sm font-bold text-slate-900">Meetings</p>
+                <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-bold tabular-nums text-violet-600 ring-1 ring-inset ring-violet-500/15">
+                  {meetings.length}
+                </span>
+              </div>
+              <p className="truncate text-[11px] text-slate-400">
+                {new Date().toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'long' })}
+              </p>
             </div>
           </div>
-          <button
-            onClick={() => { setEditingMeeting(null); setIsPanelOpen(true); }}
-            className="inline-flex items-center justify-center gap-2 px-5 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold rounded-xl shadow-lg shadow-blue-600/25 hover:shadow-blue-600/40 transition-all hover:-translate-y-px"
-          >
-            <Plus className="w-5 h-5" />
-            New Meeting
-          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => loadData()}
+              aria-label="Refresh data"
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600"
+            >
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+
+            <button
+              onClick={openCreate}
+              className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
+            >
+              <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
+              New Meeting
+              <kbd className="ml-1 hidden rounded-md bg-white/20 px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ring-white/30 sm:inline">
+                N
+              </kbd>
+            </button>
+          </div>
         </div>
 
-        {/* ------------------------------ Status Stats ---------------------------- */}
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
-          {[
-            { key: 'all', label: 'Total', caption: 'All meetings', icon: CalendarClock, colors: 'bg-indigo-50 text-indigo-600', ring: 'ring-indigo-500/40' },
-            { key: 'scheduled', label: 'Scheduled', caption: 'Upcoming', icon: Calendar, colors: 'bg-blue-50 text-blue-600', ring: 'ring-blue-500/40' },
-            { key: 'completed', label: 'Completed', caption: 'Finished', icon: CheckCircle2, colors: 'bg-emerald-50 text-emerald-600', ring: 'ring-emerald-500/40' },
-            { key: 'rescheduled', label: 'Rescheduled', caption: 'Moved dates', icon: RotateCcw, colors: 'bg-amber-50 text-amber-600', ring: 'ring-amber-500/40' },
-            { key: 'cancelled', label: 'Cancelled', caption: 'Called off', icon: XCircle, colors: 'bg-red-50 text-red-600', ring: 'ring-red-500/40' },
-          ].map((stat) => {
-            const Icon = stat.icon;
-            const count = stat.key === 'all' ? meetings.length : statusCount(stat.key);
-            const active = statusFilter === stat.key;
-            return (
-              <button
-                key={stat.key}
-                onClick={() => setStatusFilter(stat.key)}
-                className={`text-left bg-white rounded-2xl border p-4 lg:p-5 transition-all hover:shadow-md hover:-translate-y-0.5 ${
-                  active ? `ring-2 ${stat.ring} border-transparent shadow-md` : 'border-gray-200 shadow-sm hover:border-gray-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${stat.colors}`}>
-                    <Icon className="w-5 h-5" />
-                  </div>
-                  <span className="text-2xl font-bold text-slate-900 tabular-nums">{count}</span>
-                </div>
-                <p className="mt-3 text-sm font-semibold text-gray-800">{stat.label}</p>
-                <p className="text-xs text-gray-400 mt-0.5">{stat.caption}</p>
-              </button>
-            );
-          })}
-        </div>
+        {/* ------------------------------- Content ------------------------------ */}
+        <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
 
-        {/* ------------------------------- Search Bar ----------------------------- */}
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 lg:p-5">
-          <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3 lg:items-center">
-
-            <div className="relative flex-1 min-w-[180px] lg:max-w-md">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search by agenda, location..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-10 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all"
-              />
-              {searchQuery && (
+          {/* ------------------------------ Status Stats ---------------------------- */}
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
+            {STAT_CARDS.map((stat, i) => {
+              const Icon = stat.icon;
+              const count = stat.key === 'all' ? meetings.length : statusCount(stat.key);
+              const active = statusFilter === stat.key;
+              return (
                 <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                  key={stat.key}
+                  onClick={() => setStatusFilter(stat.key)}
+                  style={{ animationDelay: `${120 + i * 70}ms` }}
+                  className={`anim-fade-up group relative w-full overflow-hidden rounded-3xl bg-gradient-to-br p-5 text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-slate-900/[0.08] active:scale-[0.98] ${stat.card} ${
+                    active ? 'ring-2 ring-slate-900 shadow-md shadow-slate-900/10' : 'ring-1 ring-white/70'
+                  }`}
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute -right-6 -top-6 h-20 w-20 rounded-full bg-white/50 transition-transform duration-300 group-hover:scale-125"
+                  />
+
+                  <div className="relative flex items-start justify-between">
+  <p className="pt-1.5 text-sm font-semibold text-slate-600">{stat.label}</p>
+  <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/80 shadow-sm transition-transform duration-300 group-hover:scale-110 ${stat.iconTint}`}>
+    <Icon className="h-5 w-5" />
+  </span>
+</div>
+
+                  <div className="relative mt-3 flex items-end justify-between gap-2">
+                    <span className="text-[2rem] font-extrabold leading-none tracking-tight text-slate-900">
+                      <AnimatedNumber value={count} />
+                    </span>
+                    <span className="pb-1 text-[10px] font-semibold text-slate-500/80">
+                      {Math.round((count / totalAll) * 100)}% of total
+                    </span>
+                  </div>
+                  <p className="relative mt-1.5 text-xs font-medium text-slate-500/80">{stat.caption}</p>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* --------------------------- Distribution bar --------------------------- */}
+          {distData.length > 0 && (
+            <div className="anim-fade-up rounded-3xl bg-white px-5 py-4 shadow-sm ring-1 ring-slate-100" style={{ animationDelay: '420ms' }}>
+              <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-violet-400 to-indigo-400" />
+                  Status distribution
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
+                  {distData.map((s) => (
+                    <span key={s.key} className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                      <span className={`h-2 w-2 rounded-full ${s.bar}`} />
+                      {s.label}
+                      <span className="tabular-nums text-slate-400">{s.count}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="flex h-2 w-full gap-1 overflow-hidden rounded-full bg-slate-100">
+                {distData.map((s, i) => (
+                  <div
+                    key={s.key}
+                    title={`${s.label}: ${s.count}`}
+                    className={`h-full rounded-full ${s.bar} transition-all duration-700 ease-out`}
+                    style={{
+                      width: distMounted ? `${(s.count / totalAll) * 100}%` : '0%',
+                      transitionDelay: `${i * 90}ms`,
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ------------------------------- Search Bar ----------------------------- */}
+          <div className="anim-fade-up rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-100 lg:p-5" style={{ animationDelay: '220ms' }}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap lg:items-center">
+
+              {/* Search */}
+              <div className="relative min-w-[180px] flex-1 lg:max-w-md">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search by agenda, location..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full rounded-full border border-slate-200 bg-slate-50/80 py-2.5 pl-11 pr-10 text-sm text-slate-900 placeholder-slate-400 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-3.5 top-1/2 -translate-y-1/2 rounded-full p-1 text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 active:scale-90"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Type */}
+              <div className="relative">
+                <Briefcase className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <select
+                  value={typeFilter}
+                  onChange={(e) => setTypeFilter(e.target.value)}
+                  className="w-full cursor-pointer appearance-none rounded-full border border-slate-200 bg-slate-50/80 py-2.5 pl-11 pr-9 text-sm font-medium text-slate-700 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10 sm:w-44"
+                >
+                  <option value="all">All Types</option>
+                  <option value="internal">Internal</option>
+                  <option value="external">External</option>
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              </div>
+
+              {/* Priority */}
+              <div className="relative">
+                <Tag className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <select
+                  value={priorityFilter}
+                  onChange={(e) => setPriorityFilter(e.target.value)}
+                  className="w-full cursor-pointer appearance-none rounded-full border border-slate-200 bg-slate-50/80 py-2.5 pl-11 pr-9 text-sm font-medium text-slate-700 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10 sm:w-44"
+                >
+                  <option value="all">All Priorities</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              </div>
+
+              {/* Sort */}
+              <div className="relative">
+                <ArrowUpDown className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value)}
+                  className="w-full cursor-pointer appearance-none rounded-full border border-slate-200 bg-slate-50/80 py-2.5 pl-11 pr-9 text-sm font-medium text-slate-700 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10 sm:w-48"
+                >
+                  {SORT_GROUPS.map((g) => (
+                    <optgroup key={g.group} label={g.group}>
+                      {g.options.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              </div>
+            </div>
+          </div>
+
+          {/* --------------------------------- Table -------------------------------- */}
+          <div className="anim-fade-up overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-100" style={{ animationDelay: '300ms' }}>
+
+            {/* Card header */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 lg:px-6">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
+                  <CalendarDays className="h-4 w-4" />
+                </span>
+                <h3 className="text-sm font-bold text-slate-900">All Meetings</h3>
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold tabular-nums text-slate-500">
+                  {filteredMeetings.length}
+                </span>
+                <span className="hidden items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-bold text-violet-600 ring-1 ring-inset ring-violet-500/15 sm:inline-flex">
+                  <ArrowUpDown className="h-3 w-3" />
+                  {activeSortLabel}
+                </span>
+              </div>
+              {(searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all' || sortBy !== DEFAULT_SORT) && (
+                <button
+                  onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); setSortBy(DEFAULT_SORT); }}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-3.5 py-1.5 text-xs font-semibold text-rose-600 transition-all duration-200 hover:bg-rose-100 active:scale-95"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Clear filters
                 </button>
               )}
             </div>
 
-            <div className="relative">
-              <Briefcase className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-              <select
-                value={typeFilter}
-                onChange={(e) => setTypeFilter(e.target.value)}
-                className="w-full sm:w-44 pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all cursor-pointer"
-              >
-                <option value="all">All Types</option>
-                <option value="internal">Internal</option>
-                <option value="external">External</option>
-              </select>
+            {/* Column headers */}
+            <div className="hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/70 px-6 py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
+              <div className="col-span-1 text-center">Date</div>
+              <div className="col-span-4">Agenda</div>
+              <div className="col-span-2 text-center">Time</div>
+              <div className="col-span-2">Location</div>
+              <div className="col-span-1 text-center">Type</div>
+              <div className="col-span-1 text-center">Status</div>
+              <div className="col-span-1" />
             </div>
 
-            <div className="relative">
-              <Tag className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-              <select
-                value={priorityFilter}
-                onChange={(e) => setPriorityFilter(e.target.value)}
-                className="w-full sm:w-44 pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all cursor-pointer"
-              >
-                <option value="all">All Priorities</option>
-                <option value="high">High</option>
-                <option value="medium">Medium</option>
-                <option value="low">Low</option>
-              </select>
-            </div>
-
-            <div className="relative">
-              <ArrowUpDown className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
-                className="w-full sm:w-48 pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-medium text-gray-700 focus:outline-none focus:bg-white focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 transition-all cursor-pointer"
-              >
-                {SORT_GROUPS.map((g) => (
-                  <optgroup key={g.group} label={g.group}>
-                    {g.options.map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            </div>
-          </div>
-        </div>
-
-        {/* --------------------------------- Table -------------------------------- */}
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-
-          <div className="px-6 py-4 flex items-center justify-between border-b border-gray-100">
-            <div className="flex items-center gap-2.5">
-              <h3 className="text-sm font-bold text-gray-800">All Meetings</h3>
-              <span className="px-2 py-0.5 bg-gray-100 rounded-full text-[11px] font-bold text-gray-500 tabular-nums">
-                {filteredMeetings.length}
-              </span>
-              <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full text-[11px] font-bold">
-                <ArrowUpDown className="w-3 h-3" />
-                {activeSortLabel}
-              </span>
-            </div>
-            {(searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all' || sortBy !== DEFAULT_SORT) && (
-              <button
-                onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); setSortBy(DEFAULT_SORT); }}
-                className="text-xs font-semibold text-blue-600 hover:text-blue-700 transition-colors"
-              >
-                Clear filters
-              </button>
-            )}
-          </div>
-
-          <div className="hidden md:grid grid-cols-12 gap-4 px-6 py-3.5 bg-slate-50/80 border-b border-gray-200 text-[11px] font-bold text-gray-500 uppercase tracking-wider">
-            <div className="col-span-1 text-center">Date</div>
-            <div className="col-span-4">Agenda</div>
-            <div className="col-span-2 text-center">Time</div>
-            <div className="col-span-2">Location</div>
-            <div className="col-span-1 text-center">Type</div>
-            <div className="col-span-1 text-center">Status</div>
-            <div className="col-span-1" />
-          </div>
-
-          <div className="divide-y divide-gray-100">
-            {paginatedMeetings.length === 0 ? (
-              <div className="py-20 flex flex-col items-center justify-center text-center">
-                <div className="w-16 h-16 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center">
-                  <CalendarClock className="w-8 h-8 text-gray-300" />
-                </div>
-                <h3 className="mt-4 text-base font-semibold text-gray-800">No meetings found</h3>
-                <p className="mt-1 text-sm text-gray-500">Try adjusting your search or filters, or create a new meeting.</p>
-                <button
-                  onClick={() => { setEditingMeeting(null); setIsPanelOpen(true); }}
-                  className="mt-5 inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
-                >
-                  <Plus className="w-4 h-4" /> New Meeting
-                </button>
-              </div>
-            ) : (
-              paginatedMeetings.map((meeting) => {
-                const dateInfo = formatDate(meeting.meeting_date || meeting.created_date);
-                const time = meeting.meeting_time || '';
-                const style = getStatusStyle(getStatusKey(meeting));
-                const title = getMeetingTitle(meeting);
-
-                const createdMs = dateToTime(meeting.created_date);
-                const createdDateStr = createdMs
-                  ? new Date(createdMs).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })
-                  : '—';
-                const createdTimeStr = createdMs
-                  ? new Date(createdMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-                  : '';
-
-                return (
-                  <div key={meeting.id} onClick={() => setSelectedMeeting(meeting)}>
-                    {/* Desktop row */}
-                    <div className="hidden md:grid grid-cols-12 gap-4 px-6 py-4 items-center cursor-pointer transition-colors group hover:bg-blue-50/40">
-                      <div className="col-span-1 flex justify-center">
-                        <div className="flex flex-col items-center justify-center w-12 h-14 rounded-xl border border-gray-200 bg-slate-50 group-hover:border-blue-300 group-hover:bg-blue-50 transition-colors">
-                          <span className="text-lg font-bold text-slate-900 leading-none tabular-nums">{dateInfo?.day}</span>
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mt-1">{dateInfo?.month}</span>
-                        </div>
-                      </div>
-
-                      <div className="col-span-4 min-w-0">
-                        <h3 className="font-semibold text-gray-900 truncate group-hover:text-blue-700 transition-colors">{title}</h3>
-                        {meeting.officer_name && (
-                          <p className="flex items-center gap-1.5 text-xs text-gray-500 mt-1">
-                            <User className="w-3 h-3 text-gray-400" />
-                            <span className="truncate">with {meeting.officer_name}</span>
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="col-span-2 text-center">
-                        <div className="flex items-center justify-center gap-1.5 text-sm font-medium text-gray-700">
-                          <Clock className="w-3.5 h-3.5 text-gray-400" />
-                          {formatTimeDisplay(time)}
-                        </div>
-                        {meeting.duration && <p className="text-[11px] text-gray-400 mt-0.5">{meeting.duration} min</p>}
-                      </div>
-
-                      <div className="col-span-2 min-w-0 flex items-center gap-1.5">
-                        <MapPin className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-                        <span className="text-sm text-gray-600 truncate">{meeting.location || '—'}</span>
-                      </div>
-
-                      <div className="col-span-1 text-center">
-                        {meeting.meeting_type ? (
-                          <span className="inline-flex px-2.5 py-1 rounded-lg bg-gray-100 text-gray-600 text-[11px] font-semibold capitalize">
-                            {meeting.meeting_type}
-                          </span>
-                        ) : (
-                          <span className="text-sm text-gray-300">—</span>
-                        )}
-                      </div>
-
-                      <div className="col-span-1 flex justify-center">
-                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${style.badge}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
-                          {style.label}
-                        </span>
-                      </div>
-
-                      <div className="col-span-1 flex justify-center">
-                        <div className="w-8 h-8 rounded-full flex items-center justify-center text-gray-300 group-hover:text-blue-600 group-hover:bg-blue-100 transition-all">
-                          <ChevronRight className="w-4 h-4" />
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Mobile card */}
-                    <div className="md:hidden p-4 cursor-pointer hover:bg-blue-50/40 transition-colors">
-                      <div className="flex items-start gap-3">
-                        <div className="flex flex-col items-center justify-center w-12 h-14 rounded-xl border border-gray-200 bg-slate-50 flex-shrink-0">
-                          <span className="text-lg font-bold text-slate-900 leading-none">{dateInfo?.day}</span>
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mt-1">{dateInfo?.month}</span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-start justify-between gap-2">
-                            <h3 className="font-semibold text-gray-900 text-sm leading-snug line-clamp-2">{title}</h3>
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold flex-shrink-0 ${style.badge}`}>
-                              <span className={`w-1 h-1 rounded-full ${style.dot}`} />
-                              {style.label}
-                            </span>
-                          </div>
-                          {meeting.officer_name && <p className="text-xs text-gray-500 mt-1 truncate">with {meeting.officer_name}</p>}
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[11px] text-gray-500">
-                            <span className="flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {formatTimeDisplay(time)}{meeting.duration ? ` · ${meeting.duration}m` : ''}
-                            </span>
-                            {meeting.location && (
-                              <span className="flex items-center gap-1 truncate">
-                                <MapPin className="w-3 h-3" />
-                                <span className="truncate">{meeting.location}</span>
-                              </span>
-                            )}
-                            {meeting.meeting_type && (
-                              <span className="px-1.5 py-0.5 bg-gray-100 rounded capitalize font-medium">{meeting.meeting_type}</span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
+            <div className="divide-y divide-slate-100">
+              {paginatedMeetings.length === 0 ? (
+                /* Empty state */
+                <div className="anim-fade-up flex flex-col items-center justify-center py-20 text-center">
+                  <div className="relative">
+                    <div className="absolute inset-0 -m-3 rounded-3xl bg-violet-100/60 blur-xl" />
+                    <div className="anim-bob relative flex h-16 w-16 items-center justify-center rounded-2xl border border-slate-200 bg-white shadow-sm">
+                      <CalendarClock className="h-8 w-8 text-slate-300" />
                     </div>
                   </div>
-                );
-              })
-            )}
-          </div>
+                  <h3 className="mt-5 text-base font-bold text-slate-800">No meetings found</h3>
+                  <p className="mt-1 max-w-xs text-sm text-slate-500">Try adjusting your search or filters, or create a new meeting.</p>
+                  <button
+                    onClick={openCreate}
+                    className="mt-5 inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
+                  >
+                    <Plus className="h-4 w-4" /> New Meeting
+                  </button>
+                </div>
+              ) : (
+                paginatedMeetings.map((meeting, i) => {
+                  const dateInfo = formatDate(meeting.meeting_date || meeting.created_date);
+                  const time = meeting.meeting_time || '';
+                  const statusKey = getStatusKey(meeting);
+                  const dateTag = dayTag(meeting.meeting_date || meeting.created_date, statusKey);
+                  const style = getStatusStyle(statusKey);
+                  const title = getMeetingTitle(meeting);
 
-          {/* ------------------------------- Pagination ---------------------------- */}
-          {filteredMeetings.length > 0 && (
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-6 py-4 border-t border-gray-100 bg-slate-50/50">
-              <div className="flex items-center gap-3 text-xs text-gray-500">
-                <p>
-                  Showing <span className="font-bold text-gray-700">{startIndex + 1}–{endIndex}</span> of{' '}
-                  <span className="font-bold text-gray-700">{filteredMeetings.length}</span> meetings
+                  const createdMs = dateToTime(meeting.created_date);
+                  const createdDateStr = createdMs
+                    ? new Date(createdMs).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })
+                    : '—';
+                  const createdTimeStr = createdMs
+                    ? new Date(createdMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+                    : '';
+
+                  const priority = PRIORITY_BADGE[String(meeting.priority || '').toLowerCase()];
+
+                  return (
+                    <div
+                      key={meeting.id}
+                      onClick={() => setSelectedMeeting(meeting)}
+                      className="anim-row cursor-pointer"
+                      style={{ animationDelay: `${Math.min(i * 45, 360)}ms` }}
+                    >
+                      {/* Desktop row */}
+                      <div
+                        className="group relative hidden items-center gap-4 px-6 py-4 transition-colors duration-200 hover:bg-violet-50/50 md:grid md:grid-cols-12"
+                        title={`Created ${createdDateStr} ${createdTimeStr}`}
+                      >
+                        <span className="absolute left-0 top-1/2 h-0 w-[3px] -translate-y-1/2 rounded-r bg-gradient-to-b from-violet-500 to-indigo-500 transition-all duration-300 group-hover:h-2/3" />
+
+                        <div className="col-span-1 flex justify-center">
+                          <div className="flex h-14 w-12 flex-col items-center justify-center rounded-2xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 transition-all duration-300 group-hover:border-violet-200 group-hover:from-violet-50 group-hover:to-indigo-50 group-hover:shadow-sm">
+                            <span className="text-lg font-bold leading-none tabular-nums text-slate-900">{dateInfo?.day}</span>
+                            <span className="mt-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{dateInfo?.month}</span>
+                          </div>
+                        </div>
+
+                        <div className="col-span-4 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <h3 className="truncate font-semibold text-slate-900 transition-colors duration-200 group-hover:text-violet-700">
+                              {title}
+                            </h3>
+                            {dateTag && (
+                              <span className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${dateTag.cls}`}>
+                                {dateTag.label}
+                              </span>
+                            )}
+                          </div>
+                          {meeting.officer_name && (
+                            <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
+                              <User className="h-3 w-3 text-slate-400" />
+                              <span className="truncate">with {meeting.officer_name}</span>
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="col-span-2 text-center">
+                          <div className="flex items-center justify-center gap-1.5 text-sm font-medium text-slate-700">
+                            <Clock className="h-3.5 w-3.5 text-slate-400" />
+                            {formatTimeDisplay(time)}
+                          </div>
+                          {meeting.duration && <p className="mt-0.5 text-[11px] text-slate-400">{meeting.duration} min</p>}
+                        </div>
+
+                        <div className="col-span-2 flex min-w-0 items-center gap-1.5">
+                          <MapPin className="h-3.5 w-3.5 flex-shrink-0 text-slate-400" />
+                          <span className="truncate text-sm text-slate-600">{meeting.location || '—'}</span>
+                        </div>
+
+                        <div className="col-span-1 text-center">
+                          {meeting.meeting_type ? (
+                            <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize ${getTypeStyle(meeting.meeting_type)}`}>
+                              {meeting.meeting_type}
+                            </span>
+                          ) : (
+                            <span className="text-sm text-slate-300">—</span>
+                          )}
+                        </div>
+
+                        <div className="col-span-1 flex justify-center">
+                          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${style.badge}`}>
+                            <span className={`h-1.5 w-1.5 rounded-full ${style.dot} ${statusKey === 'scheduled' ? 'animate-pulse' : ''}`} />
+                            {style.label}
+                          </span>
+                        </div>
+
+                        <div className="col-span-1 flex justify-center">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-full text-slate-300 transition-all duration-300 group-hover:translate-x-1 group-hover:bg-violet-100 group-hover:text-violet-600">
+                            <ChevronRight className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Mobile card */}
+                      <div className="p-4 transition-colors duration-200 hover:bg-violet-50/40 md:hidden">
+                        <div className="flex items-start gap-3">
+                          <div className="flex h-14 w-12 flex-shrink-0 flex-col items-center justify-center rounded-2xl border border-slate-200 bg-gradient-to-b from-white to-slate-50">
+                            <span className="text-lg font-bold leading-none text-slate-900">{dateInfo?.day}</span>
+                            <span className="mt-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{dateInfo?.month}</span>
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-slate-900">{title}</h3>
+                              <div className="flex flex-shrink-0 items-center gap-1">
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${style.badge}`}>
+                                  <span className={`h-1 w-1 rounded-full ${style.dot}`} />
+                                  {style.label}
+                                </span>
+                                {dateTag && dateTag.label !== 'Overdue' && (
+                                  <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ${dateTag.cls}`}>
+                                    {dateTag.label}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {meeting.officer_name && (
+                              <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
+                                <User className="h-3 w-3 text-slate-400" />
+                                <span className="truncate">with {meeting.officer_name}</span>
+                              </p>
+                            )}
+
+                            <div className="mt-2 flex flex-wrap gap-x-3.5 gap-y-1 text-xs text-slate-500">
+                              <span className="flex items-center gap-1">
+                                <Clock className="h-3.5 w-3.5 text-slate-400" />
+                                {formatTimeDisplay(time)}
+                                {meeting.duration ? ` · ${meeting.duration} min` : ''}
+                              </span>
+                              <span className="flex items-center gap-1">
+                                <MapPin className="h-3.5 w-3.5 text-slate-400" />
+                                <span className="max-w-[140px] truncate">{meeting.location || '—'}</span>
+                              </span>
+                            </div>
+
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              {meeting.meeting_type && (
+                                <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize ${getTypeStyle(meeting.meeting_type)}`}>
+                                  {meeting.meeting_type}
+                                </span>
+                              )}
+                              {priority && (
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize ${priority.badge}`}>
+                                  <span className={`h-1 w-1 rounded-full ${priority.dot}`} />
+                                  {meeting.priority}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-slate-300" />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Pagination footer */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-5 py-3.5 lg:px-6">
+              <div className="flex flex-wrap items-center gap-3">
+                <p className="text-xs text-slate-500">
+                  Showing{' '}
+                  <span className="font-semibold text-slate-700">
+                    {filteredMeetings.length === 0 ? 0 : startIndex + 1}–{endIndex}
+                  </span>{' '}
+                  of <span className="font-semibold text-slate-700">{filteredMeetings.length}</span>{' '}
+                  {filteredMeetings.length === 1 ? 'meeting' : 'meetings'}
                 </p>
+
                 <div className="flex items-center gap-2">
-                  <span className="hidden sm:inline text-gray-300">|</span>
-                  <label className="hidden sm:inline text-gray-400">Per page</label>
+                  <span className="text-[11px] font-medium text-slate-400">Rows</span>
                   <select
                     value={perPage}
                     onChange={(e) => setPerPage(Number(e.target.value))}
-                    className="px-2 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/60 cursor-pointer"
+                    className="cursor-pointer appearance-none rounded-full border border-slate-200 bg-white py-1.5 pl-3 pr-8 text-xs font-semibold text-slate-600 outline-none transition-colors hover:border-violet-300 focus:border-violet-400 focus:ring-4 focus:ring-violet-500/10"
                   >
                     {PER_PAGE_OPTIONS.map((opt) => (
                       <option key={opt} value={opt}>{opt}</option>
                     ))}
                   </select>
+                  <ChevronDown className="pointer-events-none -ml-7 h-3.5 w-3.5 text-slate-400" />
                 </div>
               </div>
 
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setPage(currentPage - 1)}
-                  disabled={currentPage === 1}
-                  className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white transition-colors"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                  <span className="hidden sm:inline">Prev</span>
-                </button>
+              {totalPages > 1 && (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setPage(currentPage - 1)}
+                    disabled={currentPage <= 1}
+                    aria-label="Previous page"
+                    className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
 
-                {paginationRange.map((item, i) =>
-                  item === 'dots' ? (
-                    <span key={`dots-${i}`} className="px-2 py-2 text-xs text-gray-400 select-none">…</span>
-                  ) : (
+                  {paginationRange.map((p, idx) =>
+                    p === 'dots' ? (
+                      <span key={`dots-${idx}`} className="px-1 text-xs font-bold text-slate-300">…</span>
+                    ) : (
+                      <button
+                        key={p}
+                        onClick={() => setPage(p)}
+                        aria-current={p === currentPage ? 'page' : undefined}
+                        className={`h-8 min-w-[2rem] rounded-full px-2 text-xs font-semibold transition-colors ${
+                          p === currentPage
+                            ? 'bg-slate-900 text-white shadow-sm'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    )
+                  )}
+
+                  <button
+                    onClick={() => setPage(currentPage + 1)}
+                    disabled={currentPage >= totalPages}
+                    aria-label="Next page"
+                    className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ------------------------- Details off-canvas ------------------------- */}
+      {selectedMeeting && (() => {
+        const dateInfo = formatDate(selectedMeeting.meeting_date || selectedMeeting.created_date);
+        const time = selectedMeeting.meeting_time || '';
+        const style = getStatusStyle(getStatusKey(selectedMeeting));
+        const title = getMeetingTitle(selectedMeeting);
+        const priority = PRIORITY_BADGE[String(selectedMeeting.priority || '').toLowerCase()];
+        const officerInitials = selectedMeeting.officer_name
+          ? selectedMeeting.officer_name
+              .split(' ')
+              .map((word: string) => word.charAt(0))
+              .slice(0, 2)
+              .join('')
+              .toUpperCase()
+          : '';
+
+        return (
+          <>
+            <div className="anim-overlay fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-sm" onClick={() => setSelectedMeeting(null)} />
+
+            <div className="anim-panel fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-white shadow-2xl">
+              {/* Gradient header */}
+              <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-violet-900 px-6 pb-5 pt-6">
+                <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-violet-500/25 blur-3xl" />
+                <div className="absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-indigo-400/10 blur-3xl" />
+
+                <div className="relative">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-white ring-1 ring-inset ring-white/20">
+                        <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+                        {style.label}
+                      </span>
+                      {selectedMeeting.meeting_type && (
+                        <span className="inline-flex rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-semibold capitalize text-white/70 ring-1 ring-inset ring-white/15">
+                          {selectedMeeting.meeting_type}
+                        </span>
+                      )}
+                    </div>
                     <button
-                      key={item}
-                      onClick={() => setPage(item)}
-                      className={`w-8 h-8 text-xs font-bold rounded-lg tabular-nums transition-all ${
-                        item === currentPage
-                          ? 'bg-slate-900 text-white shadow-md'
-                          : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-100'
-                      }`}
+                      type="button"
+                      onClick={() => setSelectedMeeting(null)}
+                      className="-mr-2 -mt-1 rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
                     >
-                      {item}
+                      <X className="h-5 w-5" />
                     </button>
-                  )
+                  </div>
+
+                  <h2 className="mt-3 line-clamp-3 text-xl font-bold leading-snug text-white">{title}</h2>
+
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-slate-300">
+                    <span className="flex items-center gap-1.5">
+                      <Calendar className="h-4 w-4 text-slate-400" />
+                      {dateInfo ? `${dateInfo.weekday}, ${dateInfo.full}` : '—'}
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <Clock className="h-4 w-4 text-slate-400" />
+                      {formatTimeDisplay(time)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Scrollable body */}
+              <div className="nice-scroll min-h-0 flex-1 space-y-4 overflow-y-auto bg-slate-50 p-5">
+                <div className="grid grid-cols-2 gap-3">
+                  <InfoTile icon={Calendar} tint="bg-violet-50 text-violet-500" label="Date">
+                    {dateInfo?.full || '—'}
+                  </InfoTile>
+                  <InfoTile icon={Clock} tint="bg-violet-50 text-violet-500" label="Time">
+                    {formatTimeDisplay(time)}
+                    {selectedMeeting.duration && (
+                      <span className="ml-1 text-xs font-normal text-slate-400">· {selectedMeeting.duration} min</span>
+                    )}
+                  </InfoTile>
+                  <InfoTile icon={MapPin} tint="bg-violet-50 text-violet-500" label="Location">
+                    <span className="truncate block">{selectedMeeting.location || 'Not specified'}</span>
+                  </InfoTile>
+                  {selectedMeeting.meeting_type && (
+                    <InfoTile icon={Briefcase} tint="bg-sky-50 text-sky-500" label="Type">
+                      <span className="capitalize">{selectedMeeting.meeting_type}</span>
+                    </InfoTile>
+                  )}
+                  {selectedMeeting.priority && (
+                    <InfoTile icon={Tag} tint="bg-amber-50 text-amber-500" label="Priority">
+                      <span className={`capitalize ${priority?.text || 'text-slate-900'}`}>
+                        {selectedMeeting.priority}
+                      </span>
+                    </InfoTile>
+                  )}
+                </div>
+
+                {(selectedMeeting.officer_name || selectedMeeting.designation || selectedMeeting.officer_type) && (
+                  <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
+                    <p className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      <User className="h-3.5 w-3.5 text-violet-500" /> Officer
+                    </p>
+                    <div className="flex items-center gap-3">
+                      {officerInitials && (
+                        <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold text-white">
+                          {officerInitials}
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        {selectedMeeting.officer_name && (
+                          <p className="truncate text-sm font-semibold text-slate-900">{selectedMeeting.officer_name}</p>
+                        )}
+                        {selectedMeeting.designation && (
+                          <p className="truncate text-xs text-slate-500">{selectedMeeting.designation}</p>
+                        )}
+                      </div>
+                      {selectedMeeting.officer_type && (
+                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-bold text-violet-700">
+                          {selectedMeeting.officer_type}
+                        </span>
+                      )}
+                    </div>
+
+                    {(selectedMeeting.officer_phone || selectedMeeting.officer_email) && (
+                      <div className="mt-3 space-y-1.5 border-t border-slate-100 pt-3">
+                        {selectedMeeting.officer_phone && (
+                          <p className="flex items-center gap-2 text-xs text-slate-500">
+                            <Phone className="h-3.5 w-3.5 text-slate-400" />
+                            {selectedMeeting.officer_phone}
+                          </p>
+                        )}
+                        {selectedMeeting.officer_email && (
+                          <p className="flex items-center gap-2 text-xs text-slate-500">
+                            <Mail className="h-3.5 w-3.5 text-slate-400" />
+                            {selectedMeeting.officer_email}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
 
+                {selectedMeeting.agenda && (
+                  <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white">
+                    <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3">
+                      <AlignLeft className="h-4 w-4 text-violet-500" />
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Agenda</p>
+                    </div>
+                    <p className="whitespace-pre-line px-4 py-3 text-sm leading-relaxed text-slate-600">
+                      {selectedMeeting.agenda}
+                    </p>
+                  </div>
+                )}
+
+                {selectedMeeting.description && (
+                  <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white">
+                    <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3">
+                      <FileText className="h-4 w-4 text-violet-500" />
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Description</p>
+                    </div>
+                    <p className="whitespace-pre-line px-4 py-3 text-sm leading-relaxed text-slate-600">
+                      {selectedMeeting.description}
+                    </p>
+                  </div>
+                )}
+
+                {(selectedMeeting.created_date || selectedMeeting.updated_date) && (
+                  <div className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-white px-4 py-3 text-[11px] text-slate-400">
+                    {selectedMeeting.created_date && (
+                      <span>Created {formatDateTime(selectedMeeting.created_date)}</span>
+                    )}
+                    {selectedMeeting.updated_date && (
+                      <span>Updated {formatDateTime(selectedMeeting.updated_date)}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer actions */}
+              <div className="flex flex-shrink-0 gap-2.5 border-t border-slate-200 bg-white p-4">
                 <button
-                  onClick={() => setPage(currentPage + 1)}
-                  disabled={currentPage === totalPages}
-                  className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-white border border-gray-200 text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white transition-colors"
+                  type="button"
+                  onClick={handleEdit}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-full bg-slate-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800"
                 >
-                  <span className="hidden sm:inline">Next</span>
-                  <ChevronRight className="w-4 h-4" />
+                  <Edit2 className="h-4 w-4" />
+                  Edit
                 </button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* ---------------------- Off-Canvas Details Panel ------------------------ */}
-        {selectedMeeting && (() => {
-          const dateInfo = formatDate(selectedMeeting.meeting_date || selectedMeeting.created_date);
-          const time = selectedMeeting.meeting_time || '';
-          const style = getStatusStyle(getStatusKey(selectedMeeting));
-          const title = getMeetingTitle(selectedMeeting);
-          const officerInitials = selectedMeeting.officer_name
-            ? selectedMeeting.officer_name.split(' ').map((w: string) => w[0]).slice(0, 2).join('').toUpperCase()
-            : '';
-          const priorityColor =
-            { high: 'text-red-600', medium: 'text-amber-600', low: 'text-emerald-600' }[String(selectedMeeting.priority || '').toLowerCase()] || 'text-gray-900';
-
-          return (
-            <>
-              {/* Overlay */}
-              <div
-                className="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-[2px] animate-in fade-in duration-300"
-                onClick={() => setSelectedMeeting(null)}
-              />
-
-              {/* Panel */}
-              <div className="fixed inset-y-0 right-0 w-full max-w-md bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
-
-                {/* Gradient header */}
-                <div className="relative bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 px-6 pt-6 pb-5 overflow-hidden flex-shrink-0">
-                  <div className="absolute -top-20 -right-20 w-56 h-56 bg-blue-500/20 rounded-full blur-3xl" />
-                  <div className="absolute -bottom-24 -left-16 w-48 h-48 bg-indigo-400/10 rounded-full blur-3xl" />
-
-                  <div className="relative">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white/10 text-white ring-1 ring-inset ring-white/20">
-                          <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
-                          {style.label}
-                        </span>
-                        {selectedMeeting.meeting_type && (
-                          <span className="inline-flex px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white/10 text-white/70 ring-1 ring-inset ring-white/15 capitalize">
-                            {selectedMeeting.meeting_type}
-                          </span>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => setSelectedMeeting(null)}
-                        className="p-2 -mr-2 -mt-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                      >
-                        <X className="w-5 h-5" />
-                      </button>
-                    </div>
-
-                    <h2 className="text-xl font-bold text-white leading-snug mt-3 line-clamp-3">{title}</h2>
-
-                    <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 mt-3 text-sm text-slate-300">
-                      <span className="flex items-center gap-1.5">
-                        <Calendar className="w-4 h-4 text-slate-400" />
-                        {dateInfo ? `${dateInfo.weekday}, ${dateInfo.full}` : '—'}
-                      </span>
-                      <span className="flex items-center gap-1.5">
-                        <Clock className="w-4 h-4 text-slate-400" />
-                        {formatTimeDisplay(time)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Scrollable body */}
-                <div className="flex-1 overflow-y-auto min-h-0 p-5 space-y-4 bg-slate-50/70">
-
-                  {/* Quick info tiles */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="bg-white rounded-xl border border-gray-200 p-4">
-                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                        <Calendar className="w-3.5 h-3.5 text-blue-500" /> Date
-                      </p>
-                      <p className="mt-1.5 text-sm font-semibold text-gray-900">{dateInfo?.full || '—'}</p>
-                    </div>
-                    <div className="bg-white rounded-xl border border-gray-200 p-4">
-                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                        <Clock className="w-3.5 h-3.5 text-blue-500" /> Time
-                      </p>
-                      <p className="mt-1.5 text-sm font-semibold text-gray-900">{formatTimeDisplay(time)}</p>
-                      {selectedMeeting.duration && <p className="text-xs text-gray-400 mt-0.5">{selectedMeeting.duration} min</p>}
-                    </div>
-                    <div className="bg-white rounded-xl border border-gray-200 p-4">
-                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                        <MapPin className="w-3.5 h-3.5 text-blue-500" /> Location
-                      </p>
-                      <p className="mt-1.5 text-sm font-semibold text-gray-900 truncate">
-                        {selectedMeeting.location || selectedMeeting.meeting_place || 'Not specified'}
-                      </p>
-                    </div>
-                    {selectedMeeting.meeting_type && (
-                      <div className="bg-white rounded-xl border border-gray-200 p-4">
-                        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                          <Briefcase className="w-3.5 h-3.5 text-blue-500" /> Type
-                        </p>
-                        <p className="mt-1.5 text-sm font-semibold text-gray-900 capitalize">{selectedMeeting.meeting_type}</p>
-                      </div>
-                    )}
-                    {selectedMeeting.priority && (
-                      <div className="bg-white rounded-xl border border-gray-200 p-4">
-                        <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                          <Tag className="w-3.5 h-3.5 text-blue-500" /> Priority
-                        </p>
-                        <p className={`mt-1.5 text-sm font-semibold capitalize ${priorityColor}`}>{selectedMeeting.priority}</p>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Officer card */}
-                  {(selectedMeeting.officer_name || selectedMeeting.designation || selectedMeeting.officer_type) && (
-                    <div className="bg-white rounded-xl border border-gray-200 p-4">
-                      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-3">
-                        <User className="w-3.5 h-3.5 text-indigo-500" /> Officer
-                      </p>
-                      <div className="flex items-center gap-3">
-                        {officerInitials && (
-                          <div className="w-11 h-11 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-sm font-bold flex-shrink-0">
-                            {officerInitials}
-                          </div>
-                        )}
-                        <div className="min-w-0 flex-1">
-                          {selectedMeeting.officer_name && (
-                            <p className="text-sm font-semibold text-gray-900 truncate">{selectedMeeting.officer_name}</p>
-                          )}
-                          {selectedMeeting.designation && (
-                            <p className="text-xs text-gray-500 truncate">{selectedMeeting.designation}</p>
-                          )}
-                        </div>
-                        {selectedMeeting.officer_type && (
-                          <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 text-[11px] font-bold rounded-md flex-shrink-0">
-                            {selectedMeeting.officer_type}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Description */}
-                  {selectedMeeting.description && (
-                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                      <div className="flex items-center gap-2 px-4 py-3 bg-slate-50/80 border-b border-gray-100">
-                        <AlignLeft className="w-4 h-4 text-gray-400" />
-                        <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Description</h4>
-                      </div>
-                      <p className="px-4 py-3.5 text-sm text-gray-600 leading-relaxed whitespace-pre-wrap">
-                        {selectedMeeting.description}
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Notes */}
-                  {selectedMeeting.notes && (
-                    <div className="bg-amber-50/60 rounded-xl border border-amber-200/70 overflow-hidden">
-                      <div className="flex items-center gap-2 px-4 py-3 border-b border-amber-200/70">
-                        <FileText className="w-4 h-4 text-amber-500" />
-                        <h4 className="text-xs font-bold text-amber-800/80 uppercase tracking-wider">Additional Notes</h4>
-                      </div>
-                      <p className="px-4 py-3.5 text-sm text-amber-900/80 leading-relaxed whitespace-pre-wrap">
-                        {selectedMeeting.notes}
-                      </p>
-                    </div>
-                  )}
-
-                  {/* ═══ NEW: Follow-up (saved from the Update panel) — delete this block if you don't want it shown ═══ */}
-                  {(selectedMeeting.follow_up_date || selectedMeeting.follow_up_details) && (
-                    <div className="bg-indigo-50/60 rounded-xl border border-indigo-200/70 overflow-hidden">
-                      <div className="flex items-center gap-2 px-4 py-3 border-b border-indigo-200/70">
-                        <CalendarClock className="w-4 h-4 text-indigo-500" />
-                        <h4 className="text-xs font-bold text-indigo-800/80 uppercase tracking-wider">Follow-up</h4>
-                      </div>
-                      <div className="px-4 py-3.5 space-y-2">
-                        {selectedMeeting.follow_up_date && (
-                          <p className="text-sm font-semibold text-indigo-900">
-                            {formatDate(String(selectedMeeting.follow_up_date).split(' ')[0])?.full || selectedMeeting.follow_up_date}
-                          </p>
-                        )}
-                        {selectedMeeting.follow_up_details && (
-                          <p className="text-sm text-indigo-900/70 leading-relaxed whitespace-pre-wrap">
-                            {selectedMeeting.follow_up_details}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Contact info */}
-                  {(selectedMeeting.contact_number || selectedMeeting.email) && (
-                    <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
-                      {selectedMeeting.contact_number && (
-                        <a href={`tel:${selectedMeeting.contact_number}`} className="flex items-center gap-3 group">
-                          <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center flex-shrink-0">
-                            <Phone className="w-4 h-4 text-emerald-600" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Phone</p>
-                            <p className="text-sm font-semibold text-gray-800 group-hover:text-emerald-600 transition-colors truncate">
-                              {selectedMeeting.contact_number}
-                            </p>
-                          </div>
-                        </a>
-                      )}
-                      {selectedMeeting.email && (
-                        <a href={`mailto:${selectedMeeting.email}`} className="flex items-center gap-3 group">
-                          <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
-                            <Mail className="w-4 h-4 text-blue-600" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Email</p>
-                            <p className="text-sm font-semibold text-gray-800 group-hover:text-blue-600 transition-colors truncate">
-                              {selectedMeeting.email}
-                            </p>
-                          </div>
-                        </a>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Metadata */}
-                  <div className="flex items-center justify-between text-[11px] text-gray-400 px-1 pt-1">
-                    <span>Created {formatDateTime(selectedMeeting.created_date)}</span>
-                    <span>Updated {formatDateTime(selectedMeeting.updated_date)}</span>
-                  </div>
-                </div>
-
-                {/* Sticky action footer */}
-<div className="flex items-center gap-3 p-5 border-t border-gray-200 bg-white/95 backdrop-blur flex-shrink-0">
-  <button
-    onClick={(e) => { e.stopPropagation(); handleOpenUpdate(); }}
-    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold rounded-xl transition-colors shadow-md shadow-blue-600/25"
-  >
-    <FileText className="w-4 h-4" /> Update
-  </button>
-  <button
-    onClick={(e) => { e.stopPropagation(); handleEdit(); }}
-    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl transition-colors shadow-md"
-  >
-    <Edit2 className="w-4 h-4" /> Edit
-  </button>
-  <button
-    onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(true); }}
-    title="Delete meeting"
-    className="px-4 py-3 bg-white border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 rounded-xl transition-colors shadow-sm"
-  >
-    <Trash2 className="w-4 h-4" />
-  </button>
-</div>
-              </div>
-            </>
-          );
-        })()}
-
-        {/* ---------------------- Delete Confirmation Modal ----------------------- */}
-        {showDeleteConfirm && selectedMeeting && (
-          <>
-            <div
-              className="fixed inset-0 z-[80] bg-slate-900/50 backdrop-blur-[2px] animate-in fade-in duration-200"
-              onClick={() => setShowDeleteConfirm(false)}
-            />
-            <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 pointer-events-none">
-              <div className="pointer-events-auto bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-in fade-in zoom-in-95 duration-200">
-                <div className="w-12 h-12 rounded-xl bg-red-50 flex items-center justify-center">
-                  <Trash2 className="w-5 h-5 text-red-600" />
-                </div>
-                <h3 className="mt-4 text-lg font-bold text-slate-900">Delete this meeting?</h3>
-                <p className="mt-1 text-sm text-gray-500">
-                  "{getMeetingTitle(selectedMeeting)}" will be permanently removed. This action can't be undone.
-                </p>
-                <div className="mt-5 flex items-center gap-3">
-                  <button
-                    onClick={() => setShowDeleteConfirm(false)}
-                    className="flex-1 px-4 py-2.5 text-sm font-semibold text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 rounded-xl transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={confirmDelete}
-                    className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl transition-colors shadow-md shadow-red-600/25"
-                  >
-                    Delete
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={handleOpenUpdate}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-full bg-violet-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-violet-700"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  Update
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="flex items-center justify-center gap-2 rounded-full border border-rose-200 px-4 py-2.5 text-sm font-semibold text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </button>
               </div>
             </div>
           </>
-        )}
+        );
+      })()}
 
-<CreateMeetingPanel
-  isOpen={isPanelOpen}
-  onClose={() => { setIsPanelOpen(false); setEditingMeeting(null); }}
-  onSuccess={loadData}
-  meetingToEdit={editingMeeting}
-/>
+      {/* ------------------------- Delete confirmation ------------------------- */}
+      {showDeleteConfirm && selectedMeeting && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div className="anim-overlay absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={() => !deleting && setShowDeleteConfirm(false)} />
+          <div className="anim-scale-in relative w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-100">
+              <Trash2 className="h-5 w-5 text-rose-600" />
+            </div>
+            <h3 className="mt-4 text-center text-lg font-bold text-slate-900">Delete meeting?</h3>
+            <p className="mt-1.5 text-center text-sm leading-relaxed text-slate-500">
+              &ldquo;{getMeetingTitle(selectedMeeting)}&rdquo; will be permanently removed. This action can&rsquo;t be undone.
+            </p>
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={deleting}
+                className="flex-1 rounded-full border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                disabled={deleting}
+                className="flex flex-1 items-center justify-center gap-2 rounded-full bg-rose-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-rose-700 disabled:opacity-60"
+              >
+                {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
+                {deleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-<MeetingUpdatePanel
-  isOpen={!!updateMeeting}
-  meeting={updateMeeting}
-  onClose={() => setUpdateMeeting(null)}
-  onUpdated={() => loadData()}
-/>
-      </div>
+      {/* ------------------------------ Panels ------------------------------ */}
+      <CreateMeetingPanel
+        isOpen={isPanelOpen}
+        onClose={handlePanelClosed}
+        onSuccess={handlePanelSaved}
+        editingMeeting={editingMeeting}
+      />
+
+      {updateMeeting && (
+        <MeetingUpdatePanel
+          isOpen={!!updateMeeting}
+          meeting={updateMeeting}
+          onClose={() => setUpdateMeeting(null)}
+          onSuccess={() => { setUpdateMeeting(null); loadData(); }}
+        />
+      )}
     </div>
   );
 }

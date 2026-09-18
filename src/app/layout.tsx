@@ -3,8 +3,8 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
 import { Toaster } from '@/components/Toaster';
-import { AuthProvider } from '@/contexts/AuthContext'; // ✅ new
-import AppShell from '@/components/AppShell';           // ✅ new (sidebar moved here)
+import { AuthProvider } from '@/contexts/AuthContext';
+import AppShell from '@/components/AppShell';
 
 const inter = Inter({ subsets: ['latin'] });
 
