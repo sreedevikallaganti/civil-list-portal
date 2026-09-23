@@ -5,6 +5,7 @@ import {
   ArrowRight,
   BarChart3,
   Briefcase,
+  Building2,
   Calendar,
   CalendarDays,
   CheckCircle2,
@@ -14,14 +15,18 @@ import {
   Clock3,
   Edit2,
   FileText,
+  Loader2,
+  Mail,
   MapPin,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldCheck,
   Tag,
   Trash2,
   TrendingUp,
+  Upload,
   User,
   Users,
   X,
@@ -30,7 +35,7 @@ import {
 import pb from "@/lib/pocketbase";
 import CreateMeetingPanel from "@/components/CreateMeetingPanel";
 import ProtectedRoute from "@/components/auth/ProtectedRoute";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
@@ -61,6 +66,7 @@ type Meeting = {
   meeting_type?: string;
   location?: string;
   meeting_place?: string;
+  email?: string;
 
   collectionId?: string;
   collectionName?: string;
@@ -112,16 +118,50 @@ const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string 
   completed:   { label: "Completed",   dot: "bg-emerald-400", badge: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20" },
   rescheduled: { label: "Rescheduled", dot: "bg-amber-400",   badge: "bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20" },
   cancelled:   { label: "Cancelled",   dot: "bg-rose-400",    badge: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20" },
-  rejected:    { label: "Rejected",    dot: "bg-rose-400",    badge: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20" },
 };
 
-/* Pastel KPI cards — reference style: blue / lavender / peach / green */
+/* v2: gradient-card KPI theme, matching the Meetings page's stat-card look */
 const KPI_THEME: Record<KpiAccent, { card: string; icon: string; trend: string }> = {
-  blue:    { card: "bg-gradient-to-br from-sky-100 to-blue-100",      icon: "text-blue-600",    trend: "text-blue-700" },
-  violet:  { card: "bg-gradient-to-br from-violet-100 to-purple-100", icon: "text-violet-600",  trend: "text-violet-700" },
-  rose:    { card: "bg-gradient-to-br from-orange-100 to-rose-100",   icon: "text-rose-600",    trend: "text-rose-700" },
-  emerald: { card: "bg-gradient-to-br from-emerald-100 to-green-100", icon: "text-emerald-600", trend: "text-emerald-700" },
+  blue:    { card: "from-sky-100 to-blue-100",      icon: "bg-white text-sky-600",     trend: "text-sky-700" },
+  violet:  { card: "from-violet-100 to-purple-100", icon: "bg-white text-violet-600",  trend: "text-violet-700" },
+  rose:    { card: "from-rose-100 to-pink-100",     icon: "bg-white text-rose-600",    trend: "text-rose-700" },
+  emerald: { card: "from-emerald-100 to-green-100", icon: "bg-white text-emerald-600", trend: "text-emerald-700" },
 };
+
+/* ────────────────────────────────────────────────
+   Global CSS / Animations — mirrors the Meetings page
+   (same keyframes, prefixed to avoid clashing with any
+   class names that might already exist elsewhere).
+──────────────────────────────────────────────── */
+
+const CUSTOM_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+.dash-root { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+::selection { background: rgba(139, 92, 246, 0.18); }
+@keyframes dFadeUp   { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes dFadeIn   { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dScaleIn  { from { opacity: 0; transform: scale(0.94) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes dPanelIn  { from { opacity: 0; transform: translateX(64px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes dRowIn    { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes dShimmer  { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@keyframes dBlob     { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(14px, -18px) scale(1.07); } }
+.anim-fade-up  { animation: dFadeUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-fade-in  { animation: dFadeIn 0.4s ease both; }
+.anim-scale-in { animation: dScaleIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-panel    { animation: dPanelIn 0.38s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-overlay  { animation: dFadeIn 0.25s ease both; }
+.anim-row      { animation: dRowIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-blob     { animation: dBlob 9s ease-in-out infinite; }
+.skeleton { background: linear-gradient(90deg, #f1effc 25%, #e5e1f5 40%, #f1effc 55%); background-size: 200% 100%; animation: dShimmer 1.6s linear infinite; }
+.nice-scroll::-webkit-scrollbar { width: 8px; }
+.nice-scroll::-webkit-scrollbar-track { background: transparent; }
+.nice-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 999px; }
+.nice-scroll::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
+`;
+
+function CustomStyles() {
+  return <style dangerouslySetInnerHTML={{ __html: CUSTOM_CSS }} />;
+}
 
 /* ────────────────────────────────────────────────
    Helpers
@@ -179,10 +219,6 @@ function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function formatShortDate(date: Date): string {
-  return date.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
-}
-
 function getRelativeDayLabel(date: Date): string {
   const diffDays = Math.round(
     (startOfDay(date).getTime() - startOfDay(new Date()).getTime()) / 86_400_000
@@ -193,28 +229,11 @@ function getRelativeDayLabel(date: Date): string {
   return "";
 }
 
-function getTimeUntilLabel(date: Date): string {
-  const diffMs = date.getTime() - Date.now();
-  if (diffMs <= 0) return "starting soon";
-
-  const totalMinutes = Math.max(1, Math.floor(diffMs / 60_000));
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-
-  if (hours > 0) return minutes > 0 ? `in ${hours}h ${minutes}m` : `in ${hours}h`;
-  return `in ${totalMinutes}m`;
-}
-
-/**
- * Converts different possible date formats into a Date.
- * Supported: 2026-09-03 | 2026-09-03T10:30:00 | 03/09/2026 | 03-09-2026
- */
 function parseMeetingDate(dateValue?: string, timeValue?: string): Date | null {
   if (!dateValue) return null;
 
   const dateString = dateValue.trim();
 
-  // DD/MM/YYYY or DD-MM-YYYY
   const indianDateMatch = dateString.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
   if (indianDateMatch) {
     const day = Number(indianDateMatch[1]);
@@ -238,7 +257,6 @@ function parseMeetingDate(dateValue?: string, timeValue?: string): Date | null {
     return new Date(year, month, day, hours, minutes);
   }
 
-  // ISO date
   const parsed = new Date(dateString);
   if (Number.isNaN(parsed.getTime())) return null;
 
@@ -287,7 +305,6 @@ function formatMeetingTime(timeValue?: string): string {
   return date.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true });
 }
 
-/** Sliding window of page numbers for pagination (max 5 visible). */
 function getPageWindow(current: number, total: number, size = 5): number[] {
   if (total <= size) {
     return Array.from({ length: total }, (_, i) => i + 1);
@@ -300,7 +317,7 @@ function getPageWindow(current: number, total: number, size = 5): number[] {
 }
 
 /* ────────────────────────────────────────────────
-   Meeting Activity data (built from PocketBase records)
+   Meeting Activity data
 ──────────────────────────────────────────────── */
 
 function buildActivityData(meetings: Meeting[], range: ActivityRange): ActivityBucket[] {
@@ -384,6 +401,35 @@ async function fetchPocketBaseCollection<T>(
 }
 
 /* ────────────────────────────────────────────────
+   Animated count-up — same behavior as the Meetings page
+──────────────────────────────────────────────── */
+
+function AnimatedNumber({ value, duration = 900 }: { value: number; duration?: number }) {
+  const [display, setDisplay] = useState(0);
+  const prevRef = useRef(0);
+
+  useEffect(() => {
+    const from = prevRef.current;
+    const to = value;
+    if (from === to) return;
+    let raf = 0;
+    const start = performance.now();
+    const step = (now: number) => {
+      const p = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const cur = Math.round(from + (to - from) * eased);
+      prevRef.current = cur;
+      setDisplay(cur);
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [value, duration]);
+
+  return <span className="tabular-nums">{display}</span>;
+}
+
+/* ────────────────────────────────────────────────
    Presentational components
 ──────────────────────────────────────────────── */
 
@@ -395,6 +441,7 @@ function StatCard({
   accent,
   loading = false,
   onClick,
+  delay = 0,
 }: {
   icon: ReactNode;
   label: string;
@@ -403,6 +450,7 @@ function StatCard({
   accent: KpiAccent;
   loading?: boolean;
   onClick?: () => void;
+  delay?: number;
 }) {
   const theme = KPI_THEME[accent];
 
@@ -410,7 +458,8 @@ function StatCard({
     <button
       type="button"
       onClick={onClick}
-      className={`group relative w-full overflow-hidden rounded-3xl p-5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/20 ${theme.card}`}
+      style={{ animationDelay: `${delay}ms` }}
+      className={`anim-fade-up group relative w-full cursor-pointer overflow-hidden rounded-3xl bg-gradient-to-br p-5 text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-slate-900/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/20 active:scale-[0.98] ${theme.card}`}
     >
       <span
         aria-hidden
@@ -419,21 +468,23 @@ function StatCard({
 
       <div className="relative flex items-start justify-between gap-3">
         <p className="pt-1.5 text-sm font-semibold text-slate-600">{label}</p>
-        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/80 shadow-sm ${theme.icon}`}>
+        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow-sm transition-transform duration-300 group-hover:scale-110 ${theme.icon}`}>
           {icon}
         </span>
       </div>
 
-      <div className="relative mt-3">
+      <div className="relative mt-4">
         {loading ? (
-          <div className="h-9 w-20 animate-pulse rounded-xl bg-white/70" />
+          <div className="skeleton h-8 w-16 rounded-xl" />
         ) : (
-          <p className="text-[2rem] font-extrabold leading-none tracking-tight text-slate-900">{value}</p>
+          <p className="text-[1.85rem] font-extrabold leading-none tracking-tight text-slate-900">
+            {typeof value === "number" ? <AnimatedNumber value={value} /> : value}
+          </p>
         )}
 
         {!loading && sub && (
-          <p className={`mt-2.5 inline-flex items-center gap-1 text-xs font-semibold ${theme.trend}`}>
-            <TrendingUp className="h-3.5 w-3.5" />
+          <p className="mt-2 flex items-center gap-1 text-xs font-medium text-slate-500">
+            <TrendingUp className={`h-3.5 w-3.5 ${theme.trend}`} />
             {sub}
           </p>
         )}
@@ -446,14 +497,18 @@ function LoadingRows({ count = 4 }: { count?: number }) {
   return (
     <div className="space-y-3">
       {Array.from({ length: count }).map((_, index) => (
-        <div key={index} className="flex items-center gap-4 rounded-2xl border border-slate-100 p-4">
-          <div className="hidden h-12 w-12 animate-pulse rounded-2xl bg-slate-100 sm:block" />
+        <div
+          key={index}
+          className="anim-fade-up flex items-center gap-4 rounded-2xl border border-slate-100 p-4"
+          style={{ animationDelay: `${index * 70}ms` }}
+        >
+          <div className="skeleton hidden h-12 w-12 rounded-2xl sm:block" />
           <div className="flex-1 space-y-2">
-            <div className="h-4 w-2/5 animate-pulse rounded-full bg-slate-100" />
-            <div className="h-3 w-3/5 animate-pulse rounded-full bg-slate-100" />
-            <div className="h-3 w-1/4 animate-pulse rounded-full bg-slate-100" />
+            <div className="skeleton h-4 w-2/5 rounded-full" />
+            <div className="skeleton h-3 w-3/5 rounded-full" />
+            <div className="skeleton h-3 w-1/4 rounded-full" />
           </div>
-          <div className="hidden h-6 w-16 animate-pulse rounded-full bg-slate-100 md:block" />
+          <div className="skeleton hidden h-6 w-16 rounded-full md:block" />
         </div>
       ))}
     </div>
@@ -471,7 +526,7 @@ function EmptyMeetings({
 }) {
   if (isFiltered) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-8 text-center">
+      <div className="anim-fade-up flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-8 text-center">
         <div className="flex h-11 w-11 items-center justify-center rounded-full bg-white shadow-sm">
           <Search className="h-5 w-5 text-violet-400" />
         </div>
@@ -482,7 +537,7 @@ function EmptyMeetings({
         <button
           type="button"
           onClick={onClearSearch}
-          className="mt-4 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-colors hover:border-violet-200 hover:text-violet-600"
+          className="mt-4 cursor-pointer rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-200 hover:text-violet-600 active:scale-95"
         >
           Clear search
         </button>
@@ -491,8 +546,8 @@ function EmptyMeetings({
   }
 
   return (
-    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-8 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm">
+    <div className="anim-fade-up flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-8 text-center">
+      <div className="anim-fade-in flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm">
         <CalendarDays className="h-6 w-6 text-violet-500" />
       </div>
       <p className="mt-3 text-sm font-semibold text-slate-700">No upcoming meetings</p>
@@ -502,7 +557,7 @@ function EmptyMeetings({
       <button
         type="button"
         onClick={onCreate}
-        className="mt-4 inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800"
+        className="mt-4 inline-flex cursor-pointer items-center gap-2 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
       >
         <Plus className="h-4 w-4" />
         New Meeting
@@ -516,9 +571,11 @@ function EmptyMeetings({
 function UpcomingMeetingRow({
   meeting,
   onOpen,
+  index = 0,
 }: {
   meeting: Meeting;
   onOpen: (meeting: Meeting) => void;
+  index?: number;
 }) {
   const meetingDate = parseMeetingDate(meeting.meeting_date, meeting.meeting_time);
   const statusStyle = getStatusStyle(getMeetingStatus(meeting));
@@ -528,15 +585,17 @@ function UpcomingMeetingRow({
   const relativeLabel = meetingDate ? getRelativeDayLabel(meetingDate) : "";
 
   return (
-    <li>
+    <li className="anim-row" style={{ animationDelay: `${Math.min(index * 50, 300)}ms` }}>
       <button
         type="button"
         onClick={() => onOpen(meeting)}
-        className="group flex w-full items-center gap-3.5 rounded-2xl border border-slate-100 bg-white p-3.5 text-left transition-all duration-200 hover:border-violet-200 hover:bg-violet-50/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/30"
+        className="group flex w-full cursor-pointer items-center gap-3.5 rounded-2xl border border-slate-100 bg-white p-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-200 hover:bg-violet-50/40 hover:shadow-md hover:shadow-slate-900/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/30"
       >
         <div
-          className={`hidden h-12 w-12 shrink-0 flex-col items-center justify-center rounded-2xl sm:flex ${
-            isToday ? "bg-slate-900 text-white shadow-sm" : "bg-violet-50 text-violet-900"
+          className={`hidden h-12 w-12 shrink-0 flex-col items-center justify-center rounded-2xl border transition-transform duration-300 group-hover:scale-105 sm:flex ${
+            isToday
+              ? "border-slate-900 bg-slate-900 text-white shadow-sm"
+              : "border-violet-200 bg-gradient-to-b from-violet-100 to-violet-50 text-violet-900"
           }`}
         >
           <span className="text-[9px] font-bold uppercase tracking-wide">
@@ -549,7 +608,7 @@ function UpcomingMeetingRow({
 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h4 className="truncate text-sm font-semibold text-slate-900 group-hover:text-violet-700">
+            <h4 className="truncate text-sm font-semibold text-slate-900 transition-colors duration-200 group-hover:text-violet-700">
               {getMeetingTitle(meeting)}
             </h4>
             {isToday && (
@@ -631,7 +690,7 @@ function UpcomingPagination({
             onClick={() => onPageChange(currentPage - 1)}
             disabled={currentPage <= 1}
             aria-label="Previous page"
-            className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
           >
             <ChevronLeft className="h-4 w-4" />
           </button>
@@ -642,10 +701,10 @@ function UpcomingPagination({
               type="button"
               onClick={() => onPageChange(page)}
               aria-current={page === currentPage ? "page" : undefined}
-              className={`h-8 min-w-[2rem] rounded-full px-2 text-xs font-semibold transition-colors ${
+              className={`h-8 min-w-[2rem] cursor-pointer rounded-full px-2 text-xs font-bold tabular-nums transition-all duration-200 ${
                 page === currentPage
                   ? "bg-slate-900 text-white shadow-sm"
-                  : "text-slate-600 hover:bg-slate-100"
+                  : "border border-slate-200 text-slate-600 hover:border-violet-200 hover:text-violet-600"
               }`}
             >
               {page}
@@ -657,7 +716,7 @@ function UpcomingPagination({
             onClick={() => onPageChange(currentPage + 1)}
             disabled={currentPage >= totalPages}
             aria-label="Next page"
-            className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-slate-200 text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:text-slate-500"
           >
             <ChevronRight className="h-4 w-4" />
           </button>
@@ -779,16 +838,13 @@ function ChartSkeleton() {
       <div className="flex h-44 gap-1.5 sm:gap-3">
         {[75, 40, 90, 55, 30, 65, 45].map((height, index) => (
           <div key={index} className="flex h-full flex-1 flex-col justify-end">
-            <div
-              className="w-full animate-pulse rounded-t-xl bg-slate-100"
-              style={{ height: `${height}%` }}
-            />
+            <div className="skeleton w-full rounded-t-xl" style={{ height: `${height}%` }} />
           </div>
         ))}
       </div>
       <div className="mt-2 flex gap-1.5 sm:gap-3">
         {Array.from({ length: 7 }).map((_, index) => (
-          <div key={index} className="h-3 flex-1 animate-pulse rounded-full bg-slate-100" />
+          <div key={index} className="skeleton h-3 flex-1 rounded-full" />
         ))}
       </div>
     </div>
@@ -797,7 +853,7 @@ function ChartSkeleton() {
 
 function ActivityEmpty({ range }: { range: ActivityRange }) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 py-10 text-center">
+    <div className="anim-fade-up flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 py-10 text-center">
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm">
         <BarChart3 className="h-6 w-6 text-slate-400" />
       </div>
@@ -823,7 +879,7 @@ function LegendDot({ label, dotClass }: { label: string; dotClass: string }) {
 
 function SummaryStat({ label, value }: { label: string; value: number | string }) {
   return (
-    <div className="rounded-2xl bg-slate-50/80 px-3.5 py-3">
+    <div className="rounded-2xl bg-slate-50/80 px-3.5 py-3 transition-colors duration-200 hover:bg-violet-50/60">
       <p className="text-lg font-extrabold leading-none text-slate-900">{value}</p>
       <p className="mt-1 text-[11px] font-medium text-slate-400">{label}</p>
     </div>
@@ -854,7 +910,7 @@ function StatusRow({
       </span>
       <p className="flex-1 truncate text-sm font-medium text-slate-600">{label}</p>
       {loading ? (
-        <div className="h-5 w-8 animate-pulse rounded-full bg-slate-100" />
+        <div className="skeleton h-5 w-8 rounded-full" />
       ) : (
         <>
           <p className="text-sm font-bold text-slate-900">{value}</p>
@@ -877,11 +933,11 @@ function QuickActionButton({
   return (
     <button
       type="button"
-      onClick={onClick}
-      className="group flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-xs font-semibold text-slate-600 transition-all hover:-translate-y-0.5 hover:border-violet-200 hover:bg-violet-50/60 hover:text-violet-700"
+      onClick={() => onClick()}
+      className="group relative z-10 flex w-full cursor-pointer select-none items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-xs font-semibold text-slate-600 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-200 hover:bg-violet-50/60 hover:text-violet-700 hover:shadow-sm active:scale-[0.98]"
     >
       <span className="flex items-center gap-2.5">
-        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-50 text-slate-400 transition-colors group-hover:bg-white group-hover:text-violet-600">
+        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-50 text-slate-400 transition-all duration-300 group-hover:scale-110 group-hover:bg-white group-hover:text-violet-600">
           {icon}
         </span>
         {label}
@@ -891,197 +947,187 @@ function QuickActionButton({
   );
 }
 
-/* ── Off-canvas details panel ── */
+/* ────────────────────────────────────────────────
+   Off-canvas details panel (matches Meetings page)
+──────────────────────────────────────────────── */
 
 function MeetingDetailsPanel({
   meeting,
   onClose,
   onEdit,
   onDeleteRequest,
+  onUpdateRequest,
 }: {
   meeting: Meeting;
   onClose: () => void;
   onEdit: (meeting: Meeting) => void;
   onDeleteRequest: () => void;
+  onUpdateRequest: (meeting: Meeting) => void;
 }) {
   const dateInfo = formatDate(meeting.meeting_date || meeting.created_date);
-  const time = meeting.meeting_time || "";
   const style = getStatusStyle(getStatusKey(meeting));
   const title = getMeetingTitle(meeting);
-  const officerInitials = meeting.officer_name
-    ? meeting.officer_name
-        .split(" ")
-        .map((word) => word.charAt(0))
-        .slice(0, 2)
-        .join("")
-        .toUpperCase()
-    : "";
-  const priorityColor =
-    (
-      {
-        high: "text-red-600",
-        medium: "text-amber-600",
-        low: "text-emerald-600",
-      } as Record<string, string>
-    )[(meeting.priority || "").toLowerCase()] || "text-slate-900";
+  const timeDisplay = formatTimeDisplay(meeting.meeting_time || "");
 
   return (
     <>
       <div
-        className="fixed inset-0 z-40 animate-in fade-in bg-slate-900/50 backdrop-blur-sm duration-300"
+        className="anim-overlay fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm"
         onClick={onClose}
       />
 
-      <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-white shadow-2xl animate-in slide-in-from-right duration-300">
-        {/* Gradient header */}
-        <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-violet-900 px-6 pb-5 pt-6">
-          <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-violet-500/25 blur-3xl" />
-          <div className="absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-indigo-400/10 blur-3xl" />
+<div className="anim-panel nice-scroll fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col overflow-y-auto bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">        <div className="h-1.5 w-full shrink-0 bg-gradient-to-r from-violet-500 to-indigo-500" />
 
-          <div className="relative">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-white ring-1 ring-inset ring-white/20">
-                  <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
-                  {style.label}
-                </span>
-                {meeting.meeting_type && (
-                  <span className="inline-flex rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-semibold capitalize text-white/70 ring-1 ring-inset ring-white/15">
-                    {meeting.meeting_type}
-                  </span>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="-mr-2 -mt-1 rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
+        {/* Header */}
+        <div className="flex-shrink-0 border-b border-slate-100 bg-white px-5 pb-4 pt-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ${style.badge}`}
               >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <h2 className="mt-3 line-clamp-3 text-xl font-bold leading-snug text-white">{title}</h2>
-
-            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-slate-300">
-              <span className="flex items-center gap-1.5">
-                <Calendar className="h-4 w-4 text-slate-400" />
-                {dateInfo ? `${dateInfo.weekday}, ${dateInfo.full}` : "—"}
+                <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+                {style.label}
               </span>
-              <span className="flex items-center gap-1.5">
-                <Clock className="h-4 w-4 text-slate-400" />
-                {formatTimeDisplay(time)}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Scrollable body */}
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-slate-50 p-5">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
-              <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <Calendar className="h-3.5 w-3.5 text-violet-500" /> Date
-              </p>
-              <p className="mt-1.5 text-sm font-semibold text-slate-900">{dateInfo?.full || "—"}</p>
-            </div>
-            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
-              <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <Clock className="h-3.5 w-3.5 text-violet-500" /> Time
-              </p>
-              <p className="mt-1.5 text-sm font-semibold text-slate-900">{formatTimeDisplay(time)}</p>
-              {meeting.duration && (
-                <p className="mt-0.5 text-xs text-slate-400">{meeting.duration} min</p>
+              {meeting.meeting_type && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700">
+                  <Building2 className="h-3.5 w-3.5" />
+                  {meeting.meeting_type}
+                </span>
               )}
             </div>
-            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
-              <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <MapPin className="h-3.5 w-3.5 text-violet-500" /> Location
-              </p>
-              <p className="mt-1.5 truncate text-sm font-semibold text-slate-900">
-                {meeting.location || meeting.meeting_place || "Not specified"}
-              </p>
-            </div>
-            {meeting.meeting_type && (
-              <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  <Briefcase className="h-3.5 w-3.5 text-violet-500" /> Type
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="-mr-1 -mt-1 flex h-9 w-9 flex-shrink-0 cursor-pointer items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <h2 className="mt-3 text-xl font-bold leading-snug text-slate-900">{title}</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            {dateInfo ? `${dateInfo.weekday} · ${dateInfo.full}` : "Date not available"}
+          </p>
+        </div>
+
+        {/* Body */}
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-violet-50/40 p-5">
+          {meeting.meeting_type && (
+            <div className="flex items-center gap-3.5 rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm">
+                <Building2 className="h-5 w-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Meeting Type
                 </p>
-                <p className="mt-1.5 text-sm font-semibold capitalize text-slate-900">
+                <p className="mt-0.5 truncate text-base font-bold capitalize text-slate-900">
                   {meeting.meeting_type}
                 </p>
               </div>
-            )}
-            {meeting.priority && (
-              <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  <Tag className="h-3.5 w-3.5 text-violet-500" /> Priority
-                </p>
-                <p className={`mt-1.5 text-sm font-semibold capitalize ${priorityColor}`}>
-                  {meeting.priority}
-                </p>
+              <span className="h-2 w-2 shrink-0 rounded-full bg-violet-500" />
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <Calendar className="h-3.5 w-3.5 text-violet-500" /> Date
+              </p>
+              <p className="mt-2 text-sm font-semibold text-slate-900">{dateInfo?.full || "—"}</p>
+              {dateInfo && <p className="mt-0.5 text-xs text-slate-400">{dateInfo.weekday}</p>}
+            </div>
+
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <Clock className="h-3.5 w-3.5 text-violet-500" /> Time
+              </p>
+              <p className="mt-2 text-sm font-semibold text-slate-900">
+                {timeDisplay}{" "}
+                {meeting.duration && (
+                  <span className="text-xs font-medium text-slate-400">({meeting.duration} min)</span>
+                )}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <MapPin className="h-3.5 w-3.5 text-sky-500" /> Location
+              </p>
+              <p className="mt-2 truncate text-sm font-semibold text-slate-900">
+                {meeting.location || meeting.meeting_place || "—"}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <User className="h-3.5 w-3.5 text-emerald-500" /> Officer
+              </p>
+              <p className="mt-2 truncate text-sm font-semibold text-slate-900">
+                {meeting.officer_name || "—"}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <Tag className="h-3.5 w-3.5 text-amber-500" /> Priority
+              </p>
+              <div className="mt-2">
+                {meeting.priority ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-600">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    <span className="capitalize">{meeting.priority}</span>
+                  </span>
+                ) : (
+                  <span className="text-sm font-semibold text-slate-900">—</span>
+                )}
               </div>
-            )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <Briefcase className="h-3.5 w-3.5 text-fuchsia-500" /> Type
+              </p>
+              <p className="mt-2 text-sm font-semibold text-slate-900">
+                {meeting.meeting_type || "—"}
+              </p>
+            </div>
           </div>
 
-          {(meeting.officer_name || meeting.designation || meeting.officer_type) && (
-            <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
-              <p className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                <User className="h-3.5 w-3.5 text-violet-500" /> Officer
+          {meeting.email && (
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <Mail className="h-3.5 w-3.5 text-teal-500" /> Email
               </p>
-              <div className="flex items-center gap-3">
-                {officerInitials && (
-                  <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold text-white">
-                    {officerInitials}
-                  </div>
-                )}
-                <div className="min-w-0 flex-1">
-                  {meeting.officer_name && (
-                    <p className="truncate text-sm font-semibold text-slate-900">
-                      {meeting.officer_name}
-                    </p>
-                  )}
-                  {meeting.designation && (
-                    <p className="truncate text-xs text-slate-500">{meeting.designation}</p>
-                  )}
-                </div>
-                {meeting.officer_type && (
-                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-bold text-violet-700">
-                    <ShieldCheck className="h-3 w-3" />
-                    {meeting.officer_type}
-                  </span>
-                )}
-              </div>
+              <p className="mt-2 break-all text-sm font-semibold text-slate-900">{meeting.email}</p>
             </div>
           )}
 
           {meeting.agenda && (
-            <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white">
-              <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3">
-                <AlignLeft className="h-4 w-4 text-violet-500" />
-                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Agenda</p>
-              </div>
-              <p className="whitespace-pre-line px-4 py-3 text-sm leading-relaxed text-slate-600">
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <AlignLeft className="h-3.5 w-3.5 text-violet-500" /> Agenda
+              </p>
+              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-slate-600">
                 {meeting.agenda}
               </p>
             </div>
           )}
 
           {meeting.description && (
-            <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white">
-              <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-3">
-                <FileText className="h-4 w-4 text-violet-500" />
-                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                  Description
-                </p>
-              </div>
-              <p className="whitespace-pre-line px-4 py-3 text-sm leading-relaxed text-slate-600">
+            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
+              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <FileText className="h-3.5 w-3.5 text-violet-500" /> Description
+              </p>
+              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-slate-600">
                 {meeting.description}
               </p>
             </div>
           )}
 
           {(meeting.created || meeting.updated) && (
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-white px-4 py-3 text-[11px] text-slate-400">
+            <div className="flex items-center justify-between rounded-2xl border border-slate-100 bg-white px-4 py-3 text-[11px] text-slate-400">
               {meeting.created && (
                 <span>
                   Created{" "}
@@ -1106,27 +1152,399 @@ function MeetingDetailsPanel({
           )}
         </div>
 
-        {/* Footer actions */}
-        <div className="flex flex-shrink-0 gap-3 border-t border-slate-200 bg-white p-4">
+        {/* Footer — Edit / Update / Delete */}
+        <div className="relative flex flex-shrink-0 items-center gap-2.5 border-t border-slate-100 bg-white p-4">
           <button
             type="button"
             onClick={() => onEdit(meeting)}
-            className="flex flex-1 items-center justify-center gap-2 rounded-full bg-slate-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800"
+            className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-full bg-slate-900 py-3 text-sm font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
           >
             <Edit2 className="h-4 w-4" />
-            Edit Meeting
+            Edit
           </button>
+
+          <button
+            type="button"
+            onClick={() => onUpdateRequest(meeting)}
+            className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-full border border-amber-200 bg-amber-50 py-3 text-sm font-semibold text-amber-600 transition-all duration-200 hover:-translate-y-0.5 hover:bg-amber-100 active:scale-[0.98]"
+          >
+            <RotateCcw className="h-4 w-4" />
+            Update
+          </button>
+
           <button
             type="button"
             onClick={onDeleteRequest}
-            className="flex items-center justify-center gap-2 rounded-full border border-rose-200 px-4 py-2.5 text-sm font-semibold text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-50"
+            aria-label="Delete meeting"
+            className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-rose-200 text-rose-500 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-50 active:scale-[0.98]"
           >
             <Trash2 className="h-4 w-4" />
-            Delete
           </button>
         </div>
       </div>
     </>
+  );
+}
+
+/* ────────────────────────────────────────────────
+   Inline "Update Meeting" panel — same as the
+   Meetings module: manual status/reschedule/
+   follow-up/document update, no automations.
+──────────────────────────────────────────────── */
+
+const MAX_FILE_MB = 10;
+const ACCEPTED_DOCS = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg,.webp";
+
+function InlineUpdateStatusPanel({
+  meeting,
+  onClose,
+  onSaved,
+}: {
+  meeting: Meeting;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [status, setStatus] = useState<string>(getStatusKey(meeting));
+  const [newDate, setNewDate] = useState<string>(String(meeting?.meeting_date || "").slice(0, 10) || "");
+  const [newTime, setNewTime] = useState<string>(
+    String(meeting?.meeting_time || "").match(/\d{1,2}:\d{2}/)?.[0] || ""
+  );
+  const [followUpDate, setFollowUpDate] = useState<string>(
+    String((meeting as any)?.follow_up_date || (meeting as any)?.followup_date || "").slice(0, 10) || ""
+  );
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const [existingDocs, setExistingDocs] = useState<string[]>(() => {
+    const v = (meeting as any)?.documents;
+    if (!v) return [];
+    try {
+      return typeof v === "string" ? JSON.parse(v) : v;
+    } catch {
+      return [];
+    }
+  });
+  const [pendingDocs, setPendingDocs] = useState<File[]>([]);
+  const docInputRef = useRef<HTMLInputElement>(null);
+  const initialDocsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    initialDocsRef.current = existingDocs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handlePickDocs = (files: FileList | null) => {
+    if (!files?.length) return;
+    const list = Array.from(files);
+    const tooBig = list.find((f) => f.size > MAX_FILE_MB * 1024 * 1024);
+    if (tooBig) alert(`"${tooBig.name}" is larger than ${MAX_FILE_MB} MB`);
+    const ok = list.filter((f) => f.size <= MAX_FILE_MB * 1024 * 1024);
+    if (ok.length) {
+      setPendingDocs((prev) => {
+        const seen = new Set(prev.map((p) => `${p.name}:${p.size}`));
+        return [...prev, ...ok.filter((f) => !seen.has(`${f.name}:${f.size}`))];
+      });
+    }
+    if (docInputRef.current) docInputRef.current.value = "";
+  };
+
+  const removePendingDoc = (idx: number) => setPendingDocs((prev) => prev.filter((_, i) => i !== idx));
+  const removeExistingDoc = (name: string) => setExistingDocs((prev) => prev.filter((n) => n !== name));
+
+  const fileUrl = (filename: string) => {
+    try {
+      const anyPb = pb as any;
+      if (anyPb.files?.getUrl) return anyPb.files.getUrl(meeting, filename);
+      if (anyPb.getFileUrl) return anyPb.getFileUrl(meeting, filename);
+    } catch {
+      /* noop */
+    }
+    return "";
+  };
+
+  const docsDirty =
+    pendingDocs.length > 0 || existingDocs.join("||") !== initialDocsRef.current.join("||");
+
+  async function syncDocuments(recordId: string) {
+    if (!docsDirty) return;
+    const fd = new FormData();
+    if (!existingDocs.length && !pendingDocs.length) {
+      fd.append("documents", "");
+    } else {
+      existingDocs.forEach((n) => fd.append("documents", n));
+      pendingDocs.forEach((f) => fd.append("documents", f));
+    }
+    await pb.collection("meetings").update(recordId, fd);
+  }
+
+  const handleSave = async () => {
+    if (!meeting?.id || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const statusLabel = STATUS_STYLES[status]?.label || status;
+      const payload: Record<string, any> = {
+        status: statusLabel,
+        status_flag: statusLabel,
+        follow_up_date: followUpDate,
+      };
+
+      if (status === "rescheduled") {
+        if (newDate) payload.meeting_date = newDate;
+        if (newTime) payload.meeting_time = newTime;
+      }
+      await pb.collection("meetings").update(meeting.id, payload);
+      await syncDocuments(meeting.id);
+
+      const trimmedNote = note.trim();
+      if (trimmedNote) {
+        for (const field of ["status_note", "notes"]) {
+          try {
+            await pb.collection("meetings").update(meeting.id, { [field]: trimmedNote });
+            break;
+          } catch {
+            /* try next common field name */
+          }
+        }
+      }
+      onSaved();
+    } catch (e: any) {
+      setError(e?.message || "Failed to update. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const di = (() => {
+    const raw = String(meeting?.meeting_date || "");
+    if (!raw) return null;
+    const d = new Date(raw.includes(" ") ? raw.replace(" ", "T") : raw);
+    return Number.isNaN(d.getTime())
+      ? null
+      : d.toLocaleDateString("en-US", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  })();
+
+  return (
+    <div className="fixed inset-0 z-[70]">
+      <div
+        className="anim-overlay absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+        onClick={() => !saving && onClose()}
+      />
+
+<aside className="anim-panel absolute right-0 top-0 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">        <div className="h-1.5 w-full bg-gradient-to-r from-amber-400 to-orange-400" />
+
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
+          <div className="min-w-0">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Update Meeting</p>
+            <h2 className="mt-0.5 truncate text-base font-bold text-slate-900">{getMeetingTitle(meeting)}</h2>
+            <p className="mt-0.5 text-xs text-slate-400">
+              {di || "—"}
+              {meeting?.meeting_time ? ` · ${meeting.meeting_time}` : ""}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => !saving && onClose()}
+            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="nice-scroll flex-1 space-y-5 overflow-y-auto px-5 py-5">
+          {/* Status */}
+          <div>
+            <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">Status</p>
+            <div className="grid grid-cols-2 gap-2">
+              {Object.entries(STATUS_STYLES).map(([key, s]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setStatus(key)}
+                  disabled={saving}
+                  className={`inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all duration-200 active:scale-[0.97] disabled:opacity-50 ${
+                    status === key
+                      ? `${s.badge} border-2 border-slate-900`
+                      : "border border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50"
+                  }`}
+                >
+                  <span className={`h-2 w-2 rounded-full ${s.dot}`} />
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Reschedule fields — only shown (and only saved) for Rescheduled */}
+          {status === "rescheduled" && (
+            <div className="anim-fade-in grid grid-cols-2 gap-3 rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
+              <div>
+                <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-amber-700">New Date</label>
+                <input
+                  type="date"
+                  value={newDate}
+                  onChange={(e) => setNewDate(e.target.value)}
+                  disabled={saving}
+                  className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-amber-400 focus:outline-none focus:ring-4 focus:ring-amber-500/10"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-amber-700">New Time</label>
+                <input
+                  type="time"
+                  value={newTime}
+                  onChange={(e) => setNewTime(e.target.value)}
+                  disabled={saving}
+                  className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-amber-400 focus:outline-none focus:ring-4 focus:ring-amber-500/10"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Follow-up date (optional) */}
+          <div>
+            <label className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              Follow-up date (optional)
+            </label>
+            <input
+              type="date"
+              value={followUpDate}
+              onChange={(e) => setFollowUpDate(e.target.value)}
+              disabled={saving}
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Included in the Google Calendar sync when syncing is enabled.
+            </p>
+          </div>
+
+          {/* Documents — attach before saving */}
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Documents</p>
+              <span className="text-[10px] font-semibold text-slate-400">max {MAX_FILE_MB} MB each</span>
+            </div>
+            <input
+              ref={docInputRef}
+              type="file"
+              multiple
+              accept={ACCEPTED_DOCS}
+              className="hidden"
+              onChange={(e) => handlePickDocs(e.target.files)}
+            />
+            <button
+              type="button"
+              onClick={() => docInputRef.current?.click()}
+              disabled={saving}
+              className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50/50 px-3 py-3 text-xs font-semibold text-slate-600 transition-all hover:border-violet-300 hover:bg-violet-50/50 hover:text-violet-700 disabled:opacity-50"
+            >
+              <Upload className="h-4 w-4" />
+              Attach documents
+              <span className="text-[10px] font-normal text-slate-400">PDF, Word, Excel, images</span>
+            </button>
+
+            {existingDocs.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {existingDocs.map((name) => {
+                  const url = fileUrl(name);
+                  return (
+                    <span
+                      key={name}
+                      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-white py-1 pl-2.5 pr-1 text-[11px] font-medium text-slate-600"
+                    >
+                      <FileText className="h-3 w-3 shrink-0 text-violet-500" />
+                      {url ? (
+                        <a href={url} target="_blank" rel="noreferrer" className="max-w-[140px] truncate hover:text-violet-600 hover:underline">
+                          {name}
+                        </a>
+                      ) : (
+                        <span className="max-w-[140px] truncate">{name}</span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeExistingDoc(name)}
+                        disabled={saving}
+                        className="rounded-full p-0.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {pendingDocs.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {pendingDocs.map((f, i) => (
+                  <span
+                    key={`${f.name}-${i}`}
+                    className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 py-1 pl-2.5 pr-1 text-[11px] font-medium text-violet-700"
+                  >
+                    <FileText className="h-3 w-3 shrink-0" />
+                    <span className="max-w-[140px] truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removePendingDoc(i)}
+                      disabled={saving}
+                      className="rounded-full p-0.5 text-violet-400 transition-colors hover:bg-violet-100 hover:text-rose-500"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Note */}
+          <div>
+            <label className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Note (optional)</label>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              rows={4}
+              disabled={saving}
+              placeholder="Add a short note about this status change..."
+              className="w-full resize-none rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm text-slate-900 placeholder-slate-400 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+            />
+          </div>
+
+          {error && (
+            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-600">
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="border-t border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="flex-1 rounded-full border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="inline-flex flex-[2] items-center justify-center gap-1.5 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98] disabled:opacity-60"
+            >
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+              {saving ? "Saving..." : "Save Changes"}
+            </button>
+          </div>
+        </div>
+      </aside>
+    </div>
   );
 }
 
@@ -1162,6 +1580,7 @@ export default function DashboardPage() {
   const [panelOpen, setPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<Meeting | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [updateMeeting, setUpdateMeeting] = useState<Meeting | null>(null);
 
   /* ────────────────────────────────
      Data loading (PocketBase)
@@ -1207,11 +1626,11 @@ export default function DashboardPage() {
     loadDashboardData();
   }, []);
 
-  /* Greeting / date / logged-in user (set after mount to avoid hydration mismatch) */
+  /* Greeting / date / logged-in user */
   useEffect(() => {
     const now = new Date();
     const hour = now.getHours();
-    setGreeting(hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening");
+    setGreeting(hour < 12 ? "Good Morning" : hour < 17 ? "Good Afternoon" : "Good Evening");
     setTodayLabel(
       now.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })
     );
@@ -1249,15 +1668,40 @@ export default function DashboardPage() {
   };
 
   /* ────────────────────────────────
-     Details off-canvas + delete
+     Details off-canvas + delete + status
   ──────────────────────────────── */
 
   const openMeetingDetails = (meeting: Meeting) => setSelectedMeeting(meeting);
   const closeMeetingDetails = () => setSelectedMeeting(null);
 
-  const openEditFromDetails = (meeting: Meeting) => {
+  /* Always re-fetch the full record before editing/updating — the row
+     data (from the list endpoint) can be stale or partial, which is
+     why Edit could appear to open with "new meeting" (blank) details. */
+  const fetchFreshMeeting = async (id: string): Promise<Meeting | null> => {
+    try {
+      return (await pb.collection("meetings").getOne(id)) as unknown as Meeting;
+    } catch {
+      return null;
+    }
+  };
+
+  const openEditFromDetails = async (meeting: Meeting) => {
     setSelectedMeeting(null);
-    openEditPanel(meeting);
+    const fresh = await fetchFreshMeeting(meeting.id);
+    openEditPanel(fresh || meeting);
+  };
+
+  const handleOpenUpdate = async (meeting: Meeting) => {
+    setSelectedMeeting(null);
+    const fresh = await fetchFreshMeeting(meeting.id);
+    setUpdateMeeting(fresh || meeting);
+  };
+
+  const closeUpdatePanel = () => setUpdateMeeting(null);
+
+  const handleUpdateSaved = () => {
+    setUpdateMeeting(null);
+    loadDashboardData({ silent: true });
   };
 
   const confirmDelete = async () => {
@@ -1286,16 +1730,32 @@ export default function DashboardPage() {
     router.push(path);
   };
 
-  /* ESC closes delete modal first, then the details off-canvas */
+  /* ESC closes delete modal first, then the update panel, then the details off-canvas */
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape" || panelOpen) return;
       if (showDeleteConfirm) setShowDeleteConfirm(false);
+      else if (updateMeeting) setUpdateMeeting(null);
       else setSelectedMeeting(null);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedMeeting, showDeleteConfirm, panelOpen]);
+  }, [selectedMeeting, showDeleteConfirm, panelOpen, updateMeeting]);
+
+  /* Keyboard shortcut: pressing "N" opens the create meeting panel */
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "n" && e.key !== "N") return;
+      if (panelOpen || selectedMeeting || showDeleteConfirm || updateMeeting) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      e.preventDefault();
+      openCreatePanel();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [panelOpen, selectedMeeting, showDeleteConfirm, updateMeeting]);
 
   /* ────────────────────────────────
      Derived data
@@ -1329,7 +1789,6 @@ export default function DashboardPage() {
       });
   }, [meetings]);
 
-  /* Full filtered list (search applies across ALL upcoming meetings) */
   const filteredUpcomingMeetings = useMemo(() => {
     const searchValue = search.toLowerCase().trim();
 
@@ -1355,38 +1814,33 @@ export default function DashboardPage() {
     Math.ceil(filteredUpcomingMeetings.length / UPCOMING_PAGE_SIZE)
   );
 
-  /* Clamp current page if data shrinks (e.g. after delete) */
-  useEffect(() => {
-    setUpcomingPage((prev) => Math.min(prev, Math.max(1, upcomingTotalPages)));
-  }, [upcomingTotalPages]);
+  const safeUpcomingPage = Math.min(upcomingPage, upcomingTotalPages);
 
-  /* Reset to page 1 whenever the search changes */
-  useEffect(() => {
-    setUpcomingPage(1);
-  }, [search]);
-
-  const upcomingCurrentPage = Math.min(upcomingPage, upcomingTotalPages);
-
-  const paginatedUpcomingMeetings = useMemo(
-    () =>
-      filteredUpcomingMeetings.slice(
-        (upcomingCurrentPage - 1) * UPCOMING_PAGE_SIZE,
-        upcomingCurrentPage * UPCOMING_PAGE_SIZE
-      ),
-    [filteredUpcomingMeetings, upcomingCurrentPage]
-  );
+  const paginatedUpcomingMeetings = useMemo(() => {
+    const startIndex = (safeUpcomingPage - 1) * UPCOMING_PAGE_SIZE;
+    return filteredUpcomingMeetings.slice(startIndex, startIndex + UPCOMING_PAGE_SIZE);
+  }, [filteredUpcomingMeetings, safeUpcomingPage]);
 
   const upcomingRangeStart =
     filteredUpcomingMeetings.length === 0
       ? 0
-      : (upcomingCurrentPage - 1) * UPCOMING_PAGE_SIZE + 1;
-  const upcomingRangeEnd =
-    filteredUpcomingMeetings.length === 0
-      ? 0
-      : upcomingRangeStart + paginatedUpcomingMeetings.length - 1;
+      : (safeUpcomingPage - 1) * UPCOMING_PAGE_SIZE + 1;
+  const upcomingRangeEnd = Math.min(
+    safeUpcomingPage * UPCOMING_PAGE_SIZE,
+    filteredUpcomingMeetings.length
+  );
 
-  /* ── Stats ── */
-  const dashboardStats: DashboardStats = useMemo(() => {
+  useEffect(() => {
+    setUpcomingPage(1);
+  }, [search]);
+
+  const activityData = useMemo(
+    () => buildActivityData(meetings, activityRange),
+    [meetings, activityRange]
+  );
+  const hasActivity = activityData.some((bucket) => bucket.total > 0);
+
+  const stats: DashboardStats = useMemo(() => {
     let scheduled = 0;
     let completed = 0;
     let rescheduled = 0;
@@ -1395,35 +1849,27 @@ export default function DashboardPage() {
     meetings.forEach((meeting) => {
       const status = getMeetingStatus(meeting);
       if (status.includes("completed") || status.includes("done")) completed += 1;
-      else if (status.includes("cancelled") || status.includes("canceled")) cancelled += 1;
-      else if (status.includes("reschedule")) rescheduled += 1;
+      else if (status.includes("rescheduled")) rescheduled += 1;
+      else if (
+        status.includes("cancelled") ||
+        status.includes("canceled") ||
+        status.includes("rejected")
+      )
+        cancelled += 1;
       else scheduled += 1;
     });
 
     const totalMeetings = meetings.length;
-    const completionRate = totalMeetings > 0 ? Math.round((completed / totalMeetings) * 100) : 0;
 
-    return { totalMeetings, scheduled, completed, rescheduled, cancelled, completionRate };
+    return {
+      totalMeetings,
+      scheduled,
+      completed,
+      rescheduled,
+      cancelled,
+      completionRate: totalMeetings === 0 ? 0 : Math.round((completed / totalMeetings) * 100),
+    };
   }, [meetings]);
-
-  const activityData = useMemo(
-    () => buildActivityData(meetings, activityRange),
-    [meetings, activityRange]
-  );
-
-  const activityTotals = useMemo(
-    () =>
-      activityData.reduce(
-        (acc, bucket) => ({
-          scheduled: acc.scheduled + bucket.scheduled,
-          completed: acc.completed + bucket.completed,
-          cancelled: acc.cancelled + bucket.cancelled,
-          total: acc.total + bucket.total,
-        }),
-        { scheduled: 0, completed: 0, cancelled: 0, total: 0 }
-      ),
-    [activityData]
-  );
 
   /* ────────────────────────────────
      Render
@@ -1431,497 +1877,467 @@ export default function DashboardPage() {
 
   return (
     <ProtectedRoute>
-      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200">
-        {/* Soft decorative blobs */}
-        <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
-          <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
-          <div className="absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" />
-          <div className="absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" />
+      <div className="dash-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+        <CustomStyles />
+
+        <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
+          <div className="anim-blob absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
+          <div
+            className="anim-blob absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl"
+            style={{ animationDelay: "-3s" }}
+          />
+          <div
+            className="anim-blob absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl"
+            style={{ animationDelay: "-6s" }}
+          />
         </div>
 
-        <div className="relative px-2.5 py-2.5 sm:px-5 sm:py-5 lg:px-8 lg:py-7">
-          <div className="mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
-
-            {/* ── App bar ── */}
-            <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
-                  <CalendarDays className="h-4 w-4" />
-                </span>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-slate-900">Meeting Dashboard</p>
-                  <p className="truncate text-[11px] text-slate-400">{todayLabel}</p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {/* Desktop search */}
-                <div className="relative hidden md:block">
-                  <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search meetings, officers…"
-                    className="h-10 w-56 rounded-full border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm text-slate-700 placeholder:text-slate-400 outline-none transition-all focus:border-violet-300 focus:bg-white focus:ring-4 focus:ring-violet-500/10 lg:w-72"
-                  />
-                </div>
-
-                {/* Mobile search toggle */}
-                <button
-                  type="button"
-                  onClick={() => setMobileSearchOpen((v) => !v)}
-                  aria-label="Toggle search"
-                  className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 md:hidden"
+        <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+          {/* ── App bar ── */}
+          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 bg-white px-4 py-5 sm:px-6 sm:py-6">
+            <div className="flex min-w-0 items-center gap-4">
+              <span className="anim-scale-in flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-900 to-slate-700 text-white shadow-lg shadow-slate-900/20 sm:h-16 sm:w-16">
+                <CalendarDays className="h-6 w-6 sm:h-7 sm:w-7" />
+              </span>
+              <div className="min-w-0">
+                <h1 className="anim-fade-up truncate bg-gradient-to-r from-slate-900 via-violet-800 to-slate-900 bg-clip-text text-2xl font-extrabold leading-tight tracking-tight text-transparent sm:text-3xl lg:text-4xl">
+                  {greeting}, {userName}
+                </h1>
+                <p
+                  className="anim-fade-up mt-1 truncate text-xs font-medium text-slate-400 sm:text-sm"
+                  style={{ animationDelay: "80ms" }}
                 >
-                  <Search className="h-4 w-4" />
-                </button>
-
-                {/* Refresh */}
-                <button
-                  type="button"
-                  onClick={handleRefresh}
-                  disabled={isRefreshing}
-                  aria-label="Refresh data"
-                  className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 disabled:opacity-60"
-                >
-                  <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
-                </button>
-
-                {/* User chip */}
-                <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-white py-1 pl-1 pr-3">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-[11px] font-bold text-white">
-                    {userName.charAt(0).toUpperCase()}
-                  </span>
-                  <span className="hidden max-w-[120px] truncate text-xs font-semibold text-slate-700 sm:block">
-                    {userName}
-                  </span>
-                </div>
+                  {todayLabel || "Meeting Management"}
+                </p>
               </div>
             </div>
 
-            {/* Mobile search row */}
-            {mobileSearchOpen && (
-              <div className="border-b border-slate-100 bg-white px-4 py-3 md:hidden">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search meetings, officers…"
-                    autoFocus
-                    className="h-10 w-full rounded-full border border-slate-200 bg-slate-50 pl-11 pr-4 text-sm text-slate-700 placeholder:text-slate-400 outline-none focus:border-violet-300 focus:bg-white focus:ring-4 focus:ring-violet-500/10"
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* ── Content ── */}
-            <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
-
-              {/* Error banner */}
-              {error && (
-                <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3">
-                  <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-rose-700">Something went wrong</p>
-                    <p className="mt-0.5 break-words text-xs text-rose-600">{error}</p>
-                  </div>
+            <div className="flex items-center gap-2">
+              {/* Desktop search */}
+              <div className="relative hidden md:block">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search meetings, officers..."
+                  className="h-11 w-64 rounded-full border border-slate-200 bg-slate-50/80 pl-11 pr-9 text-sm text-slate-900 placeholder-slate-400 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                />
+                {search && (
                   <button
                     type="button"
-                    onClick={() => loadDashboardData({ silent: true })}
-                    className="shrink-0 rounded-full bg-white px-3.5 py-1.5 text-xs font-semibold text-rose-600 ring-1 ring-rose-200 transition-colors hover:bg-rose-100"
+                    onClick={() => setSearch("")}
+                    aria-label="Clear search"
+                    className="absolute right-3.5 top-1/2 -translate-y-1/2 cursor-pointer rounded-full p-1 text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 active:scale-90"
                   >
-                    Retry
+                    <X className="h-3.5 w-3.5" />
                   </button>
-                </div>
-              )}
+                )}
+              </div>
 
-              {/* Greeting row */}
-              <div className="flex flex-wrap items-end justify-between gap-4">
-                <div>
-                  <h1 className="text-[1.65rem] font-extrabold leading-tight tracking-tight text-slate-900 sm:text-3xl">
-                    {greeting},{" "}
-                    <span className="bg-gradient-to-r from-violet-600 to-indigo-600 bg-clip-text text-transparent">
-                      {userName}
-                    </span>
-                  </h1>
-                  <p className="mt-1 text-sm text-slate-500">
-                    {todayLabel} — here&apos;s your meeting overview.
-                  </p>
+              {/* Mobile search toggle */}
+              <button
+                type="button"
+                onClick={() => setMobileSearchOpen((open) => !open)}
+                aria-label="Toggle search"
+                className="flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-all duration-200 hover:-translate-y-0.5 hover:text-violet-600 active:scale-95 md:hidden"
+              >
+                <Search className="h-4 w-4" />
+              </button>
+
+              {/* Calendar */}
+              <button
+                type="button"
+                onClick={() => goTo("/calendar")}
+                aria-label="Open calendar"
+                className="flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-all duration-200 hover:-translate-y-0.5 hover:text-violet-600 active:scale-95"
+              >
+                <CalendarDays className="h-4 w-4" />
+              </button>
+
+              {/* New meeting */}
+              <button
+                type="button"
+                onClick={openCreatePanel}
+                className="group inline-flex h-11 cursor-pointer items-center gap-2 rounded-full bg-slate-900 px-5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
+              >
+                <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
+                New Meeting
+                <kbd className="hidden rounded-md bg-white/15 px-1.5 py-0.5 text-[10px] font-bold sm:inline">N</kbd>
+              </button>
+            </div>
+          </div>
+
+          {/* Mobile search bar */}
+          {mobileSearchOpen && (
+            <div className="anim-fade-in border-b border-slate-100 bg-white px-4 py-3 md:hidden">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search meetings, officers..."
+                  className="h-11 w-full rounded-full border border-slate-200 bg-slate-50/80 pl-11 pr-9 text-sm text-slate-900 placeholder-slate-400 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch("")}
+                    aria-label="Clear search"
+                    className="absolute right-3.5 top-1/2 -translate-y-1/2 cursor-pointer rounded-full p-1 text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 active:scale-90"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── Content ── */}
+          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+            {/* Error banner */}
+            {error && (
+              <div className="anim-fade-up flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 shadow-sm">
+                <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="flex-1">
+                  <p className="font-semibold">Couldn&apos;t load dashboard data</p>
+                  <p className="mt-0.5 text-xs text-rose-600">{error}</p>
                 </div>
                 <button
                   type="button"
-                  onClick={openCreatePanel}
-                  className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all hover:-translate-y-0.5 hover:bg-slate-800"
+                  onClick={() => handleRefresh()}
+                  className="cursor-pointer rounded-full border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 active:scale-95"
                 >
-                  <Plus className="h-4 w-4" />
-                  New Meeting
+                  {isRefreshing ? "Retrying…" : "Retry"}
                 </button>
               </div>
+            )}
 
-              {/* KPI cards */}
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <StatCard
-                  accent="blue"
-                  icon={<Briefcase className="h-5 w-5" />}
-                  label="Total Meetings"
-                  value={dashboardStats.totalMeetings}
-                  sub={`${dashboardStats.completionRate}% completion rate`}
-                  loading={loadingMeetings}
-                  onClick={() => goTo("/meetings")}
-                />
-                <StatCard
-                  accent="violet"
-                  icon={<CalendarDays className="h-5 w-5" />}
-                  label="Scheduled"
-                  value={dashboardStats.scheduled}
-                  sub={`${dashboardStats.rescheduled} rescheduled`}
-                  loading={loadingMeetings}
-                  onClick={() => goTo("/meetings")}
-                />
-                <StatCard
-                  accent="emerald"
-                  icon={<CheckCircle2 className="h-5 w-5" />}
-                  label="Completed"
-                  value={dashboardStats.completed}
-                  sub={`${upcomingMeetings.length} upcoming`}
-                  loading={loadingMeetings}
-                  onClick={() => goTo("/meetings")}
-                />
-                <StatCard
-                  accent="rose"
-                  icon={<XCircle className="h-5 w-5" />}
-                  label="Cancelled"
-                  value={dashboardStats.cancelled}
-                  sub={`${dashboardStats.totalMeetings} total meetings`}
-                  loading={loadingMeetings}
-                  onClick={() => goTo("/meetings")}
-                />
-              </div>
+            {/* ── KPI cards ── */}
+            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <StatCard
+                icon={<Users className="h-5 w-5" />}
+                label="Total Meetings"
+                value={stats.totalMeetings}
+                sub={`${stats.scheduled} scheduled`}
+                accent="blue"
+                loading={loadingMeetings}
+                onClick={() => goTo("/meetings")}
+                delay={120}
+              />
 
-              {/* Main grid */}
-              <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
+              <StatCard
+                icon={<Briefcase className="h-5 w-5" />}
+                label="IAS Officers"
+                value={iasCount}
+                sub="Administrative service"
+                accent="violet"
+                loading={loadingOfficers}
+                onClick={() => goTo("/officers?type=ias")}
+                delay={190}
+              />
 
-                {/* ── Left column ── */}
-                <div className="space-y-5 xl:col-span-2">
+              <StatCard
+                icon={<ShieldCheck className="h-5 w-5" />}
+                label="IPS Officers"
+                value={ipsCount}
+                sub="Police service"
+                accent="rose"
+                loading={loadingOfficers}
+                onClick={() => goTo("/officers?type=ips")}
+                delay={260}
+              />
 
-                  {/* Activity chart */}
-                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100 sm:p-6">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <h3 className="text-base font-bold text-slate-900">Meeting Activity</h3>
-                        <p className="mt-0.5 text-xs text-slate-400">
-                          {activityRange === "week" ? "Last 7 days" : "Last 6 months"}
-                        </p>
-                      </div>
+              <StatCard
+                icon={<CheckCircle2 className="h-5 w-5" />}
+                label="Completion Rate"
+                value={`${stats.completionRate}%`}
+                sub={`${stats.completed} completed`}
+                accent="emerald"
+                loading={loadingMeetings}
+                onClick={() => goTo("/reports")}
+                delay={330}
+              />
+            </section>
 
-                      <div className="flex flex-wrap items-center gap-3">
-                        <div className="hidden items-center gap-3 sm:flex">
-                          <LegendDot label="Scheduled" dotClass="bg-violet-500" />
-                          <LegendDot label="Completed" dotClass="bg-emerald-500" />
-                          <LegendDot label="Cancelled" dotClass="bg-slate-300" />
-                        </div>
-
-                        {/* Week / Month pill toggle */}
-                        <div className="flex items-center rounded-full bg-slate-100 p-1">
-                          <button
-                            type="button"
-                            onClick={() => setActivityRange("week")}
-                            aria-pressed={activityRange === "week"}
-                            className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all duration-200 ${
-                              activityRange === "week"
-                                ? "bg-slate-900 text-white shadow-sm"
-                                : "text-slate-500 hover:text-slate-800"
-                            }`}
-                          >
-                            Week
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setActivityRange("month")}
-                            aria-pressed={activityRange === "month"}
-                            className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all duration-200 ${
-                              activityRange === "month"
-                                ? "bg-slate-900 text-white shadow-sm"
-                                : "text-slate-500 hover:text-slate-800"
-                            }`}
-                          >
-                            Month
-                          </button>
-                        </div>
-                      </div>
+            {/* ── Main grid ── */}
+            <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+              {/* Left column */}
+              <div className="space-y-6 xl:col-span-2">
+                {/* Upcoming meetings */}
+                <section
+                  className="anim-fade-up overflow-hidden rounded-3xl border border-violet-100 bg-white shadow-sm"
+                  style={{ animationDelay: "220ms" }}
+                >
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+                    <div>
+                      <h2 className="text-base font-bold text-slate-900">Upcoming Meetings</h2>
+                      <p className="mt-0.5 text-xs text-slate-500">
+                        Next scheduled meetings across all officers
+                      </p>
                     </div>
+                    <span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-bold tabular-nums text-violet-700">
+                      {filteredUpcomingMeetings.length}
+                    </span>
+                  </div>
 
-                    <div className="mt-6">
-                      {loadingMeetings ? (
-                        <ChartSkeleton />
-                      ) : activityTotals.total === 0 ? (
-                        <ActivityEmpty range={activityRange} />
-                      ) : (
-                        <ActivityChart data={activityData} range={activityRange} />
-                      )}
-                    </div>
+                  <div className="p-5">
+                    {loadingMeetings ? (
+                      <LoadingRows count={4} />
+                    ) : filteredUpcomingMeetings.length === 0 ? (
+                      <EmptyMeetings
+                        isFiltered={search.trim().length > 0}
+                        onClearSearch={() => setSearch("")}
+                        onCreate={openCreatePanel}
+                      />
+                    ) : (
+                      <ul className="space-y-3">
+                        {paginatedUpcomingMeetings.map((meeting, index) => (
+                          <UpcomingMeetingRow
+                            key={meeting.id}
+                            meeting={meeting}
+                            onOpen={openMeetingDetails}
+                            index={index}
+                          />
+                        ))}
+                      </ul>
+                    )}
+                  </div>
 
-                    <div className="mt-6 grid grid-cols-2 gap-3 border-t border-slate-100 pt-4 sm:grid-cols-4">
-                      <SummaryStat label="Total meetings" value={activityTotals.total} />
-                      <SummaryStat label="Scheduled" value={activityTotals.scheduled} />
-                      <SummaryStat label="Completed" value={activityTotals.completed} />
-                      <SummaryStat label="Cancelled" value={activityTotals.cancelled} />
-                    </div>
-                  </section>
-
-                  {/* Upcoming meetings */}
-                  <section className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-100">
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-6">
-                      <div className="flex items-center gap-2.5">
-                        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
-                          <CalendarDays className="h-4 w-4" />
-                        </span>
-                        <div>
-                          <h3 className="text-sm font-bold text-slate-900">Upcoming Meetings</h3>
-                          <p className="text-[11px] text-slate-400">
-                            {filteredUpcomingMeetings.length} scheduled ahead
-                          </p>
-                        </div>
-                      </div>
-
-                      {search.trim() && (
-                        <button
-                          type="button"
-                          onClick={() => setSearch("")}
-                          className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition-colors hover:bg-slate-200"
-                        >
-                          <X className="h-3 w-3" />
-                          Clear search
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="p-4 sm:p-5">
-                      {loadingMeetings ? (
-                        <LoadingRows count={4} />
-                      ) : paginatedUpcomingMeetings.length > 0 ? (
-                        <ul className="space-y-2.5">
-                          {paginatedUpcomingMeetings.map((meeting) => (
-                            <UpcomingMeetingRow
-                              key={meeting.id}
-                              meeting={meeting}
-                              onOpen={openMeetingDetails}
-                            />
-                          ))}
-                        </ul>
-                      ) : (
-                        <EmptyMeetings
-                          isFiltered={search.trim().length > 0}
-                          onClearSearch={() => setSearch("")}
-                          onCreate={openCreatePanel}
-                        />
-                      )}
-                    </div>
-
+                  {!loadingMeetings && filteredUpcomingMeetings.length > 0 && (
                     <UpcomingPagination
-                      currentPage={upcomingCurrentPage}
+                      currentPage={safeUpcomingPage}
                       totalPages={upcomingTotalPages}
                       totalItems={filteredUpcomingMeetings.length}
                       rangeStart={upcomingRangeStart}
                       rangeEnd={upcomingRangeEnd}
                       onPageChange={setUpcomingPage}
                     />
-                  </section>
-                </div>
+                  )}
+                </section>
 
-                {/* ── Right column ── */}
-                <div className="space-y-5">
-
-                  {/* Officers */}
-                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
-                    <h3 className="flex items-center gap-2.5 text-sm font-bold text-slate-900">
-                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
-                        <Users className="h-4 w-4" />
-                      </span>
-                      Officers
-                    </h3>
-
-                    <div className="mt-4 space-y-3">
-                      <button
-                        type="button"
-                        onClick={() => goTo("/officers/ias")}
-                        className="group flex w-full items-center gap-3.5 rounded-2xl bg-violet-50/80 p-4 text-left ring-1 ring-violet-100 transition-all hover:-translate-y-0.5 hover:ring-violet-200"
-                      >
-                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-600 text-[11px] font-extrabold tracking-wide text-white shadow-sm">
-                          IAS
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          {loadingOfficers ? (
-                            <div className="h-7 w-12 animate-pulse rounded-lg bg-violet-100" />
-                          ) : (
-                            <p className="text-2xl font-extrabold leading-none text-slate-900">{iasCount}</p>
-                          )}
-                          <p className="mt-1 text-xs font-medium text-slate-500">IAS Officers</p>
-                        </div>
-                        <ArrowRight className="h-4 w-4 shrink-0 text-violet-300 transition-all group-hover:translate-x-0.5 group-hover:text-violet-600" />
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => goTo("/officers/ips")}
-                        className="group flex w-full items-center gap-3.5 rounded-2xl bg-sky-50/80 p-4 text-left ring-1 ring-sky-100 transition-all hover:-translate-y-0.5 hover:ring-sky-200"
-                      >
-                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-600 text-[11px] font-extrabold tracking-wide text-white shadow-sm">
-                          IPS
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          {loadingOfficers ? (
-                            <div className="h-7 w-12 animate-pulse rounded-lg bg-sky-100" />
-                          ) : (
-                            <p className="text-2xl font-extrabold leading-none text-slate-900">{ipsCount}</p>
-                          )}
-                          <p className="mt-1 text-xs font-medium text-slate-500">IPS Officers</p>
-                        </div>
-                        <ArrowRight className="h-4 w-4 shrink-0 text-sky-300 transition-all group-hover:translate-x-0.5 group-hover:text-sky-600" />
-                      </button>
+                {/* Activity chart */}
+                <section
+                  className="anim-fade-up rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
+                  style={{ animationDelay: "300ms" }}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-base font-bold text-slate-900">Meeting Activity</h2>
+                      <p className="mt-0.5 text-xs text-slate-500">
+                        {activityRange === "week" ? "Last 7 days" : "Last 6 months"}
+                      </p>
                     </div>
-                  </section>
-
-                  {/* Status breakdown */}
-                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
-                    <h3 className="flex items-center gap-2.5 text-sm font-bold text-slate-900">
-                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
-                        <BarChart3 className="h-4 w-4" />
-                      </span>
-                      Meetings by Status
-                    </h3>
-
-                    <div className="mt-4 space-y-1">
-                      <StatusRow
-                        icon={<CalendarDays className="h-4 w-4" />}
-                        iconClass="bg-violet-50 text-violet-600"
-                        label="Scheduled"
-                        value={dashboardStats.scheduled}
-                        total={dashboardStats.totalMeetings}
-                        loading={loadingMeetings}
-                      />
-                      <StatusRow
-                        icon={<CheckCircle2 className="h-4 w-4" />}
-                        iconClass="bg-emerald-50 text-emerald-600"
-                        label="Completed"
-                        value={dashboardStats.completed}
-                        total={dashboardStats.totalMeetings}
-                        loading={loadingMeetings}
-                      />
-                      <StatusRow
-                        icon={<RefreshCw className="h-4 w-4" />}
-                        iconClass="bg-amber-50 text-amber-600"
-                        label="Rescheduled"
-                        value={dashboardStats.rescheduled}
-                        total={dashboardStats.totalMeetings}
-                        loading={loadingMeetings}
-                      />
-                      <StatusRow
-                        icon={<XCircle className="h-4 w-4" />}
-                        iconClass="bg-rose-50 text-rose-600"
-                        label="Cancelled"
-                        value={dashboardStats.cancelled}
-                        total={dashboardStats.totalMeetings}
-                        loading={loadingMeetings}
-                      />
+                    <div className="flex items-center gap-1 rounded-full bg-slate-100 p-1">
+                      {(["week", "month"] as ActivityRange[]).map((range) => (
+                        <button
+                          key={range}
+                          type="button"
+                          onClick={() => setActivityRange(range)}
+                          className={`cursor-pointer rounded-full px-3.5 py-1.5 text-xs font-semibold capitalize transition-all duration-200 ${
+                            activityRange === range
+                              ? "bg-white text-slate-900 shadow-sm"
+                              : "text-slate-500 hover:text-slate-700"
+                          }`}
+                        >
+                          {range}
+                        </button>
+                      ))}
                     </div>
-                  </section>
+                  </div>
 
-                  {/* Quick actions */}
-                  <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
-                    <h3 className="flex items-center gap-2.5 text-sm font-bold text-slate-900">
-                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
-                        <TrendingUp className="h-4 w-4" />
-                      </span>
-                      Quick Actions
-                    </h3>
+                  <div className="mt-5">
+                    {loadingMeetings ? (
+                      <ChartSkeleton />
+                    ) : !hasActivity ? (
+                      <ActivityEmpty range={activityRange} />
+                    ) : (
+                      <ActivityChart data={activityData} range={activityRange} />
+                    )}
+                  </div>
 
-                    <div className="mt-4 space-y-2.5">
-                      <QuickActionButton
-                        icon={<Plus className="h-4 w-4" />}
-                        label="Create new meeting"
-                        onClick={openCreatePanel}
-                      />
-                      <QuickActionButton
-                        icon={<CalendarDays className="h-4 w-4" />}
-                        label="View all meetings"
-                        onClick={() => goTo("/meetings")}
-                      />
-                      <QuickActionButton
-                        icon={<Users className="h-4 w-4" />}
-                        label="IAS officers"
-                        onClick={() => goTo("/officers/ias")}
-                      />
-                      <QuickActionButton
-                        icon={<Users className="h-4 w-4" />}
-                        label="IPS officers"
-                        onClick={() => goTo("/officers/ips")}
-                      />
-                    </div>
-                  </section>
-                </div>
+                  {!loadingMeetings && hasActivity && (
+                    <>
+                      <div className="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
+                        <LegendDot label="Scheduled" dotClass="bg-violet-500" />
+                        <LegendDot label="Completed" dotClass="bg-emerald-500" />
+                        <LegendDot label="Cancelled" dotClass="bg-slate-300" />
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <SummaryStat label="Scheduled" value={stats.scheduled} />
+                        <SummaryStat label="Completed" value={stats.completed} />
+                        <SummaryStat label="Cancelled" value={stats.cancelled} />
+                        <SummaryStat label="Total" value={stats.totalMeetings} />
+                      </div>
+                    </>
+                  )}
+                </section>
+              </div>
+
+              {/* Right column */}
+              <div className="space-y-6">
+                {/* Status breakdown */}
+                <section
+                  className="anim-fade-up rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
+                  style={{ animationDelay: "260ms" }}
+                >
+                  <h2 className="text-base font-bold text-slate-900">Status Breakdown</h2>
+                  <p className="mt-0.5 text-xs text-slate-500">All meetings by current status</p>
+
+                  <div className="mt-4 space-y-1">
+                    <StatusRow
+                      icon={<CalendarDays className="h-4 w-4 text-violet-600" />}
+                      iconClass="bg-violet-50"
+                      label="Scheduled"
+                      value={stats.scheduled}
+                      total={stats.totalMeetings}
+                      loading={loadingMeetings}
+                    />
+                    <StatusRow
+                      icon={<CheckCircle2 className="h-4 w-4 text-emerald-600" />}
+                      iconClass="bg-emerald-50"
+                      label="Completed"
+                      value={stats.completed}
+                      total={stats.totalMeetings}
+                      loading={loadingMeetings}
+                    />
+                    <StatusRow
+                      icon={<RefreshCw className="h-4 w-4 text-amber-600" />}
+                      iconClass="bg-amber-50"
+                      label="Rescheduled"
+                      value={stats.rescheduled}
+                      total={stats.totalMeetings}
+                      loading={loadingMeetings}
+                    />
+                    <StatusRow
+                      icon={<XCircle className="h-4 w-4 text-rose-600" />}
+                      iconClass="bg-rose-50"
+                      label="Cancelled"
+                      value={stats.cancelled}
+                      total={stats.totalMeetings}
+                      loading={loadingMeetings}
+                    />
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-3 gap-3 border-t border-slate-100 pt-4">
+                    <SummaryStat label="Total" value={stats.totalMeetings} />
+                    <SummaryStat label="IAS Officers" value={iasCount} />
+                    <SummaryStat label="IPS Officers" value={ipsCount} />
+                  </div>
+                </section>
+
+                {/* Quick actions */}
+                <section
+                  className="anim-fade-up relative z-10 rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
+                  style={{ animationDelay: "340ms" }}
+                >
+                  <h2 className="text-base font-bold text-slate-900">Quick Actions</h2>
+                  <div className="mt-4 space-y-2.5">
+                    <QuickActionButton
+                      icon={<Plus className="h-4 w-4" />}
+                      label="New Meeting"
+                      onClick={openCreatePanel}
+                    />
+                    <QuickActionButton
+                      icon={<Users className="h-4 w-4" />}
+                      label="Officers Directory"
+                      onClick={() => goTo("/officers")}
+                    />
+                    <QuickActionButton
+                      icon={<CalendarDays className="h-4 w-4" />}
+                      label="View Calendar"
+                      onClick={() => goTo("/calendar")}
+                    />
+                    <QuickActionButton
+                      icon={<FileText className="h-4 w-4" />}
+                      label="View Reports"
+                      onClick={() => goTo("/reports")}
+                    />
+                  </div>
+                </section>
               </div>
             </div>
           </div>
         </div>
+      </div>
 
-        {/* ── Create / Edit panel ── */}
-        <CreateMeetingPanel
-          isOpen={panelOpen}
-          onClose={closePanel}
-          onSuccess={handlePanelSuccess}
-          editingMeeting={editingMeeting}
+      {/* ── Meeting details off-canvas ── */}
+      {selectedMeeting && (
+        <MeetingDetailsPanel
+          meeting={selectedMeeting}
+          onClose={closeMeetingDetails}
+          onEdit={openEditFromDetails}
+          onDeleteRequest={() => setShowDeleteConfirm(true)}
+          onUpdateRequest={handleOpenUpdate}
         />
+      )}
 
-        {/* ── Details off-canvas ── */}
-        {selectedMeeting && (
-          <MeetingDetailsPanel
-            meeting={selectedMeeting}
-            onClose={closeMeetingDetails}
-            onEdit={openEditFromDetails}
-            onDeleteRequest={() => setShowDeleteConfirm(true)}
+      {/* ── Update meeting panel (status / reschedule / follow-up / docs) ── */}
+      {updateMeeting && (
+        <InlineUpdateStatusPanel
+          meeting={updateMeeting}
+          onClose={closeUpdatePanel}
+          onSaved={handleUpdateSaved}
+        />
+      )}
+
+      {/* ── Delete confirmation modal ── */}
+      {showDeleteConfirm && selectedMeeting && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="anim-overlay absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            onClick={() => setShowDeleteConfirm(false)}
           />
-        )}
-
-        {/* ── Delete confirmation modal ── */}
-        {showDeleteConfirm && selectedMeeting && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
-            <div
-              className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200"
+          <div className="anim-scale-in relative w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl">
+            <button
+              type="button"
               onClick={() => setShowDeleteConfirm(false)}
-            />
-            <div className="relative w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl animate-in zoom-in-95 duration-200">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-100">
-                <Trash2 className="h-5 w-5 text-rose-600" />
-              </div>
-              <h3 className="mt-4 text-center text-lg font-bold text-slate-900">Delete meeting?</h3>
-              <p className="mt-1.5 text-center text-sm leading-relaxed text-slate-500">
-                &ldquo;{getMeetingTitle(selectedMeeting)}&rdquo; will be permanently removed. This
-                action can&apos;t be undone.
-              </p>
-              <div className="mt-5 flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setShowDeleteConfirm(false)}
-                  className="flex-1 rounded-full border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={confirmDelete}
-                  className="flex-1 rounded-full bg-rose-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-rose-700"
-                >
-                  Delete
-                </button>
-              </div>
+              aria-label="Close"
+              className="absolute right-4 top-4 cursor-pointer rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-rose-50">
+              <XCircle className="h-6 w-6 text-rose-500" />
+            </div>
+            <h3 className="mt-4 text-lg font-bold text-slate-900">Delete this meeting?</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              &quot;{getMeetingTitle(selectedMeeting)}&quot; will be permanently removed. This action
+              cannot be undone.
+            </p>
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                className="flex-1 cursor-pointer rounded-full border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-full bg-rose-600 py-2.5 text-sm font-semibold text-white transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-700 active:scale-[0.98]"
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete
+              </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* ── Create / Edit panel ── */}
+      {panelOpen && (
+        <CreateMeetingPanel
+          key={editingMeeting ? `edit-${editingMeeting.id}` : "create"}
+          isOpen={panelOpen}
+          meetingToEdit={editingMeeting}
+          onClose={closePanel}
+          onSuccess={handlePanelSuccess}
+        />
+      )}
     </ProtectedRoute>
   );
 }

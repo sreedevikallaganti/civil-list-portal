@@ -1,19 +1,44 @@
 'use client';
 
 /* ================================================================
-   CreateMeetingPanel — v7 (UI refresh)
-   PERF: save closes instantly; Google automations run in background
-         (with 12s timeout). Officer directory cached 60s.
-   UI: app-window design language — dark pill CTAs, violet accents,
-       rounded-2xl surfaces. LOGIC IDENTICAL to v6/v4.
+   CreateMeetingPanel — v16
+   NEW (v16):
+     (1) Documents can now be dragged & dropped onto the dropzone,
+         or pasted (Ctrl/Cmd+V) directly — not just picked via the
+         file browser.
+     (2) FIXED a real bug: documents picked in this panel were never
+         actually attached to the record. `syncDocuments()` existed
+         but was never called from `handleSubmit()`. It is now
+         called right after create/update, for BOTH create and edit.
+     (3) Unified the two duplicated (and one invalid-HTML) document
+         blocks into a single reusable <DocumentDropzone /> used in
+         both create and edit mode, with a shimmering progress bar
+         while the upload is in flight.
+     (4) Removed dead code (`handleDeleteMom` referenced an
+         `existingMom` state that was never declared — a leftover
+         from a removed feature — and the immediate-delete
+         `handleDeleteDoc`, superseded by the unified
+         stage-then-save-on-submit flow used everywhere else).
+   v14 (kept): Time & Duration side-by-side; "Follow up" section
+         with optional Status (Scheduled pre-selected) and optional
+         follow-up date, explicitly included in the Google Calendar
+         sync payload.
+   v13 (kept): Meeting workspace removed totally.
+   v12 (kept): Agenda lives in Step 1.
+   v11 (kept): Meeting type first — Internal → employees,
+         External → officers (IAS / IPS / other contacts).
+   KEPT: v8 additional officers, instant save + background
+         automations, officer cache, validation, edit-populate,
+         follow-up rule, all UI language.
 ================================================================ */
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   X, Calendar, CalendarDays, Clock, Timer, MapPin, Check, Search,
-  ChevronDown, ChevronLeft, ChevronRight, Loader2, Users, Mail, Phone, User,
-  Sparkles, ArrowLeft, ArrowRight, AlertCircle, RefreshCw, Building2, Flag,
-  Video, Globe, Plus, Zap, Activity, Feather, Edit2,
+  ChevronLeft, ChevronRight, Loader2, Users, Mail, Phone, User,
+  Sparkles, ArrowLeft, ArrowRight, AlertCircle, Building2, Flag,
+  Video, Globe, Plus, Zap, Activity, Feather, Edit2, Upload, Trash2,
+  FileText,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import { showToast } from '@/components/Toaster';
@@ -32,6 +57,7 @@ const CUSTOM_CSS = `
 .c-panel   { animation:cPanel  .32s cubic-bezier(.22,1,.36,1) both }
 .c-overlay { animation:cFadeIn .2s ease both }
 .c-sk { background:linear-gradient(90deg,#f1effc 25%,#e5e1f5 40%,#f1effc 55%); background-size:200% 100%; animation:cShimmer 1.5s linear infinite }
+.c-progress { background:linear-gradient(90deg,#a78bfa 25%,#7c3aed 40%,#a78bfa 55%); background-size:200% 100%; animation:cShimmer 1.2s linear infinite }
 .nice-scroll::-webkit-scrollbar{width:8px}
 .nice-scroll::-webkit-scrollbar-thumb{background:#e5e1f5;border-radius:999px}
 `;
@@ -57,7 +83,7 @@ interface Officer {
   department?: string; current_position?: string; batch_year?: string;
 }
 
-/* --------------------------- Constants (colors refreshed) --------------------------- */
+/* --------------------------- Constants --------------------------- */
 
 const OFFICER_BADGE: Record<string, { chip: string; avatar: string }> = {
   IAS:   { chip: 'bg-sky-50 text-sky-700 border-sky-200',     avatar: 'bg-sky-100 text-sky-700' },
@@ -77,9 +103,9 @@ const PLACE_OPTIONS = [
 ];
 
 const MEETING_TYPES = [
-  { value: 'Internal', icon: Users, hint: 'Within your team',
+  { value: 'Internal', icon: Users, hint: 'Within your team — pick employees',
     sel: 'bg-violet-50 border-violet-300', txt: 'text-violet-700' },
-  { value: 'External', icon: Globe, hint: 'Outside participants',
+  { value: 'External', icon: Globe, hint: 'Outside participants — pick officers',
     sel: 'bg-sky-50 border-sky-300', txt: 'text-sky-700' },
 ];
 
@@ -90,7 +116,7 @@ const STATUS_FLAGS = [
   { value: 'Rescheduled', dot: 'bg-amber-500' },
 ];
 
-const PRESET_DURATIONS = [15, 30, 45, 60, 90, 120, 180];
+export const PRESET_DURATIONS = [15, 30, 45, 60, 90, 120, 180];
 
 const QUICK_TIME_SLOTS = ['09:30','10:00','11:00','12:00','14:00','15:00','16:30','18:00'];
 const HOUR_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
@@ -107,18 +133,23 @@ const OFFICER_EDIT_FIELDS = [
   { key: 'batch_year', label: 'Batch' },
 ];
 
+/* status/status_flag default to "Scheduled" (auto-selected) */
 const EMPTY_FORM = {
   agenda: '', meeting_date: '', meeting_time: '', duration: '', location: '',
-  status: '', officer_type: '', officer_name: '', officer_id: '', designation: '',
+  status: 'Scheduled', officer_type: '', officer_name: '', officer_id: '', designation: '',
   department: '', officer_category: '', contact_number: '', email: '', address: '',
   website: '', cadre: '', state: '', batch_year: '', current_position: '',
   previous_postings: '', date_of_birth: '', priority: '', meeting_type: '',
-  meeting_place: '', status_flag: '', follow_up_date: '', attendees: '',
-  send_invite: false, sync_gcal: false, add_meet: false,
+  meeting_place: '', status_flag: 'Scheduled', follow_up_date: '', follow_up_notes: '', attendees: '',
+  /* Google integrations + send invite auto-selected for every new meeting */
+  send_invite: true, sync_gcal: true, add_meet: true,
   created_by: '', meet_link: '', gcal_event_id: '', gcal_link: '',
 };
 
-/* --------------------------- Helpers (unchanged) --------------------------- */
+const ACCEPTED_DOCS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg,.webp';
+const MAX_FILE_MB = 10;
+
+/* --------------------------- Helpers --------------------------- */
 
 const toLocalISODate = (d: Date) => {
   const y = d.getFullYear();
@@ -157,13 +188,13 @@ const to24Hour = (h12: string, min: string, ap: string) => {
   return `${String(h).padStart(2, '0')}:${min}`;
 };
 
-const formatDuration = (m: number) => {
+export const formatDuration = (m: number) => {
   if (m < 60) return `${m} min`;
   const h = Math.floor(m / 60), mm = m % 60;
   return mm === 0 ? `${h} hr` : `${h}h ${mm}m`;
 };
 
-const clampInt = (v: string, max: number) => {
+export const clampInt = (v: string, max: number) => {
   if (v === '') return '';
   const n = parseInt(v, 10);
   return isNaN(n) || n < 0 ? '' : String(Math.min(n, max));
@@ -222,9 +253,9 @@ const extractTime = (m: any): string => {
 };
 
 const ERROR_SECTION_IDS: Record<string, string> = {
-  officer: 'cmp-sec-officer', agenda: 'cmp-sec-agenda', date: 'cmp-sec-date',
-  time: 'cmp-sec-time', duration: 'cmp-sec-time', place: 'cmp-sec-place',
-  priority: 'cmp-sec-priority', follow_up: 'cmp-sec-followup',
+  officer: 'cmp-sec-officer', meeting_type: 'cmp-sec-type', agenda: 'cmp-sec-agenda',
+  date: 'cmp-sec-date', time: 'cmp-sec-time', duration: 'cmp-sec-time',
+  place: 'cmp-sec-place', priority: 'cmp-sec-priority', follow_up: 'cmp-sec-followup',
 };
 
 const initialsOf = (name: string) =>
@@ -253,6 +284,11 @@ async function postJSON(url: string, body: any, timeoutMs = 12_000) {
   }
 }
 
+const parseJsonField = (v: any, fallback: any) => {
+  if (!v) return fallback;
+  try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return fallback; }
+};
+
 /* --------------------------- Small pieces --------------------------- */
 
 function FieldError({ message }: { message?: string }) {
@@ -264,21 +300,25 @@ function FieldError({ message }: { message?: string }) {
   );
 }
 
-function SectionHead({ icon: Icon, title, sub, required, optional }: {
-  icon: any; title: string; sub?: string; required?: boolean; optional?: boolean;
+function SectionHead({ icon: Icon, title, sub, required, optional, size = 'md' }: {
+  icon: any; title: string; sub?: string; required?: boolean; optional?: boolean; size?: 'md' | 'lg';
 }) {
+  const iconBoxCls = size === 'lg' ? 'h-8 w-8' : 'h-7 w-7';
+  const iconCls = size === 'lg' ? 'h-4 w-4' : 'h-3.5 w-3.5';
+  const titleCls = size === 'lg' ? 'text-[15px]' : 'text-[13px]';
+  const subCls = size === 'lg' ? 'text-xs' : 'text-[11px]';
   return (
     <div className="mb-2.5 flex items-center gap-2.5">
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-600">
-        <Icon className="h-3.5 w-3.5" />
+      <span className={`flex ${iconBoxCls} shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-600`}>
+        <Icon className={iconCls} />
       </span>
       <div>
-        <p className="text-[13px] font-semibold text-slate-800">
+        <p className={`${titleCls} font-semibold text-slate-800`}>
           {title}
           {required && <span className="ml-0.5 text-rose-500">*</span>}
           {optional && <span className="ml-1.5 text-[11px] font-normal text-slate-400">Optional</span>}
         </p>
-        {sub && <p className="text-[11px] text-slate-400">{sub}</p>}
+        {sub && <p className={`${subCls} text-slate-400`}>{sub}</p>}
       </div>
     </div>
   );
@@ -321,15 +361,128 @@ function ToggleRow({ icon: Icon, title, description, checked, onChange }: {
 
 function Pill({ children }: { children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-slate-600">
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold tabular-nums text-slate-600">
       {children}
     </span>
   );
 }
 
-/* ----------------------------- WeekStrip ----------------------------- */
+/* ------------------------- DocumentDropzone ------------------------- */
+/* v16: unified drag-and-drop + paste + click-to-browse dropzone, used
+   for both create and edit mode. Files are staged locally and only
+   uploaded when the parent calls syncDocuments() (on Save). */
 
-function WeekStrip({ value, onChange, markedDates = [] }: {
+function DocumentDropzone({
+  existingDocs, pendingDocs, onPick, onRemoveExisting, onRemovePending,
+  fileUrl, uploading, accept, maxMB,
+}: {
+  existingDocs: string[];
+  pendingDocs: File[];
+  onPick: (files: FileList | null) => void;
+  onRemoveExisting: (name: string) => void;
+  onRemovePending: (idx: number) => void;
+  fileUrl: (name: string) => string;
+  uploading?: boolean;
+  accept: string;
+  maxMB: number;
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    onPick(e.dataTransfer.files);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const files = Array.from(e.clipboardData?.items || [])
+      .filter((i) => i.kind === 'file')
+      .map((i) => i.getAsFile())
+      .filter((f): f is File => !!f);
+    if (!files.length) return;
+    const dt = new DataTransfer();
+    files.forEach((f) => dt.items.add(f));
+    onPick(dt.files);
+  };
+
+  return (
+    <div className="pt-1" onPaste={handlePaste}>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept={accept}
+        className="hidden"
+        onChange={(e) => onPick(e.target.files)}
+      />
+      <button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragEnter={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        className={`flex w-full flex-col items-center justify-center gap-1.5 rounded-2xl border-2 border-dashed px-3 py-5 text-[13px] font-semibold transition-all duration-150 ${
+          dragOver
+            ? 'scale-[1.01] border-violet-400 bg-violet-50/80 text-violet-700'
+            : 'border-slate-200 bg-slate-50/50 text-slate-600 hover:border-violet-300 hover:bg-violet-50/50 hover:text-violet-700'
+        }`}
+      >
+        <Upload className={`h-4 w-4 ${dragOver ? 'animate-bounce' : ''}`} />
+        {dragOver ? 'Drop to attach' : 'Attach documents'}
+        <span className="text-[11px] font-normal text-slate-400">
+          Drag &amp; drop, paste, or click · PDF, Word, Excel, images · max {maxMB} MB each
+        </span>
+      </button>
+
+      {uploading && (
+        <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-100">
+          <div className="c-progress h-full w-1/3 rounded-full" />
+        </div>
+      )}
+
+      {existingDocs.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {existingDocs.map((name) => {
+            const url = fileUrl(name);
+            return (
+              <span key={name} className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-white py-1 pl-2.5 pr-1 text-[11px] font-medium text-slate-600">
+                <FileText className="h-3 w-3 shrink-0 text-violet-500" />
+                {url ? (
+                  <a href={url} target="_blank" rel="noreferrer" className="max-w-[140px] truncate hover:text-violet-600 hover:underline">{name}</a>
+                ) : (
+                  <span className="max-w-[140px] truncate">{name}</span>
+                )}
+                <button type="button" onClick={() => onRemoveExisting(name)} className="rounded-full p-0.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500">
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {pendingDocs.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {pendingDocs.map((f, i) => (
+            <span key={`${f.name}-${i}`} className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 py-1 pl-2.5 pr-1 text-[11px] font-medium text-violet-700">
+              <FileText className="h-3 w-3 shrink-0" />
+              <span className="max-w-[140px] truncate">{f.name}</span>
+              <button type="button" onClick={() => onRemovePending(i)} className="rounded-full p-0.5 text-violet-400 transition-colors hover:bg-violet-100 hover:text-rose-500">
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------- WeekStrip ------------------------------- */
+
+export function WeekStrip({ value, onChange, markedDates = [] }: {
   value: string; onChange: (v: string) => void; markedDates?: string[];
 }) {
   const [mode, setMode] = useState<'week' | 'month'>('week');
@@ -505,9 +658,136 @@ function WeekStrip({ value, onChange, markedDates = [] }: {
   );
 }
 
+/* --------------------------- MiniDatePicker --------------------------- */
+/* Compact popover calendar used for the "Follow up" date — replaces the
+   plain native <input type="date"> so the picker matches the rest of the
+   panel's look instead of the browser's default date UI. */
+
+function MiniDatePicker({ value, onChange, min }: {
+  value: string; onChange: (v: string) => void; min?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [viewDate, setViewDate] = useState<Date>(() => {
+    const seed = value || min;
+    return seed ? new Date(`${seed}T00:00:00`) : new Date();
+  });
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const seed = value || min;
+    if (!seed) return;
+    const d = new Date(`${seed}T00:00:00`);
+    if (!isNaN(d.getTime())) setViewDate(d);
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const y = viewDate.getFullYear();
+  const mo = viewDate.getMonth();
+  const monthLabel = new Date(y, mo, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const firstDow = (new Date(y, mo, 1).getDay() + 6) % 7;
+  const daysInMonth = new Date(y, mo + 1, 0).getDate();
+  const prevDays = new Date(y, mo, 0).getDate();
+  const cells: { iso: string; day: number; inMonth: boolean }[] = [];
+  for (let i = firstDow - 1; i >= 0; i--) {
+    const d = new Date(y, mo - 1, prevDays - i);
+    cells.push({ iso: toLocalISODate(d), day: d.getDate(), inMonth: false });
+  }
+  for (let day = 1; day <= daysInMonth; day++) {
+    cells.push({ iso: toLocalISODate(new Date(y, mo, day)), day, inMonth: true });
+  }
+  let nd = 1;
+  while (cells.length % 7 !== 0) {
+    const d = new Date(y, mo + 1, nd++);
+    cells.push({ iso: toLocalISODate(d), day: d.getDate(), inMonth: false });
+  }
+
+  const minISO = min || '';
+  const isDisabled = (iso: string) => !!minISO && iso < minISO;
+  const canGoPrevMonth = !minISO || `${y}-${String(mo + 1).padStart(2, '0')}` > minISO.slice(0, 7);
+  const shiftMonth = (delta: number) => {
+    if (delta < 0 && !canGoPrevMonth) return;
+    setViewDate((prev) => new Date(prev.getFullYear(), prev.getMonth() + delta, 1));
+  };
+
+  const navBtn = 'flex h-7 w-7 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-violet-50 hover:text-violet-600 active:scale-90 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-transparent';
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-left text-sm outline-none transition hover:border-slate-300 focus:border-violet-400 focus:ring-4 focus:ring-violet-500/10"
+      >
+        <span className={value ? 'font-medium text-slate-800' : 'text-slate-400'}>
+          {value ? prettyDate(value) : 'Pick a follow-up date'}
+        </span>
+        <CalendarDays className="h-4 w-4 shrink-0 text-violet-500" />
+      </button>
+
+      {open && (
+        <div className="c-fade-in absolute z-10 mt-2 w-full min-w-[260px] rounded-2xl border border-slate-200 bg-white p-3 shadow-xl sm:w-72">
+          <div className="mb-2 flex items-center justify-between">
+            <button type="button" className={navBtn} disabled={!canGoPrevMonth} onClick={() => shiftMonth(-1)}>
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+            <p className="text-xs font-semibold text-slate-800">{monthLabel}</p>
+            <button type="button" className={navBtn} onClick={() => shiftMonth(1)}>
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mb-0.5 grid grid-cols-7">
+            {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d, i) => (
+              <div key={i} className="py-1 text-center text-[10px] font-semibold text-slate-400">{d}</div>
+            ))}
+          </div>
+          <div className="grid grid-cols-7 gap-y-0.5">
+            {cells.map((c) => {
+              const selected = c.iso === value;
+              const disabled = isDisabled(c.iso);
+              return (
+                <button
+                  key={c.iso} type="button"
+                  disabled={disabled}
+                  onClick={() => { onChange(c.iso); setOpen(false); }}
+                  className={`relative flex h-8 w-full items-center justify-center rounded-xl text-xs font-semibold transition-all active:scale-90 ${
+                    selected ? 'bg-violet-600 text-white shadow-md shadow-violet-500/25'
+                    : disabled ? 'cursor-not-allowed text-slate-300'
+                    : c.inMonth ? 'text-slate-700 hover:bg-violet-50'
+                    : 'text-slate-300'
+                  }`}
+                >
+                  {c.day}
+                </button>
+              );
+            })}
+          </div>
+          {value && (
+            <button
+              type="button"
+              onClick={() => { onChange(''); setOpen(false); }}
+              className="mt-2 w-full rounded-xl border border-slate-200 py-1.5 text-[11px] font-semibold text-slate-500 transition hover:border-rose-300 hover:text-rose-600"
+            >
+              Clear date
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* --------------------------- TimeSlotPicker --------------------------- */
 
-function TimeSlotPicker({ value, onChange, meetingDate }: {
+export function TimeSlotPicker({ value, onChange, meetingDate }: {
   value: string; onChange: (v: string) => void; meetingDate: string;
 }) {
   const [hour, setHour] = useState(() => splitTo12(value).hour);
@@ -570,7 +850,7 @@ function TimeSlotPicker({ value, onChange, meetingDate }: {
         </div>
       )}
       <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5">
-        <span className="shrink-0 text-[11px] text-slate-400">Different time?</span>
+        <span className="shrink-0 text-[11px] text-slate-400">Other</span>
         <div className="flex items-center rounded-full border border-slate-200 bg-white p-1 transition focus-within:border-violet-400 focus-within:ring-4 focus-within:ring-violet-500/10">
           <select value={hour} onChange={(e) => pickHour(e.target.value)} aria-label="Hour" className={selectCls}>
             <option value="">HH</option>
@@ -622,7 +902,24 @@ export default function CreateMeetingPanel({
   const [selectedOfficer, setSelectedOfficer] = useState<Officer | null>(null);
   const [showOfficerEdit, setShowOfficerEdit] = useState(false);
 
+  /* employees pool for Internal meetings */
+  const [employees, setEmployees] = useState<Officer[]>([]);
+  const [employeeLoading, setEmployeeLoading] = useState(false);
+
+  /* additional officers (More details) */
+  const [extraOfficers, setExtraOfficers] = useState<Officer[]>([]);
+  const [extraSearch, setExtraSearch] = useState('');
+
   const [showMoreDetails, setShowMoreDetails] = useState(false);
+
+  /* documents — attach BEFORE saving:
+     pendingDocs  → files picked/dropped/pasted before save (create + edit)
+     existingDocs → files already on the record (edit mode only)      */
+  const [existingDocs, setExistingDocs] = useState<string[]>([]);
+  const [pendingDocs, setPendingDocs] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const initialDocsRef = useRef<string[]>([]);
+
   const [attendeeInput, setAttendeeInput] = useState('');
   const [attendeeList, setAttendeeList] = useState<string[]>([]);
 
@@ -637,22 +934,22 @@ export default function CreateMeetingPanel({
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-const isEditMode = !!editSource;
-const editingId: string | null = editSource?.id ?? null;
+  const isEditMode = !!editSource;
+  const editingId: string | null = editSource?.id ?? null;
 
   const inputCls = 'w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-violet-400 focus:ring-4 focus:ring-violet-500/10';
   const inputErr = 'border-rose-300 focus:border-rose-400 focus:ring-rose-500/10';
 
   const miniNumCls = 'w-14 rounded-xl border border-slate-200 bg-white px-2 py-1.5 text-center text-sm font-semibold tabular-nums text-slate-800 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-500/10';
 
-const dateMarks = useMemo(() => {
-  const s = new Set<string>(markedDates ?? []);
-  if (editSource?.meeting_date) {
-    const iso = String(editSource.meeting_date).slice(0, 10);
-    if (iso) s.add(iso);
-  }
-  return Array.from(s);
-}, [markedDates, editSource]);
+  const dateMarks = useMemo(() => {
+    const s = new Set<string>(markedDates ?? []);
+    if (editSource?.meeting_date) {
+      const iso = String(editSource.meeting_date).slice(0, 10);
+      if (iso) s.add(iso);
+    }
+    return Array.from(s);
+  }, [markedDates, editSource]);
 
   const stepRef = useRef<1 | 2>(1);
   const savingRef = useRef(false);
@@ -661,7 +958,7 @@ const dateMarks = useMemo(() => {
 
   const goStep = (s: 1 | 2) => { stepRef.current = s; setStep(s); };
 
-  /* ---------------- data loading (with cache) — unchanged ---------------- */
+  /* ---------------- data loading (with cache) ---------------- */
 
   async function fetchOfficers() {
     if (officerCache && Date.now() - officerCache.ts < OFFICER_CACHE_TTL) {
@@ -702,26 +999,72 @@ const dateMarks = useMemo(() => {
     }
   }
 
-  /* ---------------- lifecycle — unchanged ---------------- */
-
-useEffect(() => {
-  if (!isOpen) { lastLoadedKeyRef.current = null; return; }
-  const stamp = editSource?.updated ?? '';
-  const key = editingId ? `edit:${editingId}:${stamp}` : `create:${resolvedDefaultDate ?? ''}`;
-  if (lastLoadedKeyRef.current === key) return;
-
-  if (editingId) populateForEdit(editSource);
-  else {
-    resetForm();
-    if (resolvedDefaultDate && !isPastISODate(resolvedDefaultDate)) {
-      setFormData((prev) => ({ ...prev, meeting_date: resolvedDefaultDate }));
+  /* employees loader — same shape as Officer so all existing
+     list/card code works unchanged. */
+  async function fetchEmployees() {
+    setEmployeeLoading(true);
+    try {
+      const rows = await pb.collection('employees').getFullList({ sort: 'name' });
+      setEmployees(rows.map((e: any) => ({
+        id: e.id,
+        name: e.name || '',
+        designation: e.designation || e.current_position || '',
+        type: 'Other' as const, /* keeps officer_type values record-safe */
+        department: e.department || '',
+        contact_number: e.contact_number || e.phone || '',
+        email: e.email || '',
+        cadre: '',
+        state: '',
+        current_position: e.current_position || e.designation || '',
+        batch_year: '',
+      })));
+    } catch (error) {
+      console.error('Failed to load employees:', error);
+    } finally {
+      setEmployeeLoading(false);
     }
   }
-  lastLoadedKeyRef.current = key;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [isOpen, editingId, editSource, resolvedDefaultDate]);
 
-  useEffect(() => { if (isOpen) fetchOfficers(); }, [isOpen]);
+  /* ---------------- lifecycle ---------------- */
+
+  useEffect(() => {
+    if (!isOpen) { lastLoadedKeyRef.current = null; return; }
+    const stamp = editSource?.updated ?? '';
+    const key = editingId ? `edit:${editingId}:${stamp}` : `create:${resolvedDefaultDate ?? ''}`;
+    if (lastLoadedKeyRef.current === key) return;
+
+    if (editingId) populateForEdit(editSource);
+    else {
+      resetForm();
+      if (resolvedDefaultDate && !isPastISODate(resolvedDefaultDate)) {
+        setFormData((prev) => ({ ...prev, meeting_date: resolvedDefaultDate }));
+      }
+    }
+    lastLoadedKeyRef.current = key;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editingId, editSource, resolvedDefaultDate]);
+
+  /* load both pools when the panel opens */
+  useEffect(() => { if (isOpen) { fetchOfficers(); fetchEmployees(); } }, [isOpen]);
+
+  /* on edit, attendee emails matching the directory (officers +
+     employees) become extra participants */
+  useEffect(() => {
+    if ((!officers.length && !employees.length) || !editingId) return;
+    setExtraOfficers((prev) => {
+      if (prev.length) return prev;
+      const pool = [...officers, ...employees];
+      const emails = new Set(attendeeList.map((a) => a.trim().toLowerCase()).filter(Boolean));
+      const matches = pool.filter((o) => o.email && emails.has(o.email.toLowerCase()));
+      if (!matches.length) return prev;
+      setAttendeeList((list) =>
+        list.filter((a) => !matches.some((m) => m.email.toLowerCase() === a.trim().toLowerCase()))
+      );
+      setShowMoreDetails(true);
+      return matches;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [officers, employees, editingId]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -743,7 +1086,7 @@ useEffect(() => {
     return () => { document.body.style.overflow = original; };
   }, [isOpen]);
 
-  /* ---------------- edit / reset — unchanged ---------------- */
+  /* ---------------- edit / reset ---------------- */
 
   const syncDurationUI = (durationValue: string) => {
     const n = Number(durationValue);
@@ -778,6 +1121,7 @@ useEffect(() => {
     const priorityOpts = PRIORITIES.map((p) => p.value);
     const placeOpts = PLACE_OPTIONS.map((p) => p.value);
     const typeOpts = MEETING_TYPES.map((t) => t.value);
+    /* empty status falls back to "Scheduled" (auto-selected) */
     const normalizedStatus = matchOption(m.status_flag || m.status, statusOpts) || 'Scheduled';
 
     setFormData({
@@ -809,6 +1153,7 @@ useEffect(() => {
       meeting_place: matchOption(m.meeting_place, placeOpts),
       status_flag: normalizedStatus,
       follow_up_date: followUpRaw,
+      follow_up_notes: m.follow_up_notes || '',
       send_invite: Boolean(m.send_invite),
       sync_gcal: Boolean(m.sync_gcal),
       add_meet: Boolean(m.add_meet),
@@ -834,12 +1179,20 @@ useEffect(() => {
     } else {
       setSelectedOfficer(null);
     }
+    setExtraOfficers([]);
+    setExtraSearch('');
     setShowOfficerEdit(false);
     setShowMoreDetails(Boolean(
-      m.meeting_type || m.status_flag || attendeesArr.length ||
-      m.follow_up_date || m.followup_date ||
+      m.attendees || m.follow_up_date || m.followup_date || m.follow_up_notes ||
       m.meet_link || m.gcal_link || m.send_invite || m.sync_gcal || m.add_meet,
     ));
+
+    /* documents — existing files (edit mode) */
+    const loadedDocs = parseJsonField(m.documents, []);
+    setExistingDocs(loadedDocs);
+    initialDocsRef.current = loadedDocs;
+    setPendingDocs([]);
+
     setErrors({});
     setSubmitError(null);
     goStep(1);
@@ -851,6 +1204,8 @@ useEffect(() => {
     setFormData(EMPTY_FORM);
     loadedFollowUpRef.current = '';
     setSelectedOfficer(null);
+    setExtraOfficers([]);
+    setExtraSearch('');
     setOfficerSearch('');
     setTypeFilter('All');
     setAttendeeList([]);
@@ -861,14 +1216,26 @@ useEffect(() => {
     setErrors({});
     setSubmitError(null);
     goStep(1);
+    /* documents */
+    setExistingDocs([]); setPendingDocs([]); initialDocsRef.current = [];
   }
 
-  /* ---------------- derived — unchanged ---------------- */
+  /* ---------------- derived ---------------- */
 
-  const filteredOfficers = useMemo(() => {
+  const isInternal = formData.meeting_type === 'Internal';
+  const isExternal = formData.meeting_type === 'External';
+
+  /* v17: switching Internal <-> External used to feel slow because the
+     full (unfiltered) directory list was rendered to the DOM on every
+     switch. Filtering itself is unaffected — search still runs over the
+     entire pool — only the default (no-search) view is capped, which
+     keeps the switch instant regardless of directory size. */
+  const LIST_CAP = 40;
+  const filteredOfficersAll = useMemo(() => {
+    const pool = isInternal ? employees : officers;
     const q = officerSearch.trim().toLowerCase();
-    return officers.filter((o) => {
-      if (typeFilter !== 'All' && o.type !== typeFilter) return false;
+    return pool.filter((o) => {
+      if (isExternal && typeFilter !== 'All' && o.type !== typeFilter) return false;
       if (!q) return true;
       return (
         o.name?.toLowerCase().includes(q) ||
@@ -878,9 +1245,30 @@ useEffect(() => {
         o.state?.toLowerCase().includes(q)
       );
     });
-  }, [officers, officerSearch, typeFilter]);
+  }, [officers, employees, officerSearch, typeFilter, isInternal, isExternal]);
 
-  const todayISO = toLocalISODate(new Date());
+  const officerSearchActive = !!officerSearch.trim();
+  const filteredOfficers = officerSearchActive ? filteredOfficersAll : filteredOfficersAll.slice(0, LIST_CAP);
+  const officersTruncated = !officerSearchActive && filteredOfficersAll.length > LIST_CAP;
+
+  const extraCandidates = useMemo(() => {
+    const q = extraSearch.trim().toLowerCase();
+    if (!q) return [];
+    const pool = isInternal ? employees : officers;
+    const taken = new Set([selectedOfficer?.id, ...extraOfficers.map((o) => o.id)]);
+    return pool
+      .filter((o) => !taken.has(o.id))
+      .filter((o) =>
+        o.name?.toLowerCase().includes(q) ||
+        o.designation?.toLowerCase().includes(q) ||
+        o.department?.toLowerCase().includes(q) ||
+        o.cadre?.toLowerCase().includes(q)
+      )
+      .slice(0, 8);
+  }, [officers, employees, extraSearch, extraOfficers, selectedOfficer, isInternal]);
+
+  const participantLoading = isInternal ? employeeLoading : officerLoading;
+
   const followUpMin = toLocalISODate(addDays(new Date(), 1));
 
   const customTotal = (parseInt(customHours, 10) || 0) * 60 + (parseInt(customMinutes, 10) || 0);
@@ -892,7 +1280,24 @@ useEffect(() => {
     ? `${to12Hour(formData.meeting_time)} – ${to12Hour(endTime)}` : '';
   const crossesMidnight = !!(formData.meeting_time && endTime && endTime < formData.meeting_time);
 
-  /* ---------------- handlers — unchanged ---------------- */
+  /* ---------------- handlers ---------------- */
+
+  const handleMeetingTypeChange = (v: string) => {
+    if (formData.meeting_type === v) return;
+    setSelectedOfficer(null);
+    setShowOfficerEdit(false);
+    setExtraOfficers([]);
+    setOfficerSearch('');
+    setTypeFilter('All');
+    setFormData((prev) => ({
+      ...prev,
+      meeting_type: v,
+      officer_name: '', officer_id: '', officer_type: '', designation: '',
+      contact_number: '', email: '', department: '', current_position: '',
+      batch_year: '', cadre: '', state: '',
+    }));
+    setErrors((p) => ({ ...p, officer: '', meeting_type: '' }));
+  };
 
   const handleSelectOfficer = (officer: Officer) => {
     setSelectedOfficer(officer);
@@ -909,6 +1314,13 @@ useEffect(() => {
     if (errors.officer) setErrors((p) => ({ ...p, officer: '' }));
   };
 
+  const startManualOfficer = () => {
+    setSelectedOfficer({ id: '', name: '', type: 'Other' });
+    setFormData((prev) => ({ ...prev, officer_name: '', officer_id: '', officer_type: 'Other' }));
+    setShowOfficerEdit(true);
+    if (errors.officer) setErrors((p) => ({ ...p, officer: '' }));
+  };
+
   const handleClearOfficer = () => {
     setSelectedOfficer(null);
     setShowOfficerEdit(false);
@@ -922,6 +1334,14 @@ useEffect(() => {
     }));
     setTimeout(() => searchRef.current?.focus(), 50);
   };
+
+  const handleAddExtraOfficer = (officer: Officer) => {
+    setExtraOfficers((p) => (p.some((x) => x.id === officer.id) ? p : [...p, officer]));
+    setExtraSearch('');
+  };
+
+  const handleRemoveExtraOfficer = (officer: Officer) =>
+    setExtraOfficers((p) => p.filter((x) => x.id !== officer.id));
 
   const handleOfficerField = (key: string, v: string) =>
     setFormData((prev) => ({ ...prev, [key]: v }));
@@ -1009,131 +1429,262 @@ useEffect(() => {
   const removeAttendee = (a: string) =>
     setAttendeeList((p) => p.filter((x) => x !== a));
 
-  const scrollToFirstError = (errs: Record<string, string>) => {
-    const first = Object.keys(ERROR_SECTION_IDS).find((k) => errs[k]);
-    if (!first) return;
-    if (first === 'follow_up' && !showMoreDetails) setShowMoreDetails(true);
-    requestAnimationFrame(() => {
-      document.getElementById(ERROR_SECTION_IDS[first])
-        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
+  /* documents (Follow up section) */
+  const meetingFileUrl = (filename: string) => {
+    if (!filename || !editingId) return '';
+    try {
+      const stub: any = { collectionName: 'meetings', id: editingId };
+      const anyPb = pb as any;
+if (anyPb.files?.getURL) return anyPb.files.getURL(stub, filename);
+if (anyPb.files?.getUrl) return anyPb.files.getUrl(stub, filename);      
+if (anyPb.getFileUrl) return anyPb.getFileUrl(stub, filename);
+    } catch { /* noop */ }
+    return '';
   };
 
-  const handleContinue = () => {
-    const e: Record<string, string> = {};
-    if (!formData.officer_name.trim()) e.officer = 'Please select who the meeting is with';
-    if (!formData.agenda.trim()) e.agenda = 'Agenda is required';
-    if (Object.keys(e).length) { setErrors(e); scrollToFirstError(e); return; }
-    setErrors({});
-    goStep(2);
-    scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  /* pick documents BEFORE saving (create + edit) — used by both the
+     click-to-browse input and drag/drop/paste inside DocumentDropzone */
+  const handlePickDocs = (files: FileList | null) => {
+    if (!files?.length) return;
+    const list = Array.from(files);
+    const tooBig = list.find((f) => f.size > MAX_FILE_MB * 1024 * 1024);
+    if (tooBig) showToast(`"${tooBig.name}" is larger than ${MAX_FILE_MB} MB`, 'error');
+    const ok = list.filter((f) => f.size <= MAX_FILE_MB * 1024 * 1024);
+    if (ok.length) {
+      setPendingDocs((prev) => {
+        const seen = new Set(prev.map((p) => `${p.name}:${p.size}`));
+        return [...prev, ...ok.filter((f) => !seen.has(`${f.name}:${f.size}`))];
+      });
+    }
   };
 
-  /* ------------- background automations (non-blocking) — unchanged ------------- */
+  const removePendingDoc = (idx: number) =>
+    setPendingDocs((prev) => prev.filter((_, i) => i !== idx));
 
-  function runAutomationsInBackground(record: any) {
-    (async () => {
-      try {
-        const data = await postJSON('/api/google', {
-          meetingId: record.id,
-          gcalEventId: record.gcal_event_id || '',
-          existingMeetLink: record.meet_link || '',
-          agenda: formData.agenda,
-          date: formData.meeting_date,
-          time: formData.meeting_time,
-          duration: durationNum || 30,
-          location: formData.location,
-          officerName: formData.officer_name,
-          officerEmail: formData.email,
-          includeMeet: formData.add_meet,
-          sendInvite: formData.send_invite && !!formData.email,
-          syncCalendar: formData.sync_gcal,
-        });
-        const patch: Record<string, any> = {};
-        if (data.meetLink) patch.meet_link = data.meetLink;
-        if (data.eventId) patch.gcal_event_id = data.eventId;
-        if (data.htmlLink) patch.gcal_link = data.htmlLink;
-        if (Object.keys(patch).length) {
-          await pb.collection('meetings').update(record.id, patch);
-        }
-        showToast('Calendar & automations ready', 'success');
-        onSuccess();
-      } catch (err: any) {
-        const msg = err?.name === 'AbortError'
-          ? 'timed out' : err?.message || 'failed';
-        showToast(`Meeting saved, but automations ${msg}`, 'error');
-      }
-    })();
+  const removeExistingDoc = (name: string) =>
+    setExistingDocs((prev) => prev.filter((n) => n !== name));
+
+  /* PocketBase: re-appending existing filenames KEEPS those files;
+     omitted names get deleted. New File parts get added. */
+  const docsDirty =
+    pendingDocs.length > 0 ||
+    existingDocs.join('||') !== initialDocsRef.current.join('||');
+
+  /* v16 FIX: this used to be defined but never called from
+     handleSubmit(), so attached documents silently vanished. It is
+     now awaited right after create/update below. */
+  async function syncDocuments(recordId: string) {
+    if (!docsDirty || !recordId) return;
+    const fd = new FormData();
+    if (editingId && !existingDocs.length && !pendingDocs.length) {
+      fd.append('documents', '');               // clear all
+    }
+    if (editingId) existingDocs.forEach((n) => fd.append('documents', n)); // keep remaining
+    pendingDocs.forEach((f) => fd.append('documents', f));                 // add new
+    setUploading(true);
+    try {
+      await pb.collection('meetings').update(recordId, fd);
+      setPendingDocs([]);
+      initialDocsRef.current = [...existingDocs];
+    } finally {
+      setUploading(false);
+    }
   }
 
-  /* ---------------- THE save: DB first, instant close — unchanged ---------------- */
+  /* ---------------- validation & submit ---------------- */
 
-  async function saveMeeting() {
+  function scrollToSection(key: string) {
+    const secId = ERROR_SECTION_IDS[key];
+    if (!secId) return;
+    setTimeout(() => {
+      document.getElementById(secId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 60);
+  }
+
+  function handleNext() {
+    const e: Record<string, string> = {};
+    if (!formData.meeting_type) e.meeting_type = 'Please choose Internal or External.';
+    if (!selectedOfficer?.name && !formData.officer_name) e.officer = 'Please choose a participant or add one manually.';
+    if (!formData.agenda.trim()) e.agenda = 'Please enter the agenda.';
+    if (Object.keys(e).length) {
+      setErrors((p) => ({ ...p, ...e }));
+      setSubmitError(null);
+      scrollToSection(Object.keys(e)[0]);
+      return;
+    }
+    setErrors({});
+    setSubmitError(null);
+    goStep(2);
+  }
+
+  /* v18: call /api/google + /api/invite with the field names those routes expect */
+async function runAutomations(recId: string, payload: Record<string, any>) {
+  const failures: string[] = [];
+
+  const isEmail = (e: string) => /^\S+@\S+\.\S+$/.test(e);
+  const primaryEmail = (formData.email || '').trim().toLowerCase();
+  const allEmails = Array.from(new Set(
+    [primaryEmail, ...extraOfficers.map((o) => o.email || ''), ...attendeeList]
+      .map((e) => e.trim().toLowerCase())
+      .filter(isEmail),
+  ));
+
+  let meetLink = formData.meet_link || '';
+  let primaryInvited = false; // true if /api/google already emailed the primary officer
+
+  /* 1) Google Calendar / Meet — runs first so the invite email can carry the Meet link */
+  if (formData.sync_gcal || formData.add_meet) {
+    try {
+      const r = await postJSON('/api/google', {
+        meetingId: recId,
+        agenda: payload.agenda,
+        date: payload.meeting_date,          // route expects `date`
+        time: payload.meeting_time,          // route expects `time` (HH:MM)
+        duration: Number(payload.duration) || 30,
+        location: payload.location,
+        notes: payload.follow_up_date ? `Follow-up date: ${payload.follow_up_date}` : '',
+        officerName: payload.officer_name,
+        officerEmail: primaryEmail || allEmails[0] || '',
+        includeMeet: formData.add_meet,
+        sendInvite: formData.send_invite,
+        syncCalendar: formData.sync_gcal,
+        gcalEventId: formData.gcal_event_id || '',   // update instead of duplicating
+        existingMeetLink: formData.meet_link || '',
+      }, 30_000);
+
+      if (r.meetLink) meetLink = r.meetLink;
+      primaryInvited = !!r.emailSent;
+
+      const update: Record<string, string> = {};
+      if (r.eventId) update.gcal_event_id = r.eventId;
+      if (r.htmlLink) update.gcal_link = r.htmlLink;
+      if (r.meetLink) update.meet_link = r.meetLink;
+      if (Object.keys(update).length) {
+        try { await pb.collection('meetings').update(recId, update); }
+        catch (e) { console.error('Saving Google links failed:', e); }
+      }
+      if (formData.add_meet && !r.meetLink) failures.push('Calendar saved, but no Meet link was created');
+    } catch (err: any) {
+      console.error('/api/google failed:', err);
+      failures.push(`Calendar/Meet: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+    }
+  }
+
+  /* 2) Invite email — skips the primary officer if /api/google already emailed them */
+  if (formData.send_invite) {
+    const recipients = primaryInvited ? allEmails.filter((e) => e !== primaryEmail) : allEmails;
+    if (!allEmails.length) {
+      failures.push('Invite skipped: no participant has an email address');
+    } else if (recipients.length) {
+      try {
+        await postJSON('/api/invite', {
+          to: recipients.join(', '),         // route expects `to`
+          name: recipients.length === 1 ? payload.officer_name : '',
+          agenda: payload.agenda,
+          date: new Date(`${payload.meeting_date}T00:00:00`).toLocaleDateString('en-IN', {
+            weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+          }),
+          time: `${to12Hour(payload.meeting_time)} (${formatDuration(Number(payload.duration) || 0)})`,
+          location: payload.location,
+          meetLink,
+        }, 20_000);
+      } catch (err: any) {
+        console.error('/api/invite failed:', err);
+        failures.push(`Invite: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+      }
+    }
+  }
+
+  return failures;
+}
+
+  async function handleSubmit() {
     if (savingRef.current) return;
-    if (stepRef.current !== 2) { handleContinue(); return; }
-
-    const nextErrors: Record<string, string> = {};
-    if (!formData.officer_name.trim()) nextErrors.officer = 'Please select who the meeting is with';
-    if (!formData.agenda.trim()) nextErrors.agenda = 'Agenda is required';
-    if (!formData.meeting_date) nextErrors.date = 'Meeting date is required';
-    else if (isPastISODate(formData.meeting_date) && !isEditMode) nextErrors.date = PAST_DATE_MSG;
-    if (!formData.meeting_time) nextErrors.time = 'Meeting time is required';
-    if (!formData.duration || durationNum <= 0) nextErrors.duration = 'Please choose a duration';
-    if (!formData.meeting_place) nextErrors.place = 'Please choose where the meeting will happen';
-    if (!formData.priority) nextErrors.priority = 'Please set a priority';
-
+    const e: Record<string, string> = {};
+    if (!formData.meeting_type) e.meeting_type = 'Please choose Internal or External.';
+    if (!selectedOfficer?.name && !formData.officer_name) e.officer = 'Please choose a participant or add one manually.';
+    if (!formData.agenda.trim()) e.agenda = 'Please enter the agenda.';
+    if (!formData.meeting_date) e.date = 'Please pick a date.';
+    if (!formData.meeting_time) e.time = 'Please pick a time.';
+    if (!formData.duration) e.duration = 'Please set a duration.';
+    if (!formData.meeting_place) e.place = 'Please choose where this meeting happens.';
+    if (!formData.priority) e.priority = 'Please set a priority.';
     if (
       formData.follow_up_date &&
-      formData.follow_up_date <= todayISO &&
-      formData.follow_up_date !== loadedFollowUpRef.current
-    ) {
-      nextErrors.follow_up = 'Follow-up date must be a future date';
-    }
+      formData.follow_up_date !== loadedFollowUpRef.current &&
+      formData.follow_up_date < followUpMin
+    ) e.follow_up = 'Follow-up date must be tomorrow or later.';
 
-    if (Object.keys(nextErrors).length) {
-      if (nextErrors.officer || nextErrors.agenda) goStep(1);
-      setErrors(nextErrors);
-      scrollToFirstError(nextErrors);
+    if (Object.keys(e).length) {
+      setErrors(e);
+      setSubmitError('Please fix the highlighted fields.');
+      const firstKey = Object.keys(e)[0];
+      if (firstKey === 'meeting_type' || firstKey === 'officer' || firstKey === 'agenda') goStep(1);
+      scrollToSection(firstKey);
       return;
     }
 
-    setErrors({});
+    setSubmitError(null);
     savingRef.current = true;
     setLoading(true);
-    setSubmitError(null);
-
     try {
-      const payload: Record<string, any> = { ...formData, attendees: attendeeList };
-      payload.duration = durationNum;
+      const payload: Record<string, any> = {
+        agenda: formData.agenda.trim(),
+        meeting_date: formData.meeting_date,
+        meeting_time: formData.meeting_time,
+        duration: formData.duration,
+        location: formData.location,
+        status: formData.status_flag || 'Scheduled',
+        status_flag: formData.status_flag || 'Scheduled',
+        officer_type: formData.officer_type,
+        officer_name: formData.officer_name,
+        officer_id: formData.officer_id,
+        designation: formData.designation,
+        department: formData.department,
+        officer_category: formData.officer_category,
+        contact_number: formData.contact_number,
+        email: formData.email,
+        address: formData.address,
+        website: formData.website,
+        cadre: formData.cadre,
+        state: formData.state,
+        batch_year: formData.batch_year,
+        current_position: formData.current_position,
+        previous_postings: formData.previous_postings,
+        date_of_birth: formData.date_of_birth,
+        priority: formData.priority,
+        meeting_type: formData.meeting_type,
+        meeting_place: formData.meeting_place,
+        follow_up_date: formData.follow_up_date,
+        /* keeps additional officers' emails on the record */
+        attendees: Array.from(new Set([
+          ...attendeeList,
+          ...extraOfficers.map((o) => o.email || '').filter(Boolean),
+        ])).join(', '),
+        send_invite: formData.send_invite,
+        sync_gcal: formData.sync_gcal,
+        add_meet: formData.add_meet,
+        created_by: formData.created_by,
+      };
 
-      if (!isEditMode) {
-        payload.status = 'Scheduled';
-        payload.status_flag = 'Scheduled';
-        const auth: any = (pb as any).authStore;
-        payload.created_by = auth?.record?.id || auth?.model?.id || '';
-      }
+      const rec: any = editingId
+        ? await pb.collection('meetings').update(editingId, payload)
+        : await pb.collection('meetings').create(payload);
 
-      let record: any;
-      if (isEditMode && editSource) {
-        record = await pb.collection('meetings').update(editSource.id, payload);
-      } else {
-        record = await pb.collection('meetings').create(payload);
-      }
+      await syncDocuments(rec.id);
 
-      showToast(isEditMode ? 'Meeting updated' : 'Meeting created', 'success');
+      /* v18: the ONLY place automations are called — correct field names */
+      const failures = await runAutomations(rec.id, payload);
+
+      showToast(editingId ? 'Meeting updated' : 'Meeting created', 'success');
+      if (failures.length) showToast(failures.join(' · '), 'error');
       onSuccess();
       onClose();
-
-      const needsGoogle =
-        (formData.send_invite && !!formData.email) ||
-        formData.add_meet || formData.sync_gcal;
-      if (needsGoogle) runAutomationsInBackground(record);
     } catch (err: any) {
-      console.error('Failed to save meeting:', err);
-      setSubmitError(err?.message || 'Something went wrong while saving. Please try again.');
+      setSubmitError(err?.message || 'Something went wrong. Please try again.');
     } finally {
-      savingRef.current = false;
       setLoading(false);
+      savingRef.current = false;
     }
   }
 
@@ -1141,572 +1692,603 @@ useEffect(() => {
 
   if (!isOpen) return null;
 
-  const officerBadge = OFFICER_BADGE[selectedOfficer?.type || 'Other'];
-
   return (
-    <div className="cmp-root fixed inset-0 z-[70] flex justify-end">
+    <div className="cmp-root">
       <Styles />
-      <div className="c-overlay absolute inset-0 bg-slate-900/40 backdrop-blur-[2px]" onClick={onClose} />
+      {/* overlay */}
+      <div className="c-overlay fixed inset-0 z-[70] bg-slate-900/50 backdrop-blur-[2px]" onClick={onClose} />
 
-      <div className="c-panel relative z-10 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl">
-
-        {/* progress */}
-        <div className="h-0.5 w-full shrink-0 bg-slate-100">
-          <div
-            className="h-full bg-gradient-to-r from-violet-600 to-indigo-600 transition-all duration-500 ease-out"
-            style={{ width: step === 1 ? '50%' : '100%' }}
-          />
-        </div>
-
+      {/* panel */}
+      <div className="c-panel fixed right-0 top-0 z-[80] flex h-full w-full flex-col bg-slate-50 shadow-2xl sm:max-w-xl lg:max-w-2xl">
         {/* header */}
-        <div className="shrink-0 border-b border-slate-100 px-6 pb-4 pt-5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-md shadow-slate-900/20">
-                {isEditMode ? <Edit2 className="h-4 w-4" /> : <Plus className="h-5 w-5" />}
-              </span>
-              <div>
-                <h2 className="text-lg font-extrabold tracking-tight text-slate-900">
-                  {isEditMode ? 'Edit Meeting' : 'New Meeting'}
-                </h2>
-                <p className="mt-0.5 text-xs text-slate-400">
-                  {step === 1 ? 'Step 1 of 2 · Who & why' : 'Step 2 of 2 · When, where & priority'}
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={onClose}
-              className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-            >
-              <X className="h-5 w-5" />
+        <div className="flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-3.5 sm:px-5">
+          {step === 2 ? (
+            <button type="button" onClick={() => goStep(1)}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700">
+              <ArrowLeft className="h-4 w-4" />
             </button>
+          ) : (
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-600">
+              <Sparkles className="h-4 w-4" />
+            </span>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-bold text-slate-900">
+              {isEditMode ? 'Edit meeting' : 'Create meeting'}
+            </p>
+            <p className="truncate text-[11px] text-slate-400">
+              {step === 1 ? 'Who is it with & what about?' : 'Date, time & details'}
+            </p>
           </div>
-
-          {/* step tracker — dark pills */}
-          <div className="mt-4 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => step === 2 && goStep(1)}
-              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-semibold transition-colors ${
-                step === 1 ? 'bg-slate-900 text-white shadow-sm'
-                : 'bg-violet-50 text-violet-700 hover:bg-violet-100 cursor-pointer'
-              }`}
-            >
-              {step === 2 && <Check className="h-3 w-3" />} Step 1 · Details
-            </button>
-            <div className="h-px flex-1 bg-slate-200" />
-            <div className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-semibold ${
-              step === 2 ? 'bg-slate-900 text-white shadow-sm' : 'bg-slate-100 text-slate-400'
-            }`}>
-              Step 2 · Schedule
-            </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {[1, 2].map((s) => (
+              <span key={s} className={`h-1.5 rounded-full transition-all ${step === s ? 'w-5 bg-violet-600' : 'w-1.5 bg-slate-200'}`} />
+            ))}
           </div>
+          <button type="button" onClick={onClose}
+            className="shrink-0 rounded-xl p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
+            <X className="h-5 w-5" />
+          </button>
         </div>
 
-        {/* body */}
-        <div ref={scrollRef} className="nice-scroll min-h-0 flex-1 space-y-5 overflow-y-auto bg-[#f7f6fd] px-5 py-5 sm:px-6">
+        {/* scroll area */}
+        <div ref={scrollRef} className="nice-scroll flex-1 overflow-y-auto px-4 py-4 sm:px-5">
+          {submitError && (
+            <div className="c-fade-in mb-4 flex items-start gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-3.5 py-3">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
+              <p className="text-xs font-medium text-rose-700">{submitError}</p>
+            </div>
+          )}
 
+          {/* ============================ STEP 1 ============================ */}
           {step === 1 && (
-            <div key="s1" className="c-fade-up space-y-5">
+            <div className="space-y-4">
+              {/* meeting type FIRST — decides the participant list */}
+              <div id="cmp-sec-type" className="c-fade-up">
+                <SectionHead icon={Users} title="Who is this meeting with?" required
+                  sub="Internal shows employees · External shows officers" />
+                <div className="grid grid-cols-2 gap-2">
+                  {MEETING_TYPES.map((t) => {
+                    const active = formData.meeting_type === t.value;
+                    return (
+                      <button key={t.value} type="button"
+                        onClick={() => handleMeetingTypeChange(t.value)}
+                        className={`flex items-center gap-2.5 rounded-2xl border p-3 text-left transition-all duration-150 active:scale-[.98] ${
+                          active ? `${t.sel} ring-2 ring-violet-500/20` : 'border-slate-200 bg-white hover:border-slate-300'
+                        }`}>
+                        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+                          active ? `${t.txt} bg-white` : 'bg-slate-100 text-slate-400'
+                        }`}>
+                          <t.icon className="h-4 w-4" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className={`block text-[13px] font-semibold ${active ? t.txt : 'text-slate-700'}`}>{t.value}</span>
+                          <span className="block truncate text-[11px] text-slate-400">{t.hint}</span>
+                        </span>
+                        {active && <Check className={`ml-auto h-4 w-4 shrink-0 ${t.txt}`} />}
+                      </button>
+                    );
+                  })}
+                </div>
+                <FieldError message={errors.meeting_type} />
+              </div>
 
-              {/* Officer */}
-              <section id="cmp-sec-officer" className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <SectionHead icon={Users} title="Meeting with" required sub="Search the officer directory and pick a person" />
+              {/* participant picker — pool depends on meeting type */}
+              <div id="cmp-sec-officer" className="c-fade-up">
+                <SectionHead icon={User}
+                  title={!formData.meeting_type ? 'Participant' : isInternal ? 'Choose employee' : 'Choose officer'}
+                  required
+                  sub={!formData.meeting_type
+                    ? 'Pick a meeting type above first'
+                    : isInternal ? 'People in your office' : 'IAS, IPS and other contacts'} />
 
-                {!selectedOfficer ? (
-                  <>
-                    {/* search */}
-                    <div className="relative">
-                      <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                {!formData.meeting_type ? (
+                  <div className="c-fade-in flex flex-col items-center gap-2 rounded-2xl border border-dashed border-slate-200 py-8 text-center">
+                    <Users className="h-5 w-5 text-slate-300" />
+                    <p className="text-xs text-slate-400">Choose “Internal” or “External” above to see who you can add.</p>
+                  </div>
+                ) : !selectedOfficer ? (
+                  /* v17: keyed on meeting_type so Internal <-> External swaps
+                     with a quick fade instead of an abrupt content jump */
+                  <div key={`list-${formData.meeting_type}`} className="c-fade-in">
+                    {/* IAS / IPS / Other filter chips — External only */}
+                    {isExternal && (
+                      <div className="mb-2 flex flex-wrap gap-1.5">
+                        {(['All', 'IAS', 'IPS', 'Other'] as const).map((t) => (
+                          <button key={t} type="button" onClick={() => setTypeFilter(t)}
+                            className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition-all active:scale-95 ${
+                              typeFilter === t ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                            }`}>{t}</button>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3.5 transition focus-within:border-violet-400 focus-within:ring-4 focus-within:ring-violet-500/10">
+                      <Search className="h-4 w-4 shrink-0 text-slate-400" />
                       <input
                         ref={searchRef}
-                        type="text"
                         value={officerSearch}
                         onChange={(e) => setOfficerSearch(e.target.value)}
-                        placeholder="Search by name, designation, department…"
-                        className={`${inputCls} pl-10 ${errors.officer ? inputErr : ''}`}
+                        placeholder={`Search ${isInternal ? 'employees' : 'officers'} by name, designation…`}
+                        className="w-full bg-transparent py-2.5 text-sm outline-none placeholder:text-slate-400"
                       />
                     </div>
-                    <FieldError message={errors.officer} />
 
-                    {/* type filter pills */}
-                    <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                      {(['All', 'IAS', 'IPS', 'Other'] as const).map((t) => (
-                        <button
-                          key={t} type="button" onClick={() => setTypeFilter(t)}
-                          className={`rounded-full px-3 py-1 text-[11px] font-semibold transition-all ${
-                            typeFilter === t
-                              ? 'bg-slate-900 text-white shadow-sm'
-                              : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
-                          }`}
-                        >{t}</button>
-                      ))}
-                    </div>
-
-                    {/* directory list */}
-                    <div className="nice-scroll mt-3 max-h-64 space-y-1.5 overflow-y-auto pr-1">
-                      {officerLoading ? (
-                        Array.from({ length: 4 }).map((_, i) => (
-                          <div key={i} className="flex items-center gap-3 rounded-2xl border border-slate-100 p-2.5">
-                            <div className="c-sk h-9 w-9 rounded-full" />
-                            <div className="flex-1 space-y-1.5">
-                              <div className="c-sk h-3 w-1/3 rounded-full" />
-                              <div className="c-sk h-2.5 w-1/2 rounded-full" />
-                            </div>
-                          </div>
-                        ))
+                    <div className="mt-2">
+                      {participantLoading ? (
+                        <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
+                          <Loader2 className="h-4 w-4 animate-spin" /> Loading {isInternal ? 'employees' : 'directory'}…
+                        </div>
                       ) : filteredOfficers.length === 0 ? (
-                        <div className="rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-4 py-6 text-center">
-                          <Users className="mx-auto h-6 w-6 text-violet-300" />
-                          <p className="mt-2 text-xs font-semibold text-slate-600">No matches in the directory</p>
-                          <p className="mt-0.5 text-[11px] text-slate-400">Try a different search or filter.</p>
+                        <div className="rounded-2xl border border-dashed border-slate-200 py-8 text-center">
+                          <User className="mx-auto h-5 w-5 text-slate-300" />
+                          <p className="mt-1.5 text-xs text-slate-400">
+                            No {isInternal ? 'employees' : 'officers'} found{officerSearch ? ` for “${officerSearch}”` : ''}
+                          </p>
                         </div>
                       ) : (
-                        filteredOfficers.slice(0, 30).map((o) => (
-                          <button
-                            key={o.id} type="button" onClick={() => handleSelectOfficer(o)}
-                            className="group flex w-full items-center gap-3 rounded-2xl border border-transparent p-2.5 text-left transition-all hover:border-violet-200 hover:bg-violet-50/50"
-                          >
-                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-[11px] font-bold text-white shadow-sm">
-                              {initialsOf(o.name || '?')}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[13px] font-semibold text-slate-900 group-hover:text-violet-700">
-                                {o.name || 'Unnamed'}
+                        <div className="nice-scroll max-h-72 space-y-1.5 overflow-y-auto pr-0.5">
+                          {filteredOfficers.map((o) => (
+                            <button key={o.id} type="button" onClick={() => handleSelectOfficer(o)}
+                              className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white p-2.5 text-left transition-all hover:border-violet-300 hover:bg-violet-50/40 active:scale-[.99]">
+                              <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold ${OFFICER_BADGE[o.type]?.avatar ?? OFFICER_BADGE.Other.avatar}`}>
+                                {initialsOf(o.name || '?')}
                               </span>
-                              <span className="block truncate text-[11px] text-slate-400">
-                                {o.designation || o.current_position || o.department || '—'}
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center gap-1.5">
+                                  <span className="truncate text-[13px] font-semibold text-slate-800">{o.name}</span>
+                                  {isExternal && (
+                                    <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${OFFICER_BADGE[o.type]?.chip ?? OFFICER_BADGE.Other.chip}`}>
+                                      {o.type}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="block truncate text-[11px] text-slate-400">
+                                  {[o.designation, o.department].filter(Boolean).join(' · ') || '—'}
+                                </span>
                               </span>
-                            </span>
-                            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold ${OFFICER_BADGE[o.type].chip}`}>
-                              {o.type}
-                            </span>
-                            <ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-violet-500" />
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  </>
-                ) : showOfficerEdit ? (
-                  <>
-                    {/* officer edit fields */}
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {OFFICER_EDIT_FIELDS.map((f) => (
-                        <div key={f.key} className={f.key === 'officer_name' ? 'sm:col-span-2' : ''}>
-                          <label className="mb-1 block text-[11px] font-semibold text-slate-500">{f.label}</label>
-                          <input
-                            type="text"
-                            value={formData[f.key as keyof typeof formData] as string || ''}
-                            onChange={(e) => handleOfficerField(f.key, e.target.value)}
-                            className={inputCls}
-                          />
+                              <ChevronRight className="h-4 w-4 shrink-0 text-slate-300" />
+                            </button>
+                          ))}
                         </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex items-center gap-2">
-                      <button
-                        type="button" onClick={() => setShowOfficerEdit(false)}
-                        className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800"
-                      >
-                        <Check className="h-3.5 w-3.5" /> Done
-                      </button>
-                      <button
-                        type="button" onClick={handleClearOfficer}
-                        className="rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-500 transition-colors hover:bg-slate-50"
-                      >
-                        Remove officer
+                      )}
+                      {officersTruncated && (
+                        <p className="mt-1.5 text-center text-[10px] text-slate-400">
+                          Showing first {LIST_CAP} — type to search the full {isInternal ? 'employee' : 'officer'} list
+                        </p>
+                      )}
+
+                      <button type="button" onClick={startManualOfficer}
+                        className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-slate-300 py-2.5 text-xs font-semibold text-slate-500 transition-colors hover:border-violet-400 hover:text-violet-600">
+                        <Plus className="h-3.5 w-3.5" /> Add manually
                       </button>
                     </div>
-                  </>
+                  </div>
                 ) : (
-                  <>
-                    {/* selected officer card */}
-                    <div className="flex items-center gap-3 rounded-2xl border border-violet-200 bg-violet-50/50 p-3.5">
-                      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold text-white shadow-md shadow-violet-500/25">
+                  /* selected participant card */
+                  <div className="rounded-2xl border border-violet-200 bg-violet-50/60 p-3">
+                    <div className="flex items-start gap-3">
+                      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-xs font-bold ${OFFICER_BADGE[selectedOfficer.type]?.avatar ?? OFFICER_BADGE.Other.avatar}`}>
                         {initialsOf(selectedOfficer.name || '?')}
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="truncate text-sm font-bold text-slate-900">{selectedOfficer.name}</p>
-                          <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold ${officerBadge.chip}`}>
+                        <div className="flex items-center gap-1.5">
+                          <p className="truncate text-sm font-bold text-slate-900">{selectedOfficer.name || 'New contact'}</p>
+                          <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${OFFICER_BADGE[selectedOfficer.type]?.chip ?? OFFICER_BADGE.Other.chip}`}>
                             {selectedOfficer.type}
                           </span>
                         </div>
-                        <p className="mt-0.5 truncate text-[11px] text-slate-500">
-                          {selectedOfficer.designation || selectedOfficer.current_position || '—'}
-                          {selectedOfficer.department ? ` · ${selectedOfficer.department}` : ''}
-                        </p>
-                        {(selectedOfficer.contact_number || selectedOfficer.email) && (
-                          <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-400">
-                            {selectedOfficer.contact_number && (
-                              <span className="inline-flex items-center gap-1"><Phone className="h-3 w-3" />{selectedOfficer.contact_number}</span>
+                        {formData.designation && <p className="truncate text-[11px] text-slate-500">{formData.designation}</p>}
+                        {(formData.contact_number || formData.email) && (
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+                            {formData.contact_number && (
+                              <span className="flex items-center gap-1 text-[11px] text-slate-500">
+                                <Phone className="h-3 w-3" />{formData.contact_number}
+                              </span>
                             )}
-                            {selectedOfficer.email && (
-                              <span className="inline-flex items-center gap-1"><Mail className="h-3 w-3" /><span className="max-w-[180px] truncate">{selectedOfficer.email}</span></span>
+                            {formData.email && (
+                              <span className="flex items-center gap-1 text-[11px] text-slate-500">
+                                <Mail className="h-3 w-3" />{formData.email}
+                              </span>
                             )}
-                          </p>
+                          </div>
                         )}
                       </div>
-                      <div className="flex shrink-0 flex-col gap-1.5">
-                        <button
-                          type="button" onClick={() => setShowOfficerEdit(true)}
-                          className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200 transition-colors hover:text-violet-600 hover:ring-violet-200"
-                        >
-                          <Edit2 className="h-3 w-3" /> Edit
+                      <div className="flex shrink-0 gap-1">
+                        <button type="button" onClick={() => setShowOfficerEdit((v) => !v)} title="Edit details"
+                          className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-white hover:text-violet-600">
+                          <Edit2 className="h-3.5 w-3.5" />
                         </button>
-                        <button
-                          type="button" onClick={handleClearOfficer}
-                          className="inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[11px] font-semibold text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600"
-                        >
-                          <X className="h-3 w-3" /> Clear
+                        <button type="button" onClick={handleClearOfficer} title="Remove"
+                          className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-white hover:text-rose-600">
+                          <X className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </div>
-                    <FieldError message={errors.officer} />
-                  </>
+                    {showOfficerEdit && (
+                      <div className="mt-3 grid grid-cols-1 gap-2 border-t border-violet-100 pt-3 sm:grid-cols-2">
+                        {OFFICER_EDIT_FIELDS.map((f) => (
+                          <label key={f.key} className="block">
+                            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{f.label}</span>
+                            <input
+                              value={(formData as any)[f.key] ?? ''}
+                              onChange={(e) => handleOfficerField(f.key, e.target.value)}
+                              className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-500/10"
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
-              </section>
+                <FieldError message={errors.officer} />
+              </div>
 
-              {/* Agenda */}
-              <section id="cmp-sec-agenda" className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <SectionHead icon={Calendar} title="Agenda" required sub="What is this meeting about?" />
+              {/* agenda lives in Step 1 */}
+              <div id="cmp-sec-agenda" className="c-fade-up">
+                <SectionHead icon={Edit2} title="Agenda" required />
                 <textarea
-                  rows={3}
                   value={formData.agenda}
                   onChange={(e) => {
                     setFormData((prev) => ({ ...prev, agenda: e.target.value }));
                     if (errors.agenda) setErrors((p) => ({ ...p, agenda: '' }));
                   }}
-                  placeholder="e.g. Quarterly review of district development projects…"
+                  rows={3}
+                  placeholder="What is this meeting about?"
                   className={`${inputCls} resize-y ${errors.agenda ? inputErr : ''}`}
                 />
                 <FieldError message={errors.agenda} />
-              </section>
+              </div>
             </div>
           )}
 
+          {/* ============================ STEP 2 ============================ */}
           {step === 2 && (
-            <div key="s2" className="c-fade-up space-y-5">
-
-              {/* Date */}
-              <section id="cmp-sec-date" className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <SectionHead icon={CalendarDays} title="Meeting date" required sub="Pick a day — past dates are disabled" />
-                <WeekStrip value={formData.meeting_date} onChange={handleDateChange} markedDates={dateMarks} />
-                {formData.meeting_date && (
-                  <p className="mt-2.5 flex items-center gap-1.5 text-xs font-semibold text-violet-600">
-                    <CalendarDays className="h-3.5 w-3.5" /> {prettyDate(formData.meeting_date)}
-                  </p>
+            <div className="space-y-4">
+              {/* summary pills */}
+              <div className="flex flex-wrap items-center gap-2">
+                {selectedOfficer?.name && <Pill><User className="h-3.5 w-3.5" />{selectedOfficer.name}</Pill>}
+                {formData.agenda.trim() && (
+                  <Pill><Edit2 className="h-3.5 w-3.5" />{formData.agenda.length > 28 ? `${formData.agenda.slice(0, 28)}…` : formData.agenda}</Pill>
                 )}
-                <FieldError message={errors.date} />
-              </section>
+                {formData.meeting_date && <Pill><Calendar className="h-3.5 w-3.5" />{prettyDate(formData.meeting_date)}</Pill>}
+                {timeRangeLabel && <Pill><Clock className="h-3.5 w-3.5" />{timeRangeLabel}</Pill>}
+                {durationNum > 0 && <Pill><Timer className="h-3.5 w-3.5" />{formatDuration(durationNum)}</Pill>}
+              </div>
+              {crossesMidnight && (
+                <p className="flex items-center gap-1.5 text-[11px] font-medium text-amber-600">
+                  <AlertCircle className="h-3.5 w-3.5" /> This meeting crosses midnight.
+                </p>
+              )}
 
-              {/* Time + Duration */}
-              <section id="cmp-sec-time" className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <SectionHead icon={Clock} title="Time & duration" required sub="Quick slots or a custom time" />
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
-                  <TimeSlotPicker
-                    value={formData.meeting_time}
-                    onChange={handleTimeChange}
-                    meetingDate={formData.meeting_date}
-                  />
-                  <div className="shrink-0 border-t border-slate-100 pt-3 sm:w-[150px] sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0">
-                    <p className="mb-1.5 text-[11px] font-semibold text-slate-500">Duration</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {PRESET_DURATIONS.map((m) => (
-                        <button
-                          key={m} type="button" onClick={() => handlePresetDuration(m)}
-                          className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold tabular-nums transition-all active:scale-95 ${
-                            formData.duration === String(m) && !isCustomMode
-                              ? 'border-violet-600 bg-violet-600 text-white shadow-sm'
-                              : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:text-violet-700'
-                          }`}
-                        >{formatDuration(m)}</button>
-                      ))}
-                      {!isCustomMode ? (
-                        <button
-                          type="button" onClick={handleOpenCustom}
-                          className="rounded-full border border-dashed border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-500 transition-colors hover:border-violet-300 hover:text-violet-600"
-                        >Custom</button>
-                      ) : (
-                        <span className="flex items-center gap-1">
-                          <input
-                            type="text" inputMode="numeric" value={customHours}
-                            onChange={(e) => handleCustomDuration(clampInt(e.target.value, 23), customMinutes)}
-                            placeholder="h" aria-label="Hours" className={miniNumCls}
-                          />
-                          <input
-                            type="text" inputMode="numeric" value={customMinutes}
-                            onChange={(e) => handleCustomDuration(customHours, clampInt(e.target.value, 59))}
-                            placeholder="m" aria-label="Minutes" className={miniNumCls}
-                          />
-                          <button
-                            type="button" onClick={handleCustomDone}
-                            className="rounded-full bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-slate-800"
-                          ><Check className="h-3 w-3" /></button>
-                        </span>
+              {/* date */}
+              <div id="cmp-sec-date" className="c-fade-up">
+                <SectionHead icon={Calendar} title="Date" required size="lg" />
+                <WeekStrip value={formData.meeting_date} onChange={handleDateChange} markedDates={dateMarks} />
+                <FieldError message={errors.date} />
+              </div>
+
+              {/* time & duration SIDE-BY-SIDE */}
+              <div id="cmp-sec-time" className="c-fade-up">
+                <SectionHead icon={Clock} title="Time & duration" required size="lg" />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {/* Time */}
+                  <div className="rounded-2xl border border-slate-200 bg-white p-3.5">
+                    <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+                      <Clock className="h-4 w-4" /> Time
+                    </p>
+                    <TimeSlotPicker
+                      value={formData.meeting_time}
+                      onChange={handleTimeChange}
+                      meetingDate={formData.meeting_date}
+                    />
+                    <FieldError message={errors.time} />
+                  </div>
+
+                  {/* Duration */}
+                  <div className="rounded-2xl border border-slate-200 bg-white p-3.5">
+                    <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+                      <Timer className="h-4 w-4" /> Duration
+                    </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {PRESET_DURATIONS.map((m) => {
+                        const active = !isCustomMode && Number(formData.duration) === m;
+                        return (
+                          <button key={m} type="button" onClick={() => handlePresetDuration(m)}
+                            className={`rounded-full border px-3 py-1.5 text-xs font-semibold tabular-nums transition-all active:scale-95 ${
+                              active ? 'border-violet-600 bg-violet-600 text-white shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300'
+                            }`}>
+                            {formatDuration(m)}
+                          </button>
+                        );
+                      })}
+                      {!isCustomMode && (
+                        <button type="button" onClick={handleOpenCustom}
+                          className="rounded-full border border-dashed border-slate-300 px-3 py-1.5 text-[11px] font-semibold text-slate-500 transition-colors hover:border-violet-400 hover:text-violet-600">
+                          Custom
+                        </button>
                       )}
                     </div>
+                    {isCustomMode && (
+                      <div className="c-fade-in mt-2 flex flex-wrap items-center gap-2">
+                        <input type="number" min={0} max={23} value={customHours}
+                          onChange={(e) => handleCustomDuration(clampInt(e.target.value, 23), customMinutes)}
+                          placeholder="H" className={miniNumCls} />
+                        <span className="text-xs font-semibold text-slate-400">hr</span>
+                        <input type="number" min={0} max={59} value={customMinutes}
+                          onChange={(e) => handleCustomDuration(customHours, clampInt(e.target.value, 59))}
+                          placeholder="M" className={miniNumCls} />
+                        <span className="text-xs font-semibold text-slate-400">min</span>
+                        <button type="button" onClick={handleCustomDone}
+                          className="ml-auto inline-flex items-center gap-1 rounded-xl bg-slate-900 px-3 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-800">
+                          <Check className="h-3.5 w-3.5" /> Done
+                        </button>
+                      </div>
+                    )}
+                    <FieldError message={errors.duration} />
                   </div>
                 </div>
+              </div>
 
-                {timeRangeLabel && (
-                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl bg-violet-50/60 px-3 py-2">
-                    <Pill>{timeRangeLabel}</Pill>
-                    <Pill>{formatDuration(durationNum)}</Pill>
-                    {crossesMidnight && (
-                      <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-amber-600">
-                        <AlertCircle className="h-3 w-3" /> Ends after midnight
-                      </span>
-                    )}
-                  </div>
-                )}
-                <FieldError message={errors.time} />
-                <FieldError message={errors.duration} />
-              </section>
-
-              {/* Place */}
-              <section id="cmp-sec-place" className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <SectionHead icon={MapPin} title="Where" required sub="Choose the meeting place" />
+              {/* place */}
+              <div id="cmp-sec-place" className="c-fade-up">
+                <SectionHead icon={MapPin} title="Place" required size="lg" />
                 <div className="grid grid-cols-2 gap-2">
                   {PLACE_OPTIONS.map((p) => {
-                    const Icon = p.icon;
-                    const selected = formData.meeting_place === p.value;
+                    const active = formData.meeting_place === p.value;
                     return (
-                      <button
-                        key={p.value} type="button" onClick={() => handlePlace(p.value)}
-                        className={`flex items-center gap-2.5 rounded-2xl border p-3 text-left transition-all active:scale-[0.98] ${
-                          selected ? 'border-violet-300 bg-violet-50/60 ring-1 ring-violet-200' : 'border-slate-200 hover:border-slate-300'
-                        }`}
-                      >
-                        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                          selected ? 'bg-violet-100 text-violet-600' : 'bg-slate-100 text-slate-400'
+                      <button key={p.value} type="button" onClick={() => handlePlace(p.value)}
+                        className={`flex items-center gap-2.5 rounded-2xl border p-3 text-left transition-all duration-150 active:scale-[.98] ${
+                          active ? 'border-violet-300 bg-violet-50 ring-2 ring-violet-500/20' : 'border-slate-200 bg-white hover:border-slate-300'
                         }`}>
-                          <Icon className="h-4 w-4" />
+                        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
+                          active ? 'bg-white text-violet-600' : 'bg-slate-100 text-slate-400'
+                        }`}>
+                          <p.icon className="h-4 w-4" />
                         </span>
                         <span className="min-w-0">
-                          <span className={`block text-[13px] font-semibold ${selected ? 'text-violet-700' : 'text-slate-800'}`}>{p.value}</span>
-                          <span className="block truncate text-[11px] text-slate-400">{p.hint}</span>
+                          <span className={`block text-sm font-semibold ${active ? 'text-violet-700' : 'text-slate-700'}`}>{p.value}</span>
+                          <span className="block truncate text-xs text-slate-400">{p.hint}</span>
                         </span>
                       </button>
                     );
                   })}
                 </div>
-
-                <div className="mt-3">
-                  <label className="mb-1 block text-[11px] font-semibold text-slate-500">
-                    {formData.meeting_place === 'Outside' ? 'Venue / address' : 'Room / details'} <span className="font-normal text-slate-400">(optional)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.location}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, location: e.target.value }))}
-                    placeholder={formData.meeting_place === 'Outside' ? 'e.g. Collectorate conference hall' : 'e.g. Cabin 3, Secretariat'}
-                    className={inputCls}
-                  />
-                </div>
+                <input
+                  value={formData.location}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, location: e.target.value }))}
+                  placeholder={formData.meeting_place === 'Outside' ? 'Venue / address' : 'Room / floor (optional)'}
+                  className={`${inputCls} mt-2`}
+                />
                 <FieldError message={errors.place} />
-              </section>
+              </div>
 
-              {/* Priority */}
-              <section id="cmp-sec-priority" className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <SectionHead icon={Flag} title="Priority" required sub="How urgent is this meeting?" />
+              {/* priority */}
+              <div id="cmp-sec-priority" className="c-fade-up">
+                <SectionHead icon={Flag} title="Priority" required size="lg" />
                 <div className="grid grid-cols-3 gap-2">
                   {PRIORITIES.map((p) => {
-                    const Icon = p.icon;
-                    const selected = formData.priority === p.value;
+                    const active = formData.priority === p.value;
                     return (
-                      <button
-                        key={p.value} type="button" onClick={() => handlePriority(p.value)}
-                        className={`flex flex-col items-center gap-1.5 rounded-2xl border py-3 transition-all active:scale-[0.97] ${
-                          selected ? `${p.bg} ring-1 ring-slate-900/10` : 'border-slate-200 hover:border-slate-300'
-                        }`}
-                      >
-                        <Icon className={`h-4 w-4 ${selected ? p.text : 'text-slate-400'}`} />
-                        <span className={`text-[12px] font-bold ${selected ? p.text : 'text-slate-500'}`}>{p.value}</span>
-                        <span className={`h-1.5 w-1.5 rounded-full ${p.dot}`} />
+                      <button key={p.value} type="button" onClick={() => handlePriority(p.value)}
+                        className={`flex items-center justify-center gap-1.5 rounded-2xl border py-3 text-sm font-semibold transition-all active:scale-95 ${
+                          active ? `${p.bg} ${p.text} shadow-sm` : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                        }`}>
+                        <p.icon className="h-4 w-4" />
+                        {p.value}
+                        {active && <span className={`h-1.5 w-1.5 rounded-full ${p.dot}`} />}
                       </button>
                     );
                   })}
                 </div>
                 <FieldError message={errors.priority} />
-              </section>
+              </div>
 
-              {/* More details */}
-              <section className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                <button
-                  type="button" onClick={() => setShowMoreDetails((v) => !v)}
-                  className="flex w-full items-center justify-between gap-2 text-left"
-                >
-                  <SectionHead icon={Sparkles} title="More details" optional sub="Type, attendees, follow-up & automations" />
-                  <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${showMoreDetails ? 'rotate-180' : ''}`} />
+              {/* "Follow up" — Status (Scheduled auto-selected, optional) ·
+                     Follow-up date (optional) · Documents (v16: unified dropzone) */}
+              {/* v17: relative + z-20 so the follow-up mini calendar's popover
+                  reliably paints above the "More details" card below it —
+                  both sections pick up their own stacking context from the
+                  c-fade-up animation, and without this the later "More
+                  details" sibling was winning and overlapping the calendar */}
+              <div id="cmp-sec-followup" className="c-fade-up relative z-20 rounded-2xl border border-slate-200 bg-white p-3.5">
+                <SectionHead icon={Flag} title="Follow up" optional size="lg"
+                  sub="Status, follow-up date & documents" />
+
+                <p className="mb-1.5 text-[11px] font-semibold text-slate-500">
+                  Status <span className="font-normal text-slate-400">(optional — Scheduled pre-selected)</span>
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {STATUS_FLAGS.map((s) => {
+                    const active = formData.status_flag === s.value;
+                    return (
+                      <button key={s.value} type="button" onClick={() => handleStatusChange(s.value)}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all active:scale-95 ${
+                          active ? 'border-slate-900 bg-slate-900 text-white shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                        }`}>
+                        <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
+                        {s.value}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <p className="mb-1.5 mt-3 text-[11px] font-semibold text-slate-500">
+                  Follow-up date <span className="font-normal text-slate-400">(optional)</span>
+                </p>
+                <MiniDatePicker
+                  value={formData.follow_up_date}
+                  onChange={handleFollowUpChange}
+                  min={followUpMin}
+                />
+                <p className="mt-1 text-[10px] text-slate-400">
+                  Included in the Google Calendar sync when syncing is enabled.
+                </p>
+                <FieldError message={errors.follow_up} />
+
+                <p className="mb-1.5 mt-3 text-[11px] font-semibold text-slate-500">Documents</p>
+                <DocumentDropzone
+                  existingDocs={existingDocs}
+                  pendingDocs={pendingDocs}
+                  onPick={handlePickDocs}
+                  onRemoveExisting={removeExistingDoc}
+                  onRemovePending={removePendingDoc}
+                  fileUrl={meetingFileUrl}
+                  uploading={uploading}
+                  accept={ACCEPTED_DOCS}
+                  maxMB={MAX_FILE_MB}
+                />
+              </div>
+
+              {/* more details */}
+              <div className="c-fade-up">
+                <button type="button" onClick={() => setShowMoreDetails((v) => !v)}
+                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white p-3 text-left transition-colors hover:border-slate-300">
+                  <span className="flex items-center gap-2.5">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                      <Plus className="h-3.5 w-3.5" />
+                    </span>
+                    <span>
+                      <span className="block text-[13px] font-semibold text-slate-800">More details</span>
+                      <span className="block text-[11px] text-slate-400">Additional officers, attendees & integrations</span>
+                    </span>
+                  </span>
+                  <ChevronRight className={`h-4 w-4 text-slate-400 transition-transform ${showMoreDetails ? 'rotate-90' : ''}`} />
                 </button>
 
                 {showMoreDetails && (
-                  <div className="c-fade-in mt-3 space-y-4 border-t border-slate-100 pt-4">
-
-                    {/* Status — edit mode only */}
-                    {isEditMode && (
-                      <div>
-                        <p className="mb-1.5 text-[11px] font-semibold text-slate-500">Status</p>
-                        <div className="flex flex-wrap gap-1.5">
-                          {STATUS_FLAGS.map((s) => {
-                            const selected = formData.status === s.value;
-                            return (
-                              <button
-                                key={s.value} type="button" onClick={() => handleStatusChange(s.value)}
-                                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11.5px] font-semibold transition-all active:scale-95 ${
-                                  selected ? 'border-slate-900 bg-slate-900 text-white shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                                }`}
-                              >
-                                <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
-                                {s.value}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Meeting type */}
-                    <div>
-                      <p className="mb-1.5 text-[11px] font-semibold text-slate-500">Meeting type <span className="font-normal text-slate-400">(optional)</span></p>
-                      <div className="grid grid-cols-2 gap-2">
-                        {MEETING_TYPES.map((t) => {
-                          const Icon = t.icon;
-                          const selected = formData.meeting_type === t.value;
-                          return (
-                            <button
-                              key={t.value} type="button"
-                              onClick={() => setFormData((prev) => ({ ...prev, meeting_type: selected ? '' : t.value }))}
-                              className={`flex items-center gap-2.5 rounded-2xl border p-3 text-left transition-all active:scale-[0.98] ${
-                                selected ? `${t.sel} ring-1 ring-slate-900/10` : 'border-slate-200 hover:border-slate-300'
-                              }`}
-                            >
-                              <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${selected ? `bg-white ${t.txt}` : 'bg-slate-100 text-slate-400'}`}>
-                                <Icon className="h-4 w-4" />
-                              </span>
-                              <span className="min-w-0">
-                                <span className={`block text-[12.5px] font-semibold ${selected ? t.txt : 'text-slate-800'}`}>{t.value}</span>
-                                <span className="block truncate text-[10.5px] text-slate-400">{t.hint}</span>
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
+                  <div className="c-fade-in mt-2 space-y-3">
+                    {/* follow-up notes */}
+                    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                      <p className="mb-2 text-[11px] font-semibold text-slate-500">
+                        Follow-up notes <span className="font-normal text-slate-400">(optional)</span>
+                      </p>
+                      <textarea
+                        value={formData.follow_up_notes}
+                        onChange={(e) => setFormData((prev) => ({ ...prev, follow_up_notes: e.target.value }))}
+                        rows={3}
+                        placeholder="Action items, next steps, things to follow up on…"
+                        className={`${inputCls} resize-y`}
+                      />
                     </div>
 
-                    {/* Attendees */}
-                    <div>
-                      <p className="mb-1.5 text-[11px] font-semibold text-slate-500">Attendees <span className="font-normal text-slate-400">(optional, comma or enter to add)</span></p>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={attendeeInput}
-                          onChange={(e) => setAttendeeInput(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAttendee(); } }}
-                          placeholder="name@example.com"
-                          className={inputCls}
-                        />
-                        <button
-                          type="button" onClick={addAttendee}
-                          className="shrink-0 rounded-xl bg-slate-100 px-3.5 text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-800"
-                          aria-label="Add attendee"
-                        ><Plus className="h-4 w-4" /></button>
-                      </div>
-                      {attendeeList.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {attendeeList.map((a) => (
-                            <span key={a} className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700 ring-1 ring-inset ring-violet-200">
-                              {a}
-                              <button type="button" onClick={() => removeAttendee(a)} className="text-violet-400 transition-colors hover:text-rose-500" aria-label={`Remove ${a}`}>
+                    {/* additional officers */}
+                    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                      <p className="mb-2 text-[11px] font-semibold text-slate-500">
+                        Additional {isInternal ? 'employees' : 'officers'}
+                      </p>
+                      {extraOfficers.length > 0 && (
+                        <div className="mb-2 flex flex-wrap gap-1.5">
+                          {extraOfficers.map((o) => (
+                            <span key={o.id} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 py-1 pl-2.5 pr-1 text-[11px] font-semibold text-slate-700">
+                              {o.name}
+                              <button type="button" onClick={() => handleRemoveExtraOfficer(o)}
+                                className="rounded-full p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
                                 <X className="h-3 w-3" />
                               </button>
                             </span>
                           ))}
                         </div>
                       )}
-                    </div>
-
-                    {/* Follow-up */}
-                    <div id="cmp-sec-followup">
-                      <p className="mb-1.5 text-[11px] font-semibold text-slate-500">Follow-up date <span className="font-normal text-slate-400">(must be a future date)</span></p>
                       <input
-                        type="date"
-                        min={followUpMin}
-                        value={formData.follow_up_date}
-                        onChange={(e) => handleFollowUpChange(e.target.value)}
-                        className={`${inputCls} ${errors.follow_up ? inputErr : ''}`}
+                        value={extraSearch}
+                        onChange={(e) => setExtraSearch(e.target.value)}
+                        placeholder="Search directory to add more…"
+                        className={inputCls}
                       />
-                      <FieldError message={errors.follow_up} />
+                      {extraCandidates.length > 0 && (
+                        <div className="mt-1.5 space-y-1 rounded-xl border border-slate-200 bg-white p-1.5">
+                          {extraCandidates.map((o) => (
+                            <button key={o.id} type="button" onClick={() => handleAddExtraOfficer(o)}
+                              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-violet-50">
+                              <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[9px] font-bold ${OFFICER_BADGE[o.type].avatar}`}>
+                                {initialsOf(o.name || '?')}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-xs font-semibold text-slate-800">{o.name}</span>
+                                <span className="block truncate text-[10px] text-slate-400">{o.designation}</span>
+                              </span>
+                              <Plus className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
-                    {/* Automations */}
-                    <div className="space-y-2">
-                      <ToggleRow
-                        icon={Video} checked={formData.add_meet}
-                        onChange={(v) => setFormData((prev) => ({ ...prev, add_meet: v }))}
-                        title="Generate Google Meet link"
-                        description="A Meet link is created and saved to the meeting"
-                      />
-                      <ToggleRow
-                        icon={Mail} checked={formData.send_invite}
-                        onChange={(v) => setFormData((prev) => ({ ...prev, send_invite: v }))}
-                        title="Email invite to officer"
-                        description="Sends the invite to the officer's email address"
-                      />
-                      <ToggleRow
-                        icon={RefreshCw} checked={formData.sync_gcal}
-                        onChange={(v) => setFormData((prev) => ({ ...prev, sync_gcal: v }))}
-                        title="Sync to Google Calendar"
-                        description="Creates a matching event on Google Calendar"
-                      />
+                    {/* attendees */}
+                    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                      <p className="mb-2 text-[11px] font-semibold text-slate-500">Other attendees (emails)</p>
+                      {attendeeList.length > 0 && (
+                        <div className="mb-2 flex flex-wrap gap-1.5">
+                          {attendeeList.map((a) => (
+                            <span key={a} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 py-1 pl-2.5 pr-1 text-[11px] font-semibold text-slate-700">
+                              {a}
+                              <button type="button" onClick={() => removeAttendee(a)}
+                                className="rounded-full p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex gap-1.5">
+                        <input
+                          value={attendeeInput}
+                          onChange={(e) => setAttendeeInput(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAttendee(); } }}
+                          placeholder="name@example.com"
+                          className={inputCls}
+                        />
+                        <button type="button" onClick={addAttendee}
+                          className="shrink-0 rounded-xl bg-slate-900 px-3 text-xs font-semibold text-white transition hover:bg-slate-800">
+                          Add
+                        </button>
+                      </div>
                     </div>
+
+                    {/* toggles */}
+                    <div className="space-y-2">
+                      <ToggleRow icon={Mail} title="Send invite" description="Email the agenda to participants"
+                        checked={formData.send_invite} onChange={(v) => setFormData((p) => ({ ...p, send_invite: v }))} />
+                      <ToggleRow icon={Calendar} title="Sync to Google Calendar" description="Create / update the calendar event"
+                        checked={formData.sync_gcal} onChange={(v) => setFormData((p) => ({ ...p, sync_gcal: v }))} />
+                      <ToggleRow icon={Video} title="Add Google Meet link" description="Attach a Meet link to the event"
+                        checked={formData.add_meet} onChange={(v) => setFormData((p) => ({ ...p, add_meet: v }))} />
+                    </div>
+
+                    {(formData.meet_link || formData.gcal_link) && (
+                      <a href={formData.meet_link || formData.gcal_link} target="_blank" rel="noreferrer"
+                        className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-violet-600 transition-colors hover:bg-violet-50">
+                        <Video className="h-4 w-4" /> Open meeting link
+                      </a>
+                    )}
                   </div>
                 )}
-              </section>
-            </div>
-          )}
-
-          {/* submit error banner */}
-          {submitError && (
-            <div className="c-fade-in flex items-start gap-2.5 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3">
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
-              <p className="text-xs font-medium leading-relaxed text-rose-700">{submitError}</p>
+              </div>
             </div>
           )}
         </div>
 
         {/* footer */}
-        <div className="shrink-0 border-t border-slate-100 bg-white px-5 py-3.5 sm:px-6">
-          <div className="flex items-center gap-2.5">
-            {step === 2 && (
-              <button
-                type="button" onClick={() => goStep(1)}
-                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-4 py-2.5 text-[13px] font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-              >
+        <div className="border-t border-slate-200 bg-white px-4 py-3 sm:px-5">
+          {step === 1 ? (
+            <button type="button" onClick={handleNext}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-slate-800 active:scale-[.99]">
+              Next: Details <ArrowRight className="h-4 w-4" />
+            </button>
+          ) : (
+            <div className="flex gap-2">
+              <button type="button" onClick={() => goStep(1)}
+                className="inline-flex items-center justify-center gap-1.5 rounded-2xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50">
                 <ArrowLeft className="h-4 w-4" /> Back
               </button>
-            )}
-
-            <div className="ml-auto flex items-center gap-2.5">
-              {step === 1 ? (
-                <button
-                  type="button" onClick={handleContinue}
-                  className="group inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-5 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-slate-900/15 transition-all hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
-                >
-                  Continue <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-                </button>
-              ) : (
-                <button
-                  type="button" onClick={saveMeeting} disabled={loading}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-5 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-slate-900/15 transition-all hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
-                >
-                  {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {loading ? 'Saving…' : isEditMode ? 'Save changes' : 'Create meeting'}
-                </button>
-              )}
+              <button type="button" onClick={handleSubmit} disabled={loading}
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-2xl bg-violet-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 transition hover:bg-violet-700 active:scale-[.99] disabled:opacity-60">
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {isEditMode ? 'Save changes' : 'Create meeting'}
+              </button>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>

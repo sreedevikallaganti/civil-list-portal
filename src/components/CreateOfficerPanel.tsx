@@ -703,7 +703,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
         aria-modal="true"
         aria-labelledby={`${uid}-heading`}
         tabIndex={-1}
-        className="cof-panel fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col bg-white shadow-2xl outline-none"
+        className="c-panel fixed right-0 top-0 z-[80] flex h-full w-full flex-col bg-slate-50 shadow-2xl sm:max-w-xl lg:max-w-2xl"
       >
 
         {/* ------------------------------- Header ------------------------------- */}

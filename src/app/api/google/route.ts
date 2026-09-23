@@ -1,4 +1,4 @@
-// app/api/google/route.ts
+// app/api/google/route.ts — OAuth + self-healing calendarId
 import { NextRequest, NextResponse } from 'next/server';
 import { google } from 'googleapis';
 import nodemailer from 'nodemailer';
@@ -6,19 +6,18 @@ import nodemailer from 'nodemailer';
 export const runtime = 'nodejs';
 
 function getClient() {
-  const { GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY } = process.env;
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
   console.log('[api/google] env check →', {
-    email: GOOGLE_CLIENT_EMAIL ? 'set ✅' : '❌ MISSING',
-    key: GOOGLE_PRIVATE_KEY ? 'set ✅' : '❌ MISSING',
+    id: GOOGLE_CLIENT_ID ? 'set ✅' : '❌ MISSING',
+    secret: GOOGLE_CLIENT_SECRET ? 'set ✅' : '❌ MISSING',
+    token: GOOGLE_REFRESH_TOKEN ? 'set ✅' : '❌ MISSING',
   });
-  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
-    throw new Error('Google service account environment variables are missing');
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+    throw new Error('Google OAuth environment variables are missing');
   }
-  return new google.auth.JWT({
-    email: GOOGLE_CLIENT_EMAIL,
-    key: GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    scopes: ['https://www.googleapis.com/auth/calendar'],
-  });
+  const auth = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
+  auth.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
+  return auth;
 }
 
 export async function POST(req: NextRequest) {
@@ -26,8 +25,7 @@ export async function POST(req: NextRequest) {
     const {
       meetingId, agenda, date, time, duration = 30,
       location, notes, officerName, officerEmail,
-      includeMeet = false, sendInvite = false,
-      syncCalendar,
+      includeMeet = false, sendInvite = false, syncCalendar,
       gcalEventId = '', existingMeetLink = '',
     } = await req.json();
 
@@ -44,11 +42,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ skipped: true, meetLink: existingMeetLink || null, eventId: null, htmlLink: null });
     }
 
-    const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
+    const auth = getClient();
+    const calendar = google.calendar({ version: 'v3', auth });
+
+    /* ⭐ DIAGNOSTIC: prove which account/calendar this token can actually reach */
+    try {
+      const me = await calendar.calendars.get({ calendarId: 'primary' });
+      console.log('[api/google] 🔑 token belongs to calendar →', me.data.id, '| timezone:', me.data.timeZone);
+    } catch (preErr: any) {
+      console.log('[api/google] 🔑 token CANNOT read primary calendar →',
+        preErr?.code, preErr?.response?.data?.error?.message || preErr?.message);
+    }
+
+    const calendarId = (process.env.GOOGLE_CALENDAR_ID || 'primary').trim();
+    console.log('[api/google] configured calendarId →', JSON.stringify(calendarId));
     const timeZone = process.env.APP_TIMEZONE || 'Asia/Kolkata';
     const startTime = time || '09:00';
 
-    // midnight rollover
     const [h, m] = startTime.split(':').map(Number);
     const total = h * 60 + m + (Number(duration) || 30);
     const dayShift = Math.floor(total / 1440);
@@ -65,7 +75,7 @@ export async function POST(req: NextRequest) {
       meetingId && `Meeting ID: ${meetingId}`,
     ].filter(Boolean).join('\n');
 
-    const requestBody: any = {
+    const baseBody: any = {
       summary: agenda || 'Meeting',
       description,
       location,
@@ -73,14 +83,9 @@ export async function POST(req: NextRequest) {
       end: { dateTime: `${endDate}T${endTime}:00`, timeZone },
       reminders: { useDefault: true },
     };
-
-    const attendees = wantsEmail
-      ? [{ email: officerEmail, displayName: officerName || undefined }]
-      : undefined;
-    if (attendees) requestBody.attendees = attendees;
-
+    if (wantsEmail) baseBody.attendees = [{ email: officerEmail, displayName: officerName || undefined }];
     if (wantsMeet && !existingMeetLink) {
-      requestBody.conferenceData = {
+      baseBody.conferenceData = {
         createRequest: {
           requestId: `meet-${meetingId}-${Date.now()}`,
           conferenceSolutionKey: { type: 'hangoutsMeet' },
@@ -93,20 +98,59 @@ export async function POST(req: NextRequest) {
     let htmlLink: string | null = null;
 
     if (needsEvent) {
-      const auth = getClient();
-      const calendar = google.calendar({ version: 'v3', auth });
-      const params: any = {
-        calendarId,
-        conferenceDataVersion: 1,
-        sendUpdates: attendees ? 'all' : 'none',
-        requestBody,
-      };
-      const event = gcalEventId
-        ? await calendar.events.update({ ...params, eventId: gcalEventId })
-        : await calendar.events.insert(params);
-      meetLink = event.data.hangoutLink || existingMeetLink || null;
-      eventId = event.data.id || null;
-      htmlLink = event.data.htmlLink || null;
+      /* body variants: full → without attendees → without Meet → bare */
+      const bodyVariants: { body: any; sendUpdates: string; note: string }[] = [
+        { body: baseBody, sendUpdates: wantsEmail ? 'all' : 'none', note: 'full' },
+      ];
+      if (baseBody.attendees) {
+        const { attendees, ...noAtt } = baseBody;
+        bodyVariants.push({ body: noAtt, sendUpdates: 'none', note: 'no-attendees' });
+      }
+      if (baseBody.conferenceData) {
+        const { conferenceData, ...noConf } = baseBody;
+        const noAttNoConf: any = { ...noConf };
+        delete noAttNoConf.attendees;
+        bodyVariants.push({ body: noConf, sendUpdates: wantsEmail ? 'all' : 'none', note: 'no-meet' });
+        bodyVariants.push({ body: noAttNoConf, sendUpdates: 'none', note: 'bare' });
+      }
+
+      /* ⭐ calendar variants: configured ID first, then 'primary' as safety net */
+      const calendarIds = [...new Set([calendarId, 'primary'])];
+
+      let lastErr: any = null;
+      let saved = false;
+
+      outer:
+      for (const cid of calendarIds) {
+        for (const bv of bodyVariants) {
+          const modes: ('update' | 'insert')[] = gcalEventId ? ['update', 'insert'] : ['insert'];
+          for (const mode of modes) {
+            try {
+              const params: any = {
+                calendarId: cid,
+                conferenceDataVersion: 1,
+                sendUpdates: bv.sendUpdates,
+                requestBody: bv.body,
+              };
+              console.log(`[api/google] attempt → calendar:${cid} | ${bv.note} | ${mode}`);
+              const event = mode === 'update'
+                ? await calendar.events.update({ ...params, eventId: gcalEventId })
+                : await calendar.events.insert(params);
+              meetLink = event.data.hangoutLink || existingMeetLink || null;
+              eventId = event.data.id || null;
+              htmlLink = event.data.htmlLink || null;
+              saved = true;
+              console.log(`[api/google] ✅ SAVED → calendar:${cid} | ${bv.note} | ${mode} | eventId:`, eventId);
+              break outer;
+            } catch (e: any) {
+              lastErr = e;
+              console.warn(`[api/google] ✗ failed [${e?.code || e?.response?.status}]`,
+                e?.response?.data?.error?.message || e?.message);
+            }
+          }
+        }
+      }
+      if (!saved) throw lastErr;
     }
 
     let emailSent = false;

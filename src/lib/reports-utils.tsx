@@ -115,7 +115,7 @@ export function normalizeRecord(r: RecordItem): Record<string, string> {
 export function findFileUrl(record: RecordItem): string | null {
   const key = FILE_KEYS.find(k => typeof record[k] === 'string' && record[k]);
   if (!key || !record.id) return null;
-  try { return pb.files.getUrl(record, record[key]) || null; } catch { return null; }
+  try { return pb.files.getURL(record, record[key]) || null; } catch { return null; }
 }
 
 /* ── Export / download (zero dependencies) ── */
@@ -404,9 +404,9 @@ export function OffCanvas({ open, onClose, title, subtitle, icon, children, foot
       <div onClick={onClose}
         className={cx('fixed inset-0 z-40 bg-slate-900/30 backdrop-blur-[2px] transition-opacity duration-300',
           open ? 'opacity-100' : 'pointer-events-none opacity-0')} />
-      <aside role="dialog" aria-modal="true"
-        className={cx('fixed inset-y-0 right-0 z-50 flex w-full max-w-[460px] transform flex-col bg-white shadow-2xl transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]',
-          open ? 'translate-x-0' : 'translate-x-full')}>
+        <aside role="dialog" aria-modal="true"
+  className={cx('fixed inset-y-0 right-0 z-50 flex w-full transform flex-col bg-white shadow-2xl transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] sm:max-w-xl lg:max-w-2xl',
+    open ? 'translate-x-0' : 'translate-x-full')}>
         <header className="flex items-start gap-3 border-b border-slate-100 px-6 py-5">
           {icon && <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">{icon}</div>}
           <div className="min-w-0 flex-1">

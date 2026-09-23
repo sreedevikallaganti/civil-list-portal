@@ -43,10 +43,9 @@ function computeAnalytics(scoped: RecordItem[]) {
   const scheduledMeetings = scoped.filter(m => statusOf(m) === 'scheduled').length;
   const cancelledMeetings = scoped.filter(m => statusOf(m) === 'cancelled').length;
   const rescheduledMeetings = scoped.filter(m => statusOf(m) === 'rescheduled').length;
-  const rejectedMeetings = scoped.filter(m => statusOf(m) === 'rejected').length;
   const totalDuration = scoped.reduce((acc, m) => acc + (parseInt(m.duration) || 0), 0);
   const avgDuration = totalMeetings ? Math.round(totalDuration / totalMeetings) : 0;
-  const decided = completedMeetings + cancelledMeetings + rejectedMeetings;
+  const decided = completedMeetings + cancelledMeetings;
   const health = decided ? Math.round((completedMeetings / decided) * 100) : null;
 
   const dayActivity = Array(7).fill(0);
@@ -83,7 +82,7 @@ function computeAnalytics(scoped: RecordItem[]) {
 
   return {
     totalMeetings, completedMeetings, scheduledMeetings, cancelledMeetings,
-    rescheduledMeetings, rejectedMeetings, totalDuration, avgDuration, health,
+    rescheduledMeetings, totalDuration, avgDuration, health,
     decided, busiestDay, meetingTypes, topOfficers, monthlyData,
   };
 }
@@ -96,7 +95,6 @@ function summaryRows(a: ReturnType<typeof computeAnalytics>, reportStats: { coun
     { Metric: 'Scheduled', Value: String(a.scheduledMeetings) },
     { Metric: 'Cancelled', Value: String(a.cancelledMeetings) },
     { Metric: 'Rescheduled', Value: String(a.rescheduledMeetings) },
-    { Metric: 'Rejected', Value: String(a.rejectedMeetings) },
     { Metric: 'Avg duration (min)', Value: String(a.avgDuration) },
     { Metric: 'Total time in meetings (min)', Value: String(a.totalDuration) },
     { Metric: 'Busiest day', Value: a.busiestDay ? `${a.busiestDay.name} (${a.busiestDay.count} meetings)` : 'n/a' },
@@ -657,7 +655,6 @@ export default function ReportsPage() {
             <span className="flex items-center gap-2 text-[12.5px] text-slate-500">
               <Zap className="h-4 w-4 text-amber-500" /> Busiest: <b className="text-slate-800">{a.busiestDay ? `${a.busiestDay.name} (${a.busiestDay.count})` : '—'}</b>
             </span>
-            <span className="ml-auto text-[11px] font-medium uppercase tracking-wider text-slate-400">Meeting snapshot · all time</span>
           </div>
 
           {/* Tabs */}

@@ -14,6 +14,8 @@ import {
   Loader2,
   Phone,
   CalendarDays,
+  Briefcase,
+  UserCog,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -23,15 +25,17 @@ export default function SideBar() {
   const { user, logout } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
-  const menuItems = [
-    { href: '/', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/meetings', label: 'Meetings', icon: Calendar },
-    { href: '/officers', label: 'Officers', icon: Users },
-    // { href: '/other-contacts', label: 'Other Contacts', icon: Phone },
-    { href: '/calendar', label: 'Calendar', icon: CalendarDays },
-    { href: '/reports', label: 'Reports', icon: FileText },
-    // { href: '/settings', label: 'Settings', icon: Settings },
-  ];
+const menuItems = [
+  { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/meetings', label: 'Meetings', icon: Calendar },
+  { href: '/officers', label: 'Officers', icon: Users },
+  { href: '/employees', label: 'Employees', icon: Briefcase },  
+  { href: '/users', label: 'Users', icon: UserCog }, 
+  // { href: '/other-contacts', label: 'Other Contacts', icon: Phone },
+  { href: '/calendar', label: 'Calendar', icon: CalendarDays },
+  { href: '/reports', label: 'Reports', icon: FileText },
+  // { href: '/settings', label: 'Settings', icon: Settings },
+];
 
   /* ---------- Real signed-in user (from PocketBase via AuthContext) ---------- */
   const displayName =

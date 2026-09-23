@@ -5,7 +5,7 @@ import {
   Search, ChevronLeft, ChevronRight, ChevronDown, User, Shield, Briefcase,
   MapPin, GraduationCap, X, Mail, Phone, Users, Building2,
   Plus, Database, Loader2, ArrowRight, ArrowUpRight, Contact, Pencil, Trash2, AlertCircle,
-  RefreshCw, CalendarDays, TrendingUp,
+  CalendarDays, TrendingUp,
 } from 'lucide-react';
 import { ClientResponseError } from 'pocketbase';
 import pb from '@/lib/pocketbase';
@@ -73,6 +73,10 @@ const COLLECTION_FOR: Record<string, string> = {
   IPS: 'ips_officers',
   Other: 'other_contacts',
 };
+
+/* SOFT DELETE — collection that archives a full snapshot of a record before
+   it's removed from its source collection, so it can be recovered later. */
+const ARCHIVE_COLLECTION = 'deleted_records';
 
 function normalizeOther(o: any) {
   const n: any = { ...o, type: 'Other' };
@@ -226,6 +230,11 @@ export default function OfficersPage() {
 
   /* Off-canvas panel state */
   const [selectedOfficer, setSelectedOfficer] = useState<any>(null);
+
+  /* The officers table's DOM node, so clicking a KPI/stat card can
+     smooth-scroll straight to it instead of leaving the user to scroll
+     past the header/KPI cards manually. */
+  const tableRef = useRef<HTMLDivElement>(null);
 
   /* SERVER-SIDE SEARCH — debounced so we don't hit PocketBase on every keystroke */
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -395,6 +404,12 @@ export default function OfficersPage() {
     setCurrentPage(1);
     setSearchQuery('');
     setDebouncedSearch('');
+    /* Smooth-scroll down to the table so clicking a KPI card jumps
+       straight to the filtered results instead of leaving the user to
+       scroll down past the header/KPI cards manually. */
+    requestAnimationFrame(() => {
+      tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   };
 
   const handleCreateNew = (type: 'IAS' | 'IPS' | 'Other' | null) => {
@@ -414,13 +429,29 @@ export default function OfficersPage() {
     setDeleteTarget(officer);
   };
 
+  /* SOFT DELETE — archive a full snapshot of the record into `deleted_records`
+     first, then remove it from its source collection. If the archive step
+     fails, the record is left untouched (nothing is lost). */
   const confirmDelete = async () => {
     if (!deleteTarget || deleteLoading) return;
     const collection = COLLECTION_FOR[deleteTarget.type] ?? 'other_contacts';
+    let failedStep: 'archive' | 'delete' = 'archive';
+
     try {
       setDeleteLoading(true);
       setDeleteError(null);
 
+      const { id: originalId, type: recordType, ...recordData } = deleteTarget;
+
+      await pb.collection(ARCHIVE_COLLECTION).create({
+        original_collection: collection,
+        original_id: originalId,
+        record_type: recordType,
+        record_data: recordData,
+        deleted_at: new Date().toISOString(),
+      });
+
+      failedStep = 'delete';
       await pb.collection(collection).delete(deleteTarget.id);
 
       const deletedId = deleteTarget.id;
@@ -431,10 +462,17 @@ export default function OfficersPage() {
     } catch (err) {
       console.error('Delete failed:', err);
       const status = (err as any)?.status;
-      let message = 'Failed to delete this record. Please try again.';
+      const targetCollection = failedStep === 'archive' ? ARCHIVE_COLLECTION : collection;
+
+      let message = failedStep === 'archive'
+        ? 'Failed to archive this record before deleting it. Please try again.'
+        : 'This record was archived, but the delete step failed. Please try again.';
+
       if (status === 401) message = 'Your session has expired — please sign in again.';
-      else if (status === 403) message = `Permission denied — check the Delete rule on the "${collection}" collection (PocketBase Admin → Collection → API Rules).`;
-      else if (status === 404) message = 'This record was not found — it may have already been deleted.';
+      else if (status === 403) {
+        message = `Permission denied — check the ${failedStep === 'archive' ? 'Create' : 'Delete'} rule on the "${targetCollection}" collection (PocketBase Admin → Collection → API Rules).`;
+      } else if (status === 404) message = 'This record was not found — it may have already been deleted.';
+
       setDeleteError(message);
     } finally {
       setDeleteLoading(false);
@@ -537,7 +575,7 @@ export default function OfficersPage() {
         {/* ------------------------------- App bar ------------------------------ */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
-            
+
             <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
               <Users className="h-4 w-4" />
             </span>
@@ -555,14 +593,6 @@ export default function OfficersPage() {
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => loadData(currentPage)}
-              aria-label="Refresh data"
-              className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600"
-            >
-              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-
             <button
               onClick={() => handleCreateNew(selectedType === 'all' ? null : selectedType === 'Other' ? 'Other' : selectedType)}
               className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
@@ -608,10 +638,8 @@ export default function OfficersPage() {
                   key={stat.key}
                   onClick={() => handleCardClick(stat.key)}
                   style={{ animationDelay: `${90 + i * 90}ms` }}
-                  className={`off-fade-up group relative overflow-hidden rounded-3xl bg-gradient-to-br p-5 text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-slate-900/[0.08] active:scale-[0.98] ${stat.card} ${
-                    active
-                      ? 'ring-2 ring-slate-900 shadow-md shadow-slate-900/10'
-                      : 'ring-1 ring-white/70'
+                  className={`off-fade-up group relative overflow-hidden rounded-3xl bg-gradient-to-br p-5 text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-slate-900/[0.08] active:scale-[0.98] ring-1 ring-white/70 ${stat.card} ${
+                    active ? 'shadow-md shadow-slate-900/10' : ''
                   }`}
                 >
                   <span
@@ -671,20 +699,12 @@ export default function OfficersPage() {
                 )}
               </div>
 
-              <div className="flex items-center gap-2 lg:ml-auto">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-50 px-3 py-1.5 text-[11px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200">
-                  <Database className="h-3.5 w-3.5 text-slate-400" />
-                  Server-side search
-                </span>
-                <span className="hidden items-center rounded-full bg-slate-50 px-3 py-1.5 text-[11px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200 sm:inline-flex">
-                  Sorted by name
-                </span>
-              </div>
+
             </div>
           </section>
 
           {/* --------------------------------- Table -------------------------------- */}
-          <section className="off-fade-up" style={{ animationDelay: '500ms' }}>
+          <section ref={tableRef} className="off-fade-up" style={{ animationDelay: '500ms' }}>
             <div className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-100">
 
               {/* Table header */}
@@ -800,8 +820,8 @@ export default function OfficersPage() {
                                   className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
                                   <Pencil className="h-4 w-4" />
                                 </button>
-                                <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} title="Delete contact"
-                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50 hover:text-rose-600">
+                                <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} title="Move to trash"
+                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
                                   <Trash2 className="h-4 w-4" />
                                 </button>
                               </div>
@@ -855,8 +875,8 @@ export default function OfficersPage() {
                                   className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
                                   <Pencil className="h-4 w-4" />
                                 </button>
-                                <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} title="Delete officer"
-                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50 hover:text-rose-600">
+                                <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} title="Move to trash"
+                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
                                   <Trash2 className="h-4 w-4" />
                                 </button>
                               </div>
@@ -889,7 +909,7 @@ export default function OfficersPage() {
                                       <Pencil className="h-3 w-3" /> Edit
                                     </button>
                                     <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }}
-                                      className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-600 transition-colors hover:bg-rose-100 active:scale-95">
+                                      className="inline-flex items-center gap-1 rounded-full bg-rose-50/70 px-3 py-1.5 text-[11px] font-semibold text-rose-500 transition-colors hover:bg-rose-100 active:scale-95">
                                       <Trash2 className="h-3 w-3" /> Delete
                                     </button>
                                   </div>
@@ -928,7 +948,7 @@ export default function OfficersPage() {
                                       <Pencil className="h-3 w-3" /> Edit
                                     </button>
                                     <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }}
-                                      className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-600 transition-colors hover:bg-rose-100 active:scale-95">
+                                      className="inline-flex items-center gap-1 rounded-full bg-rose-50/70 px-3 py-1.5 text-[11px] font-semibold text-rose-500 transition-colors hover:bg-rose-100 active:scale-95">
                                       <Trash2 className="h-3 w-3" /> Delete
                                     </button>
                                   </div>
@@ -1030,8 +1050,7 @@ export default function OfficersPage() {
           <>
             <div className="off-overlay fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-sm" onClick={() => setSelectedOfficer(null)} />
 
-            <div className="off-panel fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-white shadow-2xl">
-              {/* Gradient header */}
+<div className="off-panel fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">              {/* Gradient header */}
               <div className={`relative flex-shrink-0 overflow-hidden bg-gradient-to-br ${config.panelGradient} px-6 pb-5 pt-6`}>
                 <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-white/10 blur-3xl" />
                 <div className="absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-white/5 blur-3xl" />
@@ -1122,7 +1141,7 @@ export default function OfficersPage() {
                 <button
                   type="button"
                   onClick={() => handleDelete(selectedOfficer)}
-                  className="flex items-center justify-center gap-2 rounded-full border border-rose-200 px-4 py-2.5 text-sm font-semibold text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-50"
+                  className="flex items-center justify-center gap-2 rounded-full border border-rose-200 px-4 py-2.5 text-sm font-semibold text-rose-500 transition-colors hover:border-rose-300 hover:bg-rose-50/60"
                 >
                   <Trash2 className="h-4 w-4" />
                   Delete
@@ -1141,12 +1160,12 @@ export default function OfficersPage() {
             onClick={() => { if (!deleteLoading) { setDeleteTarget(null); setDeleteError(null); } }}
           />
           <div className="off-modal relative w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-100">
-              <Trash2 className="h-5 w-5 text-rose-600" />
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-50">
+              <Trash2 className="h-5 w-5 text-rose-500" />
             </div>
-            <h3 className="mt-4 text-center text-lg font-bold text-slate-900">Delete record?</h3>
+            <h3 className="mt-4 text-center text-lg font-bold text-slate-900">Move to trash?</h3>
             <p className="mt-1.5 text-center text-sm leading-relaxed text-slate-500">
-              &ldquo;{deleteTarget.name || 'This record'}&rdquo; will be permanently removed. This action can&rsquo;t be undone.
+              &ldquo;{deleteTarget.name || 'This record'}&rdquo; will be removed from this list and archived, so it can be recovered later if needed.
             </p>
 
             {deleteError && (
@@ -1169,10 +1188,10 @@ export default function OfficersPage() {
                 type="button"
                 onClick={confirmDelete}
                 disabled={deleteLoading}
-                className="flex flex-1 items-center justify-center gap-2 rounded-full bg-rose-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-rose-700 disabled:opacity-60"
+                className="flex flex-1 items-center justify-center gap-2 rounded-full bg-rose-500 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-rose-600 disabled:opacity-60"
               >
                 {deleteLoading && <Loader2 className="h-4 w-4 animate-spin" />}
-                {deleteLoading ? 'Deleting…' : 'Delete'}
+                {deleteLoading ? 'Moving…' : 'Move to trash'}
               </button>
             </div>
           </div>
@@ -1180,13 +1199,13 @@ export default function OfficersPage() {
       )}
 
       {/* ------------------------------ Panel ------------------------------ */}
-      <CreateOfficerPanel
-        isOpen={isPanelOpen}
-        officerType={panelOfficerType}
-        editingOfficer={editingOfficer}
-        onClose={() => { setIsPanelOpen(false); setEditingOfficer(null); }}
-        onSuccess={() => { setIsPanelOpen(false); setEditingOfficer(null); loadData(currentPage); refreshCounts(); }}
-      />
+<CreateOfficerPanel
+  isOpen={isPanelOpen}
+  officerType={panelOfficerType}
+  editOfficer={editingOfficer}
+  onClose={() => { setIsPanelOpen(false); setEditingOfficer(null); }}
+  onSuccess={() => { setIsPanelOpen(false); setEditingOfficer(null); loadData(currentPage); refreshCounts(); }}
+/>
     </div>
   );
 }

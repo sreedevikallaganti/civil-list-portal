@@ -14,6 +14,9 @@ export async function POST(req: NextRequest) {
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
 
+    await transporter.verify();
+console.log('SMTP connection successful ✅');
+
     await transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to,

@@ -1,11 +1,11 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Calendar as CalendarIcon, Clock, MapPin, Plus,
   ChevronLeft, ChevronRight, X, Edit3, Trash2,
   FileText, Users, Video, Phone, Mail, Link as LinkIcon,
-  ChevronRight as ChevronRightIcon, AlertCircle, RefreshCw,
+  ChevronRight as ChevronRightIcon, AlertCircle,
   Briefcase, Lightbulb, TrendingUp, GraduationCap,
   Presentation, ClipboardList, FolderKanban, MoreVertical, CalendarCheck, User, Loader2,
   Sunrise, CalendarDays, CalendarRange, CalendarClock, History, Filter
@@ -15,6 +15,7 @@ import CreateMeetingPanel from '@/components/CreateMeetingPanel';
 import ProtectedRoute from '@/components/auth/ProtectedRoute';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
+import { showToast } from '@/components/Toaster';
 
 type ViewMode = 'year' | 'month' | 'day' | 'agenda';
 type OffCanvasMode = 'view' | 'day' | null;
@@ -85,70 +86,6 @@ const ANIM_CSS = `
     .cal-fade-up,.cal-fade-in,.cal-scale-in,.cal-drawer,.cal-progress,.cal-float,.cal-pulse-ring { animation: none !important; }
   }
 `;
-
-/* ── Smooth count-up number ── */
-function AnimatedNumber({ value, duration = 800 }: { value: number; duration?: number }) {
-  const [display, setDisplay] = useState(0);
-  const prevRef = useRef(0);
-
-  useEffect(() => {
-    const start = prevRef.current;
-    const diff = value - start;
-    if (diff === 0) { prevRef.current = value; return; }
-    let raf: number;
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const p = Math.min((now - t0) / duration, 1);
-      const eased = 1 - Math.pow(1 - p, 3);
-      setDisplay(Math.round(start + diff * eased));
-      if (p < 1) raf = requestAnimationFrame(tick);
-      else prevRef.current = value;
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [value, duration]);
-
-  return <>{display}</>;
-}
-
-/* ── Pastel KPI card (reference style) ── */
-function StatCard({ icon: Icon, label, value, trend, trendLabel, card, tint, delay }: {
-  icon: any; label: string; value: number; trend?: number | null; trendLabel?: string;
-  card: string; tint: string; delay: number;
-}) {
-  const up = (trend ?? 0) >= 0;
-  return (
-    <div
-      className={`cal-fade-up group relative overflow-hidden rounded-3xl bg-gradient-to-br p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-slate-900/[0.08] ${card}`}
-      style={{ animationDelay: `${delay}ms` }}
-    >
-      <span
-        aria-hidden
-        className="pointer-events-none absolute -right-6 -top-6 h-20 w-20 rounded-full bg-white/50 transition-transform duration-300 group-hover:scale-125"
-      />
-
-      <div className="relative flex items-start justify-between gap-2">
-        <p className="pt-1.5 text-sm font-semibold text-slate-600">{label}</p>
-        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/80 shadow-sm transition-transform duration-300 group-hover:scale-110 ${tint}`}>
-          <Icon className="h-5 w-5" />
-        </span>
-      </div>
-
-      <div className="relative mt-3 flex items-end justify-between gap-2">
-        <span className="text-[2rem] font-extrabold leading-none tracking-tight text-slate-900 tabular-nums">
-          <AnimatedNumber value={value} />
-        </span>
-        {trend !== null && trend !== undefined && (
-          <span className={`inline-flex items-center gap-0.5 rounded-full bg-white/80 px-2 py-1 text-[10px] font-bold ring-1 ring-inset ring-white/60 ${up ? 'text-emerald-600' : 'text-rose-600'}`}>
-            <TrendingUp className={`h-3 w-3 ${up ? '' : 'rotate-180'}`} />
-            {up ? '+' : ''}{trend}%
-          </span>
-        )}
-      </div>
-      {trendLabel && <p className="relative mt-1.5 text-xs font-medium text-slate-500/80">{trendLabel}</p>}
-    </div>
-  );
-}
 
 /* ── Detail row for the off-canvas viewer ── */
 function DetailRow({ icon: Icon, label, children }: { icon: any; label: string; children: React.ReactNode }) {
@@ -299,7 +236,8 @@ export default function CalendarPage() {
           lastError = null;
           break;
         } catch (e: any) {
-          console.warn('[calendar] ❌ attempt failed:', attempt, '| status:', e?.status, '| msg:', e?.message);
+          console.
+          warn('[calendar] ❌ attempt failed:', attempt, '| status:', e?.status, '| msg:', e?.message);
           lastError = e;
           if (e?.status === 401 || e?.status === 403) break;
         }
@@ -406,29 +344,6 @@ export default function CalendarPage() {
 
   const getMeetingIcon = (type: string) => MEETING_TYPE_ICONS[type?.toLowerCase()] || MEETING_TYPE_ICONS['general'];
 
-  /* ── Page-level KPIs ── */
-
-  const kpis = useMemo(() => {
-    const now = new Date();
-    const prefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const prevPrefix = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
-
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const in7 = new Date(today); in7.setDate(in7.getDate() + 7);
-    const in7Str = formatDateForInput(in7);
-    const todayStr = formatDateForInput(today);
-
-    const thisMonth = meetings.filter(m => getMeetingDateStr(m).startsWith(prefix)).length;
-    const lastMonth = meetings.filter(m => getMeetingDateStr(m).startsWith(prevPrefix)).length;
-    const next7 = meetings.filter(m => { const d = getMeetingDateStr(m); return d >= todayStr && d <= in7Str; }).length;
-    const completed = meetings.filter(m => (m.status || 'Scheduled') === 'Completed').length;
-    const attention = meetings.filter(m => ['Cancelled', 'Rescheduled'].includes(m.status || 'Scheduled')).length;
-    const trend = lastMonth > 0 ? Math.round(((thisMonth - lastMonth) / lastMonth) * 100) : null;
-
-    return { thisMonth, next7, completed, attention, trend };
-  }, [meetings]);
-
   /* ── Navigation ── */
 
   const navigate = (dir: 'prev' | 'next') => {
@@ -450,7 +365,19 @@ export default function CalendarPage() {
 
   /* ── Shared panel wiring ── */
 
+  /* A meeting can only be created for today or a future date — never a
+     date that has already passed. Compared at day granularity (time of
+     day doesn't matter here). */
+  const isPastDate = (date: Date) => {
+    const startOfDay = (d: Date) => { const c = new Date(d); c.setHours(0, 0, 0, 0); return c; };
+    return startOfDay(date) < startOfDay(new Date());
+  };
+
   const openCreateForDate = (date: Date) => {
+    if (isPastDate(date)) {
+      showToast("Can't schedule a meeting on a past date — pick today or a future date.", 'error');
+      return;
+    }
     setOffCanvasMode(null);
     setSelectedMeeting(null);
     setSelectedDate(null);
@@ -917,6 +844,7 @@ export default function CalendarPage() {
     const hours = Array.from({ length: 12 }, (_, i) => i + 8);
     const isTodayView = currentDate.toDateString() === new Date().toDateString();
     const nowHour = new Date().getHours();
+    const isPastDayView = isPastDate(currentDate);
 
     return (
       <div className={`${CARD} overflow-hidden cal-fade-up`}>
@@ -930,7 +858,17 @@ export default function CalendarPage() {
               <p className="text-xs text-slate-400">{currentDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} · {dayMeetings.length} meeting{dayMeetings.length === 1 ? '' : 's'}</p>
             </div>
           </div>
-          <button type="button" onClick={() => openCreateForDate(currentDate)} className="group inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-slate-900/10 transition-all hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[.97]">
+          <button
+            type="button"
+            onClick={() => openCreateForDate(currentDate)}
+            disabled={isPastDayView}
+            title={isPastDayView ? "Can't schedule a meeting on a past date" : undefined}
+            className={`group inline-flex items-center gap-2 rounded-full px-4 py-2 text-xs font-semibold shadow-lg transition-all active:scale-[.97] ${
+              isPastDayView
+                ? 'cursor-not-allowed bg-slate-200 text-slate-400 shadow-none'
+                : 'bg-slate-900 text-white shadow-slate-900/10 hover:-translate-y-0.5 hover:bg-slate-800'
+            }`}
+          >
             <Plus className="h-3.5 w-3.5 transition-transform duration-300 group-hover:rotate-90" /> New Meeting
           </button>
         </div>
@@ -1239,15 +1177,6 @@ export default function CalendarPage() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => loadData()}
-                aria-label="Refresh data"
-                className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600"
-              >
-                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              </button>
-
-              <button
-                type="button"
                 onClick={openCreate}
                 className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
               >
@@ -1344,47 +1273,6 @@ export default function CalendarPage() {
               </div>
             </div>
 
-            {/* KPI cards */}
-            <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-              <StatCard
-                icon={CalendarDays}
-                label="This Month"
-                value={kpis.thisMonth}
-                trend={kpis.trend}
-                trendLabel="vs last month"
-                card="from-violet-100 to-purple-100"
-                tint="text-violet-600"
-                delay={60}
-              />
-              <StatCard
-                icon={CalendarClock}
-                label="Next 7 Days"
-                value={kpis.next7}
-                trendLabel="upcoming this week"
-                card="from-sky-100 to-blue-100"
-                tint="text-sky-600"
-                delay={130}
-              />
-              <StatCard
-                icon={CalendarCheck}
-                label="Completed"
-                value={kpis.completed}
-                trendLabel="all-time finished"
-                card="from-emerald-100 to-green-100"
-                tint="text-emerald-600"
-                delay={200}
-              />
-              <StatCard
-                icon={AlertCircle}
-                label="Needs Attention"
-                value={kpis.attention}
-                trendLabel="cancelled or rescheduled"
-                card="from-rose-100 to-pink-100"
-                tint="text-rose-600"
-                delay={270}
-              />
-            </div>
-
             {/* View content */}
             {viewMode === 'month' && renderMonthView()}
             {viewMode === 'year' && renderYearView()}
@@ -1404,8 +1292,7 @@ export default function CalendarPage() {
             <>
               <div className="cal-fade-in fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-sm" onClick={closeOffCanvas} />
 
-              <div className="cal-drawer fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-white shadow-2xl">
-                {/* Gradient header */}
+<div className="cal-drawer fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">                {/* Gradient header */}
                 <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-violet-900 px-6 pb-5 pt-6">
                   <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-violet-500/25 blur-3xl" />
                   <div className="absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-indigo-400/10 blur-3xl" />
@@ -1517,13 +1404,13 @@ export default function CalendarPage() {
           const dayMeetings = meetings
             .filter(m => getMeetingDateStr(m) === dateStr)
             .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
+          const isPastSelectedDate = isPastDate(selectedDate);
 
           return (
             <>
               <div className="cal-fade-in fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-sm" onClick={closeOffCanvas} />
 
-              <div className="cal-drawer fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-white shadow-2xl">
-                <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-violet-900 px-6 pb-5 pt-6">
+<div className="cal-drawer fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">                <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-violet-900 px-6 pb-5 pt-6">
                   <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-violet-500/25 blur-3xl" />
 
                   <div className="relative">
@@ -1552,14 +1439,18 @@ export default function CalendarPage() {
                     <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-10 text-center">
                       <CalendarCheck className="h-8 w-8 text-violet-300" />
                       <p className="mt-3 text-sm font-semibold text-slate-700">Nothing scheduled</p>
-                      <p className="mt-1 text-xs text-slate-500">This day is wide open.</p>
-                      <button
-                        type="button"
-                        onClick={() => openCreateForDate(selectedDate)}
-                        className="mt-4 inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800"
-                      >
-                        <Plus className="h-3.5 w-3.5" /> Schedule one
-                      </button>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {isPastSelectedDate ? "This date has passed — meetings can't be scheduled on it." : 'This day is wide open.'}
+                      </p>
+                      {!isPastSelectedDate && (
+                        <button
+                          type="button"
+                          onClick={() => openCreateForDate(selectedDate)}
+                          className="mt-4 inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800"
+                        >
+                          <Plus className="h-3.5 w-3.5" /> Schedule one
+                        </button>
+                      )}
                     </div>
                   ) : (
                     dayMeetings.map((m, i) => {
@@ -1597,7 +1488,13 @@ export default function CalendarPage() {
                   <button
                     type="button"
                     onClick={() => openCreateForDate(selectedDate)}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-full bg-slate-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800"
+                    disabled={isPastSelectedDate}
+                    title={isPastSelectedDate ? "Can't schedule a meeting on a past date" : undefined}
+                    className={`flex flex-1 items-center justify-center gap-2 rounded-full py-2.5 text-sm font-semibold transition-colors ${
+                      isPastSelectedDate
+                        ? 'cursor-not-allowed bg-slate-200 text-slate-400'
+                        : 'bg-slate-900 text-white hover:bg-slate-800'
+                    }`}
                   >
                     <Plus className="h-4 w-4" /> Add Meeting
                   </button>
