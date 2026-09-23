@@ -1,35 +1,33 @@
 'use client';
 
 /* ================================================================
-   CreateMeetingPanel — v16
-   NEW (v16):
-     (1) Documents can now be dragged & dropped onto the dropzone,
-         or pasted (Ctrl/Cmd+V) directly — not just picked via the
-         file browser.
-     (2) FIXED a real bug: documents picked in this panel were never
-         actually attached to the record. `syncDocuments()` existed
-         but was never called from `handleSubmit()`. It is now
-         called right after create/update, for BOTH create and edit.
-     (3) Unified the two duplicated (and one invalid-HTML) document
-         blocks into a single reusable <DocumentDropzone /> used in
-         both create and edit mode, with a shimmering progress bar
-         while the upload is in flight.
-     (4) Removed dead code (`handleDeleteMom` referenced an
-         `existingMom` state that was never declared — a leftover
-         from a removed feature — and the immediate-delete
-         `handleDeleteDoc`, superseded by the unified
-         stage-then-save-on-submit flow used everywhere else).
+   CreateMeetingPanel — v18
+   NEW (v18):
+     (1) FIXED 404s: automations now call the routes that actually
+         exist — /api/google (Calendar + Meet + officer email) and
+         /api/invite (email to additional officers / attendees) —
+         instead of the non-existent /api/automations/* routes.
+     (2) Request bodies use the exact field names those routes read
+         (date, time, includeMeet, officerEmail, to, …), so no 400s.
+     (3) Google runs first, so the invite email carries the Meet link.
+         Returned eventId / htmlLink / meetLink are saved back to the
+         record, so editing a meeting updates the same calendar event.
+     (4) Failures are shown as a red toast instead of being swallowed.
+     (5) Additional officers' emails are kept in `attendees` on save.
+     (6) pb.files.getUrl() → pb.files.getURL() (removes console warnings).
+     (7) Follow-up date + follow-up notes go into the calendar event
+         description.
+   v16 (kept): drag & drop / paste documents, syncDocuments() on save,
+         unified <DocumentDropzone />.
    v14 (kept): Time & Duration side-by-side; "Follow up" section
          with optional Status (Scheduled pre-selected) and optional
-         follow-up date, explicitly included in the Google Calendar
-         sync payload.
+         follow-up date.
    v13 (kept): Meeting workspace removed totally.
    v12 (kept): Agenda lives in Step 1.
    v11 (kept): Meeting type first — Internal → employees,
          External → officers (IAS / IPS / other contacts).
-   KEPT: v8 additional officers, instant save + background
-         automations, officer cache, validation, edit-populate,
-         follow-up rule, all UI language.
+   KEPT: v8 additional officers, officer cache, validation,
+         edit-populate, follow-up rule, follow-up notes, all UI language.
 ================================================================ */
 
 import { useState, useEffect, useRef, useMemo } from 'react';
@@ -148,6 +146,10 @@ const EMPTY_FORM = {
 
 const ACCEPTED_DOCS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg,.webp';
 const MAX_FILE_MB = 10;
+
+/* v18: the API routes that actually exist in app/api/ */
+const GOOGLE_ROUTE = '/api/google';
+const INVITE_ROUTE = '/api/invite';
 
 /* --------------------------- Helpers --------------------------- */
 
@@ -277,7 +279,7 @@ async function postJSON(url: string, body: any, timeoutMs = 12_000) {
       signal: ctrl.signal,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Automation failed');
+    if (!res.ok) throw new Error(data.error || `Automation failed (${res.status})`);
     return data;
   } finally {
     clearTimeout(t);
@@ -955,6 +957,9 @@ export default function CreateMeetingPanel({
   const savingRef = useRef(false);
   const loadedFollowUpRef = useRef<string>('');
   const lastLoadedKeyRef = useRef<string | null>(null);
+  /* true once follow_up_notes for the record being edited is known
+     (either present on the passed-in record or fetched fresh) */
+  const notesReadyRef = useRef<boolean>(true);
 
   const goStep = (s: 1 | 2) => { stepRef.current = s; setStep(s); };
 
@@ -1044,6 +1049,28 @@ export default function CreateMeetingPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editingId, editSource, resolvedDefaultDate]);
 
+  /* follow_up_notes: the record passed in from the list page may not
+     carry this field (partial fetch / mapped object). If it's missing,
+     load it straight from PocketBase so editing never shows it empty
+     and saving never wipes it. */
+  useEffect(() => {
+    if (!isOpen || !editingId) { notesReadyRef.current = true; return; }
+    if (editSource && editSource.follow_up_notes !== undefined) { notesReadyRef.current = true; return; }
+    notesReadyRef.current = false;
+    let cancelled = false;
+    pb.collection('meetings').getOne(editingId)
+      .then((fresh: any) => {
+        if (cancelled) return;
+        const notes = fresh?.follow_up_notes || '';
+        setFormData((prev) => (prev.follow_up_notes ? prev : { ...prev, follow_up_notes: notes }));
+        if (notes) setShowMoreDetails(true);
+        notesReadyRef.current = true;
+      })
+      .catch((err) => console.error('Failed to load follow-up notes:', err));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editingId]);
+
   /* load both pools when the panel opens */
   useEffect(() => { if (isOpen) { fetchOfficers(); fetchEmployees(); } }, [isOpen]);
 
@@ -1058,7 +1085,7 @@ export default function CreateMeetingPanel({
       const matches = pool.filter((o) => o.email && emails.has(o.email.toLowerCase()));
       if (!matches.length) return prev;
       setAttendeeList((list) =>
-        list.filter((a) => !matches.some((m) => m.email.toLowerCase() === a.trim().toLowerCase()))
+        list.filter((a) => !matches.some((m) => (m.email || '').toLowerCase() === a.trim().toLowerCase()))
       );
       setShowMoreDetails(true);
       return matches;
@@ -1154,9 +1181,10 @@ export default function CreateMeetingPanel({
       status_flag: normalizedStatus,
       follow_up_date: followUpRaw,
       follow_up_notes: m.follow_up_notes || '',
-      send_invite: Boolean(m.send_invite),
-      sync_gcal: Boolean(m.sync_gcal),
-      add_meet: Boolean(m.add_meet),
+      /* v18: fall back to the defaults when the record has no value */
+      send_invite: m.send_invite ?? EMPTY_FORM.send_invite,
+      sync_gcal: m.sync_gcal ?? EMPTY_FORM.sync_gcal,
+      add_meet: m.add_meet ?? EMPTY_FORM.add_meet,
       created_by: m.created_by || '',
       meet_link: m.meet_link || '',
       gcal_event_id: m.gcal_event_id || '',
@@ -1435,9 +1463,10 @@ export default function CreateMeetingPanel({
     try {
       const stub: any = { collectionName: 'meetings', id: editingId };
       const anyPb = pb as any;
-if (anyPb.files?.getURL) return anyPb.files.getURL(stub, filename);
-if (anyPb.files?.getUrl) return anyPb.files.getUrl(stub, filename);      
-if (anyPb.getFileUrl) return anyPb.getFileUrl(stub, filename);
+      /* v18: getURL is the current PocketBase SDK name (getUrl is deprecated) */
+      if (anyPb.files?.getURL) return anyPb.files.getURL(stub, filename);
+      if (anyPb.files?.getUrl) return anyPb.files.getUrl(stub, filename);
+      if (anyPb.getFileUrl) return anyPb.getFileUrl(stub, filename);
     } catch { /* noop */ }
     return '';
   };
@@ -1491,6 +1520,95 @@ if (anyPb.getFileUrl) return anyPb.getFileUrl(stub, filename);
     }
   }
 
+  /* ---------------- automations (v18) ---------------- */
+  /* Calls the routes that exist — /api/google and /api/invite — with the
+     field names they read. Google runs first so the email can carry the
+     Meet link. Returns a list of human-readable failures (empty = all OK). */
+  async function runAutomations(recId: string, payload: Record<string, any>) {
+    const failures: string[] = [];
+
+    const isEmail = (e: string) => /^\S+@\S+\.\S+$/.test(e);
+    const primaryEmail = (formData.email || '').trim().toLowerCase();
+    const allEmails = Array.from(new Set(
+      [primaryEmail, ...extraOfficers.map((o) => o.email || ''), ...attendeeList]
+        .map((e) => e.trim().toLowerCase())
+        .filter(isEmail),
+    ));
+
+    const notes = [
+      payload.follow_up_date && `Follow-up date: ${payload.follow_up_date}`,
+      payload.follow_up_notes && `Follow-up notes: ${payload.follow_up_notes}`,
+    ].filter(Boolean).join('\n');
+
+    let meetLink = formData.meet_link || '';
+    let primaryInvited = false; // true if /api/google already emailed the primary officer
+
+    /* 1) Google Calendar / Meet (+ email to the primary officer) */
+    if (formData.sync_gcal || formData.add_meet) {
+      try {
+        const r = await postJSON(GOOGLE_ROUTE, {
+          meetingId: recId,
+          agenda: payload.agenda,
+          date: payload.meeting_date,
+          time: payload.meeting_time,
+          duration: Number(payload.duration) || 30,
+          location: payload.location,
+          notes,
+          officerName: payload.officer_name,
+          officerEmail: primaryEmail || allEmails[0] || '',
+          includeMeet: formData.add_meet,
+          sendInvite: formData.send_invite,
+          syncCalendar: formData.sync_gcal,
+          gcalEventId: formData.gcal_event_id || '',
+          existingMeetLink: formData.meet_link || '',
+        }, 30_000);
+
+        if (r.meetLink) meetLink = r.meetLink;
+        primaryInvited = !!r.emailSent;
+
+        const update: Record<string, string> = {};
+        if (r.eventId) update.gcal_event_id = r.eventId;
+        if (r.htmlLink) update.gcal_link = r.htmlLink;
+        if (r.meetLink) update.meet_link = r.meetLink;
+        if (Object.keys(update).length) {
+          try { await pb.collection('meetings').update(recId, update); }
+          catch (e) { console.error('Saving Google links failed:', e); }
+        }
+        if (formData.add_meet && !r.meetLink) failures.push('Calendar saved, but no Meet link was created');
+      } catch (err: any) {
+        console.error(`${GOOGLE_ROUTE} failed:`, err);
+        failures.push(`Calendar/Meet: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+      }
+    }
+
+    /* 2) Invite email — skips the primary officer if /api/google already emailed them */
+    if (formData.send_invite) {
+      const recipients = primaryInvited ? allEmails.filter((e) => e !== primaryEmail) : allEmails;
+      if (!allEmails.length) {
+        failures.push('Invite skipped: no participant has an email address');
+      } else if (recipients.length) {
+        try {
+          await postJSON(INVITE_ROUTE, {
+            to: recipients.join(', '),
+            name: recipients.length === 1 && recipients[0] === primaryEmail ? payload.officer_name : '',
+            agenda: payload.agenda,
+            date: new Date(`${payload.meeting_date}T00:00:00`).toLocaleDateString('en-IN', {
+              weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+            }),
+            time: `${to12Hour(payload.meeting_time)} (${formatDuration(Number(payload.duration) || 0)})`,
+            location: payload.location,
+            meetLink,
+          }, 20_000);
+        } catch (err: any) {
+          console.error(`${INVITE_ROUTE} failed:`, err);
+          failures.push(`Invite: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+        }
+      }
+    }
+
+    return failures;
+  }
+
   /* ---------------- validation & submit ---------------- */
 
   function scrollToSection(key: string) {
@@ -1516,87 +1634,6 @@ if (anyPb.getFileUrl) return anyPb.getFileUrl(stub, filename);
     setSubmitError(null);
     goStep(2);
   }
-
-  /* v18: call /api/google + /api/invite with the field names those routes expect */
-async function runAutomations(recId: string, payload: Record<string, any>) {
-  const failures: string[] = [];
-
-  const isEmail = (e: string) => /^\S+@\S+\.\S+$/.test(e);
-  const primaryEmail = (formData.email || '').trim().toLowerCase();
-  const allEmails = Array.from(new Set(
-    [primaryEmail, ...extraOfficers.map((o) => o.email || ''), ...attendeeList]
-      .map((e) => e.trim().toLowerCase())
-      .filter(isEmail),
-  ));
-
-  let meetLink = formData.meet_link || '';
-  let primaryInvited = false; // true if /api/google already emailed the primary officer
-
-  /* 1) Google Calendar / Meet — runs first so the invite email can carry the Meet link */
-  if (formData.sync_gcal || formData.add_meet) {
-    try {
-      const r = await postJSON('/api/google', {
-        meetingId: recId,
-        agenda: payload.agenda,
-        date: payload.meeting_date,          // route expects `date`
-        time: payload.meeting_time,          // route expects `time` (HH:MM)
-        duration: Number(payload.duration) || 30,
-        location: payload.location,
-        notes: payload.follow_up_date ? `Follow-up date: ${payload.follow_up_date}` : '',
-        officerName: payload.officer_name,
-        officerEmail: primaryEmail || allEmails[0] || '',
-        includeMeet: formData.add_meet,
-        sendInvite: formData.send_invite,
-        syncCalendar: formData.sync_gcal,
-        gcalEventId: formData.gcal_event_id || '',   // update instead of duplicating
-        existingMeetLink: formData.meet_link || '',
-      }, 30_000);
-
-      if (r.meetLink) meetLink = r.meetLink;
-      primaryInvited = !!r.emailSent;
-
-      const update: Record<string, string> = {};
-      if (r.eventId) update.gcal_event_id = r.eventId;
-      if (r.htmlLink) update.gcal_link = r.htmlLink;
-      if (r.meetLink) update.meet_link = r.meetLink;
-      if (Object.keys(update).length) {
-        try { await pb.collection('meetings').update(recId, update); }
-        catch (e) { console.error('Saving Google links failed:', e); }
-      }
-      if (formData.add_meet && !r.meetLink) failures.push('Calendar saved, but no Meet link was created');
-    } catch (err: any) {
-      console.error('/api/google failed:', err);
-      failures.push(`Calendar/Meet: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
-    }
-  }
-
-  /* 2) Invite email — skips the primary officer if /api/google already emailed them */
-  if (formData.send_invite) {
-    const recipients = primaryInvited ? allEmails.filter((e) => e !== primaryEmail) : allEmails;
-    if (!allEmails.length) {
-      failures.push('Invite skipped: no participant has an email address');
-    } else if (recipients.length) {
-      try {
-        await postJSON('/api/invite', {
-          to: recipients.join(', '),         // route expects `to`
-          name: recipients.length === 1 ? payload.officer_name : '',
-          agenda: payload.agenda,
-          date: new Date(`${payload.meeting_date}T00:00:00`).toLocaleDateString('en-IN', {
-            weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
-          }),
-          time: `${to12Hour(payload.meeting_time)} (${formatDuration(Number(payload.duration) || 0)})`,
-          location: payload.location,
-          meetLink,
-        }, 20_000);
-      } catch (err: any) {
-        console.error('/api/invite failed:', err);
-        failures.push(`Invite: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
-      }
-    }
-  }
-
-  return failures;
-}
 
   async function handleSubmit() {
     if (savingRef.current) return;
@@ -1656,7 +1693,8 @@ async function runAutomations(recId: string, payload: Record<string, any>) {
         meeting_type: formData.meeting_type,
         meeting_place: formData.meeting_place,
         follow_up_date: formData.follow_up_date,
-        /* keeps additional officers' emails on the record */
+        follow_up_notes: formData.follow_up_notes.trim(),
+        /* v18: keep additional officers' emails on the record */
         attendees: Array.from(new Set([
           ...attendeeList,
           ...extraOfficers.map((o) => o.email || '').filter(Boolean),
@@ -1667,13 +1705,28 @@ async function runAutomations(recId: string, payload: Record<string, any>) {
         created_by: formData.created_by,
       };
 
-      const rec: any = editingId
+      /* never overwrite saved notes with '' before they've loaded */
+      if (editingId && !notesReadyRef.current && !payload.follow_up_notes) {
+        delete payload.follow_up_notes;
+      }
+
+      let rec: any = editingId
         ? await pb.collection('meetings').update(editingId, payload)
         : await pb.collection('meetings').create(payload);
 
+      /* follow_up_notes — make sure it actually landed on the record */
+      if ('follow_up_notes' in payload && (rec?.follow_up_notes ?? '') !== payload.follow_up_notes) {
+        rec = await pb.collection('meetings').update(rec.id, { follow_up_notes: payload.follow_up_notes });
+        if ((rec?.follow_up_notes ?? '') !== payload.follow_up_notes) {
+          showToast('Follow-up notes could not be saved — check the follow_up_notes field in the meetings collection', 'error');
+        }
+      }
+
+      /* v16 FIX: actually attach any picked/dropped/pasted documents
+         now that we have a record id. */
       await syncDocuments(rec.id);
 
-      /* v18: the ONLY place automations are called — correct field names */
+      /* v18: Google Calendar / Meet / invite email via the real routes */
       const failures = await runAutomations(rec.id, payload);
 
       showToast(editingId ? 'Meeting updated' : 'Meeting created', 'success');
