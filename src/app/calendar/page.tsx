@@ -8,10 +8,12 @@ import {
   ChevronRight as ChevronRightIcon, AlertCircle,
   Briefcase, Lightbulb, TrendingUp, GraduationCap,
   Presentation, ClipboardList, FolderKanban, MoreVertical, CalendarCheck, User, Loader2,
-  Sunrise, CalendarDays, CalendarRange, CalendarClock, History, Filter
+  Sunrise, CalendarDays, CalendarRange, CalendarClock, History, Filter, RotateCcw
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import CreateMeetingPanel from '@/components/CreateMeetingPanel';
+import UpdateMeetingPanel from '@/components/UpdateMeetingPanel';
+import MeetingDetailsPanel from '@/components/MeetingDetailsPanel';
 import ProtectedRoute from '@/components/auth/ProtectedRoute';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
@@ -115,47 +117,10 @@ export default function CalendarPage() {
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [offCanvasMode, setOffCanvasMode] = useState<OffCanvasMode>(null);
 
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState('');
-
-  const requestDelete = () => {
-    setDeleteError('');
-    setConfirmDelete(true);
-  };
-
-  const cancelDelete = () => {
-    if (deleting) return;
-    setConfirmDelete(false);
-    setDeleteError('');
-  };
-
-  const confirmDeleteMeeting = async () => {
-    if (!selectedMeeting || deleting) return;
-    setDeleting(true);
-    setDeleteError('');
-    try {
-      await pb.collection('meetings').delete(selectedMeeting.id);
-      setConfirmDelete(false);
-      closeOffCanvas();
-      await loadData();
-    } catch (err: any) {
-      console.error('Delete error:', err);
-
-      if (err?.status === 401) {
-        logout();
-        router.replace('/login');
-        return;
-      }
-      setDeleteError(err?.message || 'Failed to delete the meeting. Please try again.');
-    } finally {
-      setDeleting(false);
-    }
-  };
-
   const [panelOpen, setPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<any>(null);
   const [panelDate, setPanelDate] = useState<string>('');
+  const [updateMeeting, setUpdateMeeting] = useState<any>(null);
 
   const [agendaFilter, setAgendaFilter] = useState<string>('all');
   const [sectionPages, setSectionPages] = useState<Record<string, number>>({});
@@ -207,8 +172,7 @@ export default function CalendarPage() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (confirmDelete) cancelDelete();
-      else if (offCanvasMode) closeOffCanvas();
+      if (offCanvasMode === 'day') closeOffCanvas();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -388,13 +352,31 @@ export default function CalendarPage() {
 
   const openCreate = () => openCreateForDate(new Date());
 
-  const openEditMeeting = (meeting: any) => {
+  /* Always re-fetch the full record before editing/updating (same as Meetings page) */
+  const fetchFreshMeeting = async (id: string) => {
+    try {
+      return await pb.collection('meetings').getOne(id, { requestKey: null });
+    } catch {
+      return null;
+    }
+  };
+
+  const openEditMeeting = async (meeting: any) => {
     setOffCanvasMode(null);
     setSelectedMeeting(null);
     setSelectedDate(null);
     setPanelDate('');
-    setEditingMeeting(meeting);
+    const fresh = await fetchFreshMeeting(meeting.id);
+    setEditingMeeting(fresh || meeting);
     setPanelOpen(true);
+  };
+
+  const openUpdateMeeting = async (meeting: any) => {
+    setOffCanvasMode(null);
+    setSelectedMeeting(null);
+    setSelectedDate(null);
+    const fresh = await fetchFreshMeeting(meeting.id);
+    setUpdateMeeting(fresh || meeting);
   };
 
   const closePanel = () => {
@@ -1281,122 +1263,20 @@ export default function CalendarPage() {
           </div>
         </div>
 
-        {/* ── Off-canvas: meeting details ── */}
-        {offCanvasMode === 'view' && selectedMeeting && (() => {
-          const m = selectedMeeting;
-          const color = getMeetingVisualColor(m);
-          const statusKey = m.status || 'Scheduled';
-          const attendees = getAttendeesArray(m.attendees);
-
-          return (
-            <>
-              <div className="cal-fade-in fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-sm" onClick={closeOffCanvas} />
-
-<div className="cal-drawer fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">                {/* Gradient header */}
-                <div className="relative flex-shrink-0 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-violet-900 px-6 pb-5 pt-6">
-                  <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-violet-500/25 blur-3xl" />
-                  <div className="absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-indigo-400/10 blur-3xl" />
-
-                  <div className="relative">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-white ring-1 ring-inset ring-white/20">
-                          <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOTS[statusKey] || 'bg-violet-400'}`} />
-                          {statusKey}
-                        </span>
-                        <span className="inline-flex rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-semibold capitalize text-white/70 ring-1 ring-inset ring-white/15">
-                          {getMeetingType(m)}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={closeOffCanvas}
-                        className="-mr-2 -mt-1 rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
-                      >
-                        <X className="h-5 w-5" />
-                      </button>
-                    </div>
-
-                    <h2 className="mt-3 text-xl font-bold leading-snug text-white">{getMeetingTitle(m)}</h2>
-
-                    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-slate-300">
-                      <span className="flex items-center gap-1.5">
-                        <CalendarIcon className="h-4 w-4 text-slate-400" />
-                        {getMeetingDateStr(m) || '—'}
-                      </span>
-                      <span className="flex items-center gap-1.5">
-                        <Clock className="h-4 w-4 text-slate-400" />
-                        {formatTime12(getMeetingTime(m))}
-                        {m.duration ? ` · ${m.duration} min` : ''}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Scrollable body */}
-                <div className="min-h-0 flex-1 space-y-1 overflow-y-auto bg-slate-50 p-5">
-                  <div className="rounded-2xl border border-slate-200/80 bg-white px-4">
-                    <DetailRow icon={MapPin} label="Location">{m.location || m.venue || 'Not specified'}</DetailRow>
-                    <div className="border-t border-slate-100" />
-                    <DetailRow icon={Briefcase} label="Type"><span className="capitalize">{getMeetingType(m)}</span></DetailRow>
-                    {m.officer_name && (
-                      <>
-                        <div className="border-t border-slate-100" />
-                        <DetailRow icon={User} label="Officer">{m.officer_name}</DetailRow>
-                      </>
-                    )}
-                    {attendees.length > 0 && (
-                      <>
-                        <div className="border-t border-slate-100" />
-                        <DetailRow icon={Users} label="Attendees">
-                          <span className="flex flex-wrap gap-1.5">
-                            {attendees.map((a, i) => (
-                              <span key={i} className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">{a}</span>
-                            ))}
-                          </span>
-                        </DetailRow>
-                      </>
-                    )}
-                    {m.agenda && (
-                      <>
-                        <div className="border-t border-slate-100" />
-                        <DetailRow icon={FileText} label="Agenda">
-                          <span className="whitespace-pre-line">{m.agenda}</span>
-                        </DetailRow>
-                      </>
-                    )}
-                    {m.description && (
-                      <>
-                        <div className="border-t border-slate-100" />
-                        <DetailRow icon={FileText} label="Description">
-                          <span className="whitespace-pre-line">{m.description}</span>
-                        </DetailRow>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                {/* Footer actions */}
-                <div className="flex flex-shrink-0 gap-2.5 border-t border-slate-200 bg-white p-4">
-                  <button
-                    type="button"
-                    onClick={() => openEditMeeting(m)}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-full bg-slate-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800"
-                  >
-                    <Edit3 className="h-4 w-4" /> Edit
-                  </button>
-                  <button
-                    type="button"
-                    onClick={requestDelete}
-                    className="flex items-center justify-center gap-2 rounded-full border border-rose-200 px-4 py-2.5 text-sm font-semibold text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-50"
-                  >
-                    <Trash2 className="h-4 w-4" /> Delete
-                  </button>
-                </div>
-              </div>
-            </>
-          );
-        })()}
+        {/* ── Off-canvas: meeting details — shared with Meetings & Dashboard ── */}
+        {offCanvasMode === 'view' && selectedMeeting && (
+          <MeetingDetailsPanel
+            meeting={selectedMeeting}
+            onClose={closeOffCanvas}
+            onEdit={openEditMeeting}
+            onUpdate={openUpdateMeeting}
+            onDeleted={() => { closeOffCanvas(); loadData(); }}
+            onMeetingChange={(updated) => {
+              setSelectedMeeting(updated);
+              setMeetings(prev => prev.map(x => (x.id === updated.id ? updated : x)));
+            }}
+          />
+        )}
 
         {/* ── Off-canvas: day details ── */}
         {offCanvasMode === 'day' && selectedDate && (() => {
@@ -1511,57 +1391,26 @@ export default function CalendarPage() {
           );
         })()}
 
-        {/* ── Delete confirmation modal ── */}
-        {confirmDelete && selectedMeeting && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
-            <div className="cal-fade-in absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={cancelDelete} />
-            <div className="cal-scale-in relative w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-100">
-                <Trash2 className="h-5 w-5 text-rose-600" />
-              </div>
-              <h3 className="mt-4 text-center text-lg font-bold text-slate-900">Delete meeting?</h3>
-              <p className="mt-1.5 text-center text-sm leading-relaxed text-slate-500">
-                &ldquo;{getMeetingTitle(selectedMeeting)}&rdquo; will be permanently removed. This action can&rsquo;t be undone.
-              </p>
-
-              {deleteError && (
-                <div className="mt-4 flex items-start gap-2.5 rounded-2xl border border-rose-200 bg-rose-50 px-3.5 py-3">
-                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
-                  <p className="text-xs leading-relaxed text-rose-700">{deleteError}</p>
-                </div>
-              )}
-
-              <div className="mt-5 flex gap-3">
-                <button
-                  type="button"
-                  onClick={cancelDelete}
-                  disabled={deleting}
-                  className="flex-1 rounded-full border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={confirmDeleteMeeting}
-                  disabled={deleting}
-                  className="flex flex-1 items-center justify-center gap-2 rounded-full bg-rose-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-rose-700 disabled:opacity-60"
-                >
-                  {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {deleting ? 'Deleting…' : 'Delete'}
-                </button>
-              </div>
-            </div>
-          </div>
+        {/* ── Create / Edit panel (same mounting as Meetings page) ── */}
+        {panelOpen && (
+          <CreateMeetingPanel
+            key={editingMeeting ? `edit-${editingMeeting.id}` : `create-${panelDate}`}
+            isOpen={panelOpen}
+            onClose={closePanel}
+            onSuccess={handlePanelSuccess}
+            editingMeeting={editingMeeting}
+            initialDate={panelDate}
+          />
         )}
 
-        {/* ── Create / Edit panel ── */}
-        <CreateMeetingPanel
-          isOpen={panelOpen}
-          onClose={closePanel}
-          onSuccess={handlePanelSuccess}
-          editingMeeting={editingMeeting}
-          initialDate={panelDate}
-        />
+        {/* ── Update meeting panel — shared with Meetings & Dashboard ── */}
+        {updateMeeting && (
+          <UpdateMeetingPanel
+            meeting={updateMeeting}
+            onClose={() => setUpdateMeeting(null)}
+            onSaved={() => { setUpdateMeeting(null); loadData(); }}
+          />
+        )}
       </div>
     </ProtectedRoute>
   );

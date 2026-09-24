@@ -15,7 +15,6 @@ import {
   Clock3,
   Edit2,
   FileText,
-  Loader2,
   Mail,
   MapPin,
   Plus,
@@ -26,7 +25,6 @@ import {
   Tag,
   Trash2,
   TrendingUp,
-  Upload,
   User,
   Users,
   X,
@@ -34,7 +32,12 @@ import {
 } from "lucide-react";
 import pb from "@/lib/pocketbase";
 import CreateMeetingPanel from "@/components/CreateMeetingPanel";
+import UpdateMeetingPanel from "@/components/UpdateMeetingPanel";
+import MeetingDetailsPanel from "@/components/MeetingDetailsPanel";
 import ProtectedRoute from "@/components/auth/ProtectedRoute";
+import OnThisDayCard from "@/components/memories/OnThisDayCard"; // NEW: On This Day
+import RecapTeaserCard from "@/components/memories/RecapTeaserCard"; // NEW: Yearly Recap
+import { Sparkles } from "lucide-react"; // NEW: icon for the Yearly Recap quick action
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
@@ -948,607 +951,6 @@ function QuickActionButton({
 }
 
 /* ────────────────────────────────────────────────
-   Off-canvas details panel (matches Meetings page)
-──────────────────────────────────────────────── */
-
-function MeetingDetailsPanel({
-  meeting,
-  onClose,
-  onEdit,
-  onDeleteRequest,
-  onUpdateRequest,
-}: {
-  meeting: Meeting;
-  onClose: () => void;
-  onEdit: (meeting: Meeting) => void;
-  onDeleteRequest: () => void;
-  onUpdateRequest: (meeting: Meeting) => void;
-}) {
-  const dateInfo = formatDate(meeting.meeting_date || meeting.created_date);
-  const style = getStatusStyle(getStatusKey(meeting));
-  const title = getMeetingTitle(meeting);
-  const timeDisplay = formatTimeDisplay(meeting.meeting_time || "");
-
-  return (
-    <>
-      <div
-        className="anim-overlay fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm"
-        onClick={onClose}
-      />
-
-<div className="anim-panel nice-scroll fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col overflow-y-auto bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">        <div className="h-1.5 w-full shrink-0 bg-gradient-to-r from-violet-500 to-indigo-500" />
-
-        {/* Header */}
-        <div className="flex-shrink-0 border-b border-slate-100 bg-white px-5 pb-4 pt-5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ${style.badge}`}
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
-                {style.label}
-              </span>
-              {meeting.meeting_type && (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700">
-                  <Building2 className="h-3.5 w-3.5" />
-                  {meeting.meeting_type}
-                </span>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="-mr-1 -mt-1 flex h-9 w-9 flex-shrink-0 cursor-pointer items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-
-          <h2 className="mt-3 text-xl font-bold leading-snug text-slate-900">{title}</h2>
-          <p className="mt-1 text-sm text-slate-400">
-            {dateInfo ? `${dateInfo.weekday} · ${dateInfo.full}` : "Date not available"}
-          </p>
-        </div>
-
-        {/* Body */}
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-violet-50/40 p-5">
-          {meeting.meeting_type && (
-            <div className="flex items-center gap-3.5 rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm">
-                <Building2 className="h-5 w-5" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Meeting Type
-                </p>
-                <p className="mt-0.5 truncate text-base font-bold capitalize text-slate-900">
-                  {meeting.meeting_type}
-                </p>
-              </div>
-              <span className="h-2 w-2 shrink-0 rounded-full bg-violet-500" />
-            </div>
-          )}
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <Calendar className="h-3.5 w-3.5 text-violet-500" /> Date
-              </p>
-              <p className="mt-2 text-sm font-semibold text-slate-900">{dateInfo?.full || "—"}</p>
-              {dateInfo && <p className="mt-0.5 text-xs text-slate-400">{dateInfo.weekday}</p>}
-            </div>
-
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <Clock className="h-3.5 w-3.5 text-violet-500" /> Time
-              </p>
-              <p className="mt-2 text-sm font-semibold text-slate-900">
-                {timeDisplay}{" "}
-                {meeting.duration && (
-                  <span className="text-xs font-medium text-slate-400">({meeting.duration} min)</span>
-                )}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <MapPin className="h-3.5 w-3.5 text-sky-500" /> Location
-              </p>
-              <p className="mt-2 truncate text-sm font-semibold text-slate-900">
-                {meeting.location || meeting.meeting_place || "—"}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <User className="h-3.5 w-3.5 text-emerald-500" /> Officer
-              </p>
-              <p className="mt-2 truncate text-sm font-semibold text-slate-900">
-                {meeting.officer_name || "—"}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <Tag className="h-3.5 w-3.5 text-amber-500" /> Priority
-              </p>
-              <div className="mt-2">
-                {meeting.priority ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-600">
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                    <span className="capitalize">{meeting.priority}</span>
-                  </span>
-                ) : (
-                  <span className="text-sm font-semibold text-slate-900">—</span>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <Briefcase className="h-3.5 w-3.5 text-fuchsia-500" /> Type
-              </p>
-              <p className="mt-2 text-sm font-semibold text-slate-900">
-                {meeting.meeting_type || "—"}
-              </p>
-            </div>
-          </div>
-
-          {meeting.email && (
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <Mail className="h-3.5 w-3.5 text-teal-500" /> Email
-              </p>
-              <p className="mt-2 break-all text-sm font-semibold text-slate-900">{meeting.email}</p>
-            </div>
-          )}
-
-          {meeting.agenda && (
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <AlignLeft className="h-3.5 w-3.5 text-violet-500" /> Agenda
-              </p>
-              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-slate-600">
-                {meeting.agenda}
-              </p>
-            </div>
-          )}
-
-          {meeting.description && (
-            <div className="rounded-2xl border border-slate-100 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/[0.04]">
-              <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                <FileText className="h-3.5 w-3.5 text-violet-500" /> Description
-              </p>
-              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-slate-600">
-                {meeting.description}
-              </p>
-            </div>
-          )}
-
-          {(meeting.created || meeting.updated) && (
-            <div className="flex items-center justify-between rounded-2xl border border-slate-100 bg-white px-4 py-3 text-[11px] text-slate-400">
-              {meeting.created && (
-                <span>
-                  Created{" "}
-                  {new Date(meeting.created).toLocaleDateString("en-IN", {
-                    day: "numeric",
-                    month: "short",
-                    year: "numeric",
-                  })}
-                </span>
-              )}
-              {meeting.updated && (
-                <span>
-                  Updated{" "}
-                  {new Date(meeting.updated).toLocaleDateString("en-IN", {
-                    day: "numeric",
-                    month: "short",
-                    year: "numeric",
-                  })}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Footer — Edit / Update / Delete */}
-        <div className="relative flex flex-shrink-0 items-center gap-2.5 border-t border-slate-100 bg-white p-4">
-          <button
-            type="button"
-            onClick={() => onEdit(meeting)}
-            className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-full bg-slate-900 py-3 text-sm font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
-          >
-            <Edit2 className="h-4 w-4" />
-            Edit
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onUpdateRequest(meeting)}
-            className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-full border border-amber-200 bg-amber-50 py-3 text-sm font-semibold text-amber-600 transition-all duration-200 hover:-translate-y-0.5 hover:bg-amber-100 active:scale-[0.98]"
-          >
-            <RotateCcw className="h-4 w-4" />
-            Update
-          </button>
-
-          <button
-            type="button"
-            onClick={onDeleteRequest}
-            aria-label="Delete meeting"
-            className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-rose-200 text-rose-500 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-50 active:scale-[0.98]"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
-    </>
-  );
-}
-
-/* ────────────────────────────────────────────────
-   Inline "Update Meeting" panel — same as the
-   Meetings module: manual status/reschedule/
-   follow-up/document update, no automations.
-──────────────────────────────────────────────── */
-
-const MAX_FILE_MB = 10;
-const ACCEPTED_DOCS = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg,.webp";
-
-function InlineUpdateStatusPanel({
-  meeting,
-  onClose,
-  onSaved,
-}: {
-  meeting: Meeting;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [status, setStatus] = useState<string>(getStatusKey(meeting));
-  const [newDate, setNewDate] = useState<string>(String(meeting?.meeting_date || "").slice(0, 10) || "");
-  const [newTime, setNewTime] = useState<string>(
-    String(meeting?.meeting_time || "").match(/\d{1,2}:\d{2}/)?.[0] || ""
-  );
-  const [followUpDate, setFollowUpDate] = useState<string>(
-    String((meeting as any)?.follow_up_date || (meeting as any)?.followup_date || "").slice(0, 10) || ""
-  );
-  const [note, setNote] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  const [existingDocs, setExistingDocs] = useState<string[]>(() => {
-    const v = (meeting as any)?.documents;
-    if (!v) return [];
-    try {
-      return typeof v === "string" ? JSON.parse(v) : v;
-    } catch {
-      return [];
-    }
-  });
-  const [pendingDocs, setPendingDocs] = useState<File[]>([]);
-  const docInputRef = useRef<HTMLInputElement>(null);
-  const initialDocsRef = useRef<string[]>([]);
-
-  useEffect(() => {
-    initialDocsRef.current = existingDocs;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const handlePickDocs = (files: FileList | null) => {
-    if (!files?.length) return;
-    const list = Array.from(files);
-    const tooBig = list.find((f) => f.size > MAX_FILE_MB * 1024 * 1024);
-    if (tooBig) alert(`"${tooBig.name}" is larger than ${MAX_FILE_MB} MB`);
-    const ok = list.filter((f) => f.size <= MAX_FILE_MB * 1024 * 1024);
-    if (ok.length) {
-      setPendingDocs((prev) => {
-        const seen = new Set(prev.map((p) => `${p.name}:${p.size}`));
-        return [...prev, ...ok.filter((f) => !seen.has(`${f.name}:${f.size}`))];
-      });
-    }
-    if (docInputRef.current) docInputRef.current.value = "";
-  };
-
-  const removePendingDoc = (idx: number) => setPendingDocs((prev) => prev.filter((_, i) => i !== idx));
-  const removeExistingDoc = (name: string) => setExistingDocs((prev) => prev.filter((n) => n !== name));
-
-  const fileUrl = (filename: string) => {
-    try {
-      const anyPb = pb as any;
-      if (anyPb.files?.getUrl) return anyPb.files.getUrl(meeting, filename);
-      if (anyPb.getFileUrl) return anyPb.getFileUrl(meeting, filename);
-    } catch {
-      /* noop */
-    }
-    return "";
-  };
-
-  const docsDirty =
-    pendingDocs.length > 0 || existingDocs.join("||") !== initialDocsRef.current.join("||");
-
-  async function syncDocuments(recordId: string) {
-    if (!docsDirty) return;
-    const fd = new FormData();
-    if (!existingDocs.length && !pendingDocs.length) {
-      fd.append("documents", "");
-    } else {
-      existingDocs.forEach((n) => fd.append("documents", n));
-      pendingDocs.forEach((f) => fd.append("documents", f));
-    }
-    await pb.collection("meetings").update(recordId, fd);
-  }
-
-  const handleSave = async () => {
-    if (!meeting?.id || saving) return;
-    setSaving(true);
-    setError("");
-    try {
-      const statusLabel = STATUS_STYLES[status]?.label || status;
-      const payload: Record<string, any> = {
-        status: statusLabel,
-        status_flag: statusLabel,
-        follow_up_date: followUpDate,
-      };
-
-      if (status === "rescheduled") {
-        if (newDate) payload.meeting_date = newDate;
-        if (newTime) payload.meeting_time = newTime;
-      }
-      await pb.collection("meetings").update(meeting.id, payload);
-      await syncDocuments(meeting.id);
-
-      const trimmedNote = note.trim();
-      if (trimmedNote) {
-        for (const field of ["status_note", "notes"]) {
-          try {
-            await pb.collection("meetings").update(meeting.id, { [field]: trimmedNote });
-            break;
-          } catch {
-            /* try next common field name */
-          }
-        }
-      }
-      onSaved();
-    } catch (e: any) {
-      setError(e?.message || "Failed to update. Please try again.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const di = (() => {
-    const raw = String(meeting?.meeting_date || "");
-    if (!raw) return null;
-    const d = new Date(raw.includes(" ") ? raw.replace(" ", "T") : raw);
-    return Number.isNaN(d.getTime())
-      ? null
-      : d.toLocaleDateString("en-US", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-  })();
-
-  return (
-    <div className="fixed inset-0 z-[70]">
-      <div
-        className="anim-overlay absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
-        onClick={() => !saving && onClose()}
-      />
-
-<aside className="anim-panel absolute right-0 top-0 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">        <div className="h-1.5 w-full bg-gradient-to-r from-amber-400 to-orange-400" />
-
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
-          <div className="min-w-0">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Update Meeting</p>
-            <h2 className="mt-0.5 truncate text-base font-bold text-slate-900">{getMeetingTitle(meeting)}</h2>
-            <p className="mt-0.5 text-xs text-slate-400">
-              {di || "—"}
-              {meeting?.meeting_time ? ` · ${meeting.meeting_time}` : ""}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => !saving && onClose()}
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="nice-scroll flex-1 space-y-5 overflow-y-auto px-5 py-5">
-          {/* Status */}
-          <div>
-            <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">Status</p>
-            <div className="grid grid-cols-2 gap-2">
-              {Object.entries(STATUS_STYLES).map(([key, s]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setStatus(key)}
-                  disabled={saving}
-                  className={`inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all duration-200 active:scale-[0.97] disabled:opacity-50 ${
-                    status === key
-                      ? `${s.badge} border-2 border-slate-900`
-                      : "border border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50"
-                  }`}
-                >
-                  <span className={`h-2 w-2 rounded-full ${s.dot}`} />
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Reschedule fields — only shown (and only saved) for Rescheduled */}
-          {status === "rescheduled" && (
-            <div className="anim-fade-in grid grid-cols-2 gap-3 rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
-              <div>
-                <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-amber-700">New Date</label>
-                <input
-                  type="date"
-                  value={newDate}
-                  onChange={(e) => setNewDate(e.target.value)}
-                  disabled={saving}
-                  className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-amber-400 focus:outline-none focus:ring-4 focus:ring-amber-500/10"
-                />
-              </div>
-              <div>
-                <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-amber-700">New Time</label>
-                <input
-                  type="time"
-                  value={newTime}
-                  onChange={(e) => setNewTime(e.target.value)}
-                  disabled={saving}
-                  className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-amber-400 focus:outline-none focus:ring-4 focus:ring-amber-500/10"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Follow-up date (optional) */}
-          <div>
-            <label className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              Follow-up date (optional)
-            </label>
-            <input
-              type="date"
-              value={followUpDate}
-              onChange={(e) => setFollowUpDate(e.target.value)}
-              disabled={saving}
-              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-violet-400 focus:outline-none focus:ring-4 focus:ring-violet-500/10"
-            />
-            <p className="mt-1 text-[11px] text-slate-400">
-              Included in the Google Calendar sync when syncing is enabled.
-            </p>
-          </div>
-
-          {/* Documents — attach before saving */}
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Documents</p>
-              <span className="text-[10px] font-semibold text-slate-400">max {MAX_FILE_MB} MB each</span>
-            </div>
-            <input
-              ref={docInputRef}
-              type="file"
-              multiple
-              accept={ACCEPTED_DOCS}
-              className="hidden"
-              onChange={(e) => handlePickDocs(e.target.files)}
-            />
-            <button
-              type="button"
-              onClick={() => docInputRef.current?.click()}
-              disabled={saving}
-              className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50/50 px-3 py-3 text-xs font-semibold text-slate-600 transition-all hover:border-violet-300 hover:bg-violet-50/50 hover:text-violet-700 disabled:opacity-50"
-            >
-              <Upload className="h-4 w-4" />
-              Attach documents
-              <span className="text-[10px] font-normal text-slate-400">PDF, Word, Excel, images</span>
-            </button>
-
-            {existingDocs.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {existingDocs.map((name) => {
-                  const url = fileUrl(name);
-                  return (
-                    <span
-                      key={name}
-                      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-white py-1 pl-2.5 pr-1 text-[11px] font-medium text-slate-600"
-                    >
-                      <FileText className="h-3 w-3 shrink-0 text-violet-500" />
-                      {url ? (
-                        <a href={url} target="_blank" rel="noreferrer" className="max-w-[140px] truncate hover:text-violet-600 hover:underline">
-                          {name}
-                        </a>
-                      ) : (
-                        <span className="max-w-[140px] truncate">{name}</span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => removeExistingDoc(name)}
-                        disabled={saving}
-                        className="rounded-full p-0.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </span>
-                  );
-                })}
-              </div>
-            )}
-
-            {pendingDocs.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {pendingDocs.map((f, i) => (
-                  <span
-                    key={`${f.name}-${i}`}
-                    className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 py-1 pl-2.5 pr-1 text-[11px] font-medium text-violet-700"
-                  >
-                    <FileText className="h-3 w-3 shrink-0" />
-                    <span className="max-w-[140px] truncate">{f.name}</span>
-                    <button
-                      type="button"
-                      onClick={() => removePendingDoc(i)}
-                      disabled={saving}
-                      className="rounded-full p-0.5 text-violet-400 transition-colors hover:bg-violet-100 hover:text-rose-500"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Note */}
-          <div>
-            <label className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Note (optional)</label>
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              rows={4}
-              disabled={saving}
-              placeholder="Add a short note about this status change..."
-              className="w-full resize-none rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm text-slate-900 placeholder-slate-400 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
-            />
-          </div>
-
-          {error && (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-600">
-              {error}
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="border-t border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={saving}
-              className="flex-1 rounded-full border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="inline-flex flex-[2] items-center justify-center gap-1.5 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98] disabled:opacity-60"
-            >
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-              {saving ? "Saving..." : "Save Changes"}
-            </button>
-          </div>
-        </div>
-      </aside>
-    </div>
-  );
-}
-
-/* ────────────────────────────────────────────────
    Dashboard Page
 ──────────────────────────────────────────────── */
 
@@ -1579,7 +981,6 @@ export default function DashboardPage() {
   const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<Meeting | null>(null);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [updateMeeting, setUpdateMeeting] = useState<Meeting | null>(null);
 
   /* ────────────────────────────────
@@ -1704,19 +1105,6 @@ export default function DashboardPage() {
     loadDashboardData({ silent: true });
   };
 
-  const confirmDelete = async () => {
-    if (!selectedMeeting) return;
-    try {
-      await pb.collection("meetings").delete(selectedMeeting.id);
-      setSelectedMeeting(null);
-      setShowDeleteConfirm(false);
-      loadDashboardData({ silent: true });
-    } catch (err) {
-      console.error("[Dashboard] Delete failed:", err);
-      alert("Failed to delete meeting. Please try again.");
-    }
-  };
-
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
@@ -1730,23 +1118,21 @@ export default function DashboardPage() {
     router.push(path);
   };
 
-  /* ESC closes delete modal first, then the update panel, then the details off-canvas */
+  /* ESC closes the update panel (the details panel handles its own ESC) */
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape" || panelOpen) return;
-      if (showDeleteConfirm) setShowDeleteConfirm(false);
-      else if (updateMeeting) setUpdateMeeting(null);
-      else setSelectedMeeting(null);
+      if (updateMeeting) setUpdateMeeting(null);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedMeeting, showDeleteConfirm, panelOpen, updateMeeting]);
+  }, [panelOpen, updateMeeting]);
 
   /* Keyboard shortcut: pressing "N" opens the create meeting panel */
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "n" && e.key !== "N") return;
-      if (panelOpen || selectedMeeting || showDeleteConfirm || updateMeeting) return;
+      if (panelOpen || selectedMeeting || updateMeeting) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
@@ -1755,7 +1141,7 @@ export default function DashboardPage() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [panelOpen, selectedMeeting, showDeleteConfirm, updateMeeting]);
+  }, [panelOpen, selectedMeeting, updateMeeting]);
 
   /* ────────────────────────────────
      Derived data
@@ -2065,6 +1451,11 @@ export default function DashboardPage() {
             <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
               {/* Left column */}
               <div className="space-y-6 xl:col-span-2">
+                {/* NEW: On This Day — renders nothing when there are no memories */}
+                {!loadingMeetings && (
+                  <OnThisDayCard meetings={meetings} onOpenMeeting={openMeetingDetails} delay={180} />
+                )}
+
                 {/* Upcoming meetings */}
                 <section
                   className="anim-fade-up overflow-hidden rounded-3xl border border-violet-100 bg-white shadow-sm"
@@ -2178,6 +1569,9 @@ export default function DashboardPage() {
 
               {/* Right column */}
               <div className="space-y-6">
+                {/* NEW: Yearly Recap */}
+                <RecapTeaserCard meetings={meetings} loading={loadingMeetings} delay={200} />
+
                 {/* Status breakdown */}
                 <section
                   className="anim-fade-up rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
@@ -2255,6 +1649,12 @@ export default function DashboardPage() {
                       label="View Reports"
                       onClick={() => goTo("/reports")}
                     />
+                    {/* NEW: Yearly Recap */}
+                    <QuickActionButton
+                      icon={<Sparkles className="h-4 w-4" />}
+                      label="Yearly Recap"
+                      onClick={() => goTo("/recap")}
+                    />
                   </div>
                 </section>
               </div>
@@ -2263,69 +1663,28 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Meeting details off-canvas ── */}
+      {/* ── Meeting details off-canvas — shared with Meetings & Calendar ── */}
       {selectedMeeting && (
         <MeetingDetailsPanel
           meeting={selectedMeeting}
           onClose={closeMeetingDetails}
           onEdit={openEditFromDetails}
-          onDeleteRequest={() => setShowDeleteConfirm(true)}
-          onUpdateRequest={handleOpenUpdate}
+          onUpdate={handleOpenUpdate}
+          onDeleted={() => { setSelectedMeeting(null); loadDashboardData({ silent: true }); }}
+          onMeetingChange={(updated) => {
+            setSelectedMeeting(updated);
+            setMeetings((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+          }}
         />
       )}
 
-      {/* ── Update meeting panel (status / reschedule / follow-up / docs) ── */}
+      {/* ── Update meeting panel — shared with the Meetings page ── */}
       {updateMeeting && (
-        <InlineUpdateStatusPanel
+        <UpdateMeetingPanel
           meeting={updateMeeting}
           onClose={closeUpdatePanel}
           onSaved={handleUpdateSaved}
         />
-      )}
-
-      {/* ── Delete confirmation modal ── */}
-      {showDeleteConfirm && selectedMeeting && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div
-            className="anim-overlay absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-            onClick={() => setShowDeleteConfirm(false)}
-          />
-          <div className="anim-scale-in relative w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl">
-            <button
-              type="button"
-              onClick={() => setShowDeleteConfirm(false)}
-              aria-label="Close"
-              className="absolute right-4 top-4 cursor-pointer rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-            >
-              <X className="h-4 w-4" />
-            </button>
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-rose-50">
-              <XCircle className="h-6 w-6 text-rose-500" />
-            </div>
-            <h3 className="mt-4 text-lg font-bold text-slate-900">Delete this meeting?</h3>
-            <p className="mt-1 text-sm text-slate-500">
-              &quot;{getMeetingTitle(selectedMeeting)}&quot; will be permanently removed. This action
-              cannot be undone.
-            </p>
-            <div className="mt-5 flex gap-3">
-              <button
-                type="button"
-                onClick={() => setShowDeleteConfirm(false)}
-                className="flex-1 cursor-pointer rounded-full border border-slate-200 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmDelete}
-                className="flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-full bg-rose-600 py-2.5 text-sm font-semibold text-white transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-700 active:scale-[0.98]"
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       {/* ── Create / Edit panel ── */}
