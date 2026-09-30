@@ -2,25 +2,52 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { google } from 'googleapis';
 import nodemailer from 'nodemailer';
+import { getAuthorizedClient, isInvalidGrant } from '@/lib/googleAuth';
+import { requireUser, esc, safeUrl } from '@/lib/serverAuth';
+import { APP_TIMEZONE } from '@/lib/appConfig';
 
 export const runtime = 'nodejs';
 
-function getClient() {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
-  console.log('[api/google] env check →', {
-    id: GOOGLE_CLIENT_ID ? 'set ✅' : '❌ MISSING',
-    secret: GOOGLE_CLIENT_SECRET ? 'set ✅' : '❌ MISSING',
-    token: GOOGLE_REFRESH_TOKEN ? 'set ✅' : '❌ MISSING',
-  });
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
-    throw new Error('Google OAuth environment variables are missing');
+const reconnectResponse = () => {
+  console.error('[api/google] refresh token expired or revoked — an admin must use “Reconnect Google”');
+  return NextResponse.json({ error: 'Google connection expired', needsReconnect: true }, { status: 401 });
+};
+
+/* Remove a meeting's calendar event (meeting cancelled or deleted). */
+export async function DELETE(req: NextRequest) {
+  const user = await requireUser(req, 'editor');
+  if (user instanceof NextResponse) return user;
+  try {
+    const { gcalEventId, notify = true } = await req.json();
+    if (!gcalEventId) return NextResponse.json({ error: 'gcalEventId is required' }, { status: 400 });
+    const calendar = google.calendar({ version: 'v3', auth: getAuthorizedClient() });
+    try {
+      await calendar.events.delete({
+        calendarId: resolveCalendarId(), eventId: gcalEventId, sendUpdates: notify ? 'all' : 'none',
+      });
+    } catch (e: any) {
+      const code = e?.code || e?.response?.status;
+      if (code !== 404 && code !== 410) throw e; // already gone → fine
+    }
+    return NextResponse.json({ ok: true });
+  } catch (err: any) {
+    if (isInvalidGrant(err)) return reconnectResponse();
+    console.error('[api/google] delete failed:', err?.response?.data || err);
+    return NextResponse.json({ error: err?.response?.data?.error?.message || err?.message || 'Delete failed' }, { status: 500 });
   }
-  const auth = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
-  auth.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
-  return auth;
+}
+
+/* A calendar ID is 'primary' or an email-like id; anything else (typo) falls back to 'primary'. */
+function resolveCalendarId() {
+  const id = (process.env.GOOGLE_CALENDAR_ID || 'primary').trim();
+  if (id === 'primary' || id.includes('@')) return id;
+  console.warn(`[api/google] GOOGLE_CALENDAR_ID "${id}" is not a valid calendar id — using 'primary'`);
+  return 'primary';
 }
 
 export async function POST(req: NextRequest) {
+  const user = await requireUser(req, 'editor');
+  if (user instanceof NextResponse) return user;
   try {
     const {
       meetingId, agenda, date, time, duration = 30,
@@ -42,21 +69,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ skipped: true, meetLink: existingMeetLink || null, eventId: null, htmlLink: null });
     }
 
-    const auth = getClient();
+    const auth = getAuthorizedClient();
     const calendar = google.calendar({ version: 'v3', auth });
 
-    /* ⭐ DIAGNOSTIC: prove which account/calendar this token can actually reach */
-    try {
-      const me = await calendar.calendars.get({ calendarId: 'primary' });
-      console.log('[api/google] 🔑 token belongs to calendar →', me.data.id, '| timezone:', me.data.timeZone);
-    } catch (preErr: any) {
-      console.log('[api/google] 🔑 token CANNOT read primary calendar →',
-        preErr?.code, preErr?.response?.data?.error?.message || preErr?.message);
-    }
-
-    const calendarId = (process.env.GOOGLE_CALENDAR_ID || 'primary').trim();
-    console.log('[api/google] configured calendarId →', JSON.stringify(calendarId));
-    const timeZone = process.env.APP_TIMEZONE || 'Asia/Kolkata';
+    const calendarId = resolveCalendarId();
+    const timeZone = APP_TIMEZONE;
     const startTime = time || '09:00';
 
     const [h, m] = startTime.split(':').map(Number);
@@ -132,7 +149,6 @@ export async function POST(req: NextRequest) {
                 sendUpdates: bv.sendUpdates,
                 requestBody: bv.body,
               };
-              console.log(`[api/google] attempt → calendar:${cid} | ${bv.note} | ${mode}`);
               const event = mode === 'update'
                 ? await calendar.events.update({ ...params, eventId: gcalEventId })
                 : await calendar.events.insert(params);
@@ -140,9 +156,9 @@ export async function POST(req: NextRequest) {
               eventId = event.data.id || null;
               htmlLink = event.data.htmlLink || null;
               saved = true;
-              console.log(`[api/google] ✅ SAVED → calendar:${cid} | ${bv.note} | ${mode} | eventId:`, eventId);
               break outer;
             } catch (e: any) {
+              if (isInvalidGrant(e)) throw e; // token dead — retrying other variants is pointless
               lastErr = e;
               console.warn(`[api/google] ✗ failed [${e?.code || e?.response?.status}]`,
                 e?.response?.data?.error?.message || e?.message);
@@ -159,22 +175,22 @@ export async function POST(req: NextRequest) {
         const transporter = nodemailer.createTransport({
           host: process.env.SMTP_HOST || 'smtp.gmail.com',
           port: Number(process.env.SMTP_PORT || 465),
-          secure: true,
+          secure: Number(process.env.SMTP_PORT || 465) === 465,
           auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
         });
         await transporter.sendMail({
           from: `"Civillist Meetings" <${process.env.SMTP_USER}>`,
           to: officerEmail,
-          subject: `Meeting Invitation: ${agenda || 'Meeting'}`,
+          subject: `Meeting Invitation: ${String(agenda || 'Meeting').replace(/[\r\n]+/g, ' ')}`,
           html: `<div style="font-family:Segoe UI,Arial,sans-serif;max-width:560px;margin:auto">
             <h2 style="color:#1e293b">Meeting Invitation</h2>
-            <p>Dear ${officerName || 'Sir/Madam'},</p>
+            <p>Dear ${esc(officerName || 'Sir/Madam')},</p>
             <table style="border-collapse:collapse;width:100%">
-              <tr><td style="padding:6px 12px 6px 0;color:#64748b"><b>Agenda</b></td><td>${agenda || '—'}</td></tr>
-              <tr><td style="padding:6px 12px 6px 0;color:#64748b"><b>When</b></td><td>${date} ${startTime} (${duration} min)</td></tr>
-              <tr><td style="padding:6px 12px 6px 0;color:#64748b"><b>Where</b></td><td>${location || '—'}${meetLink ? ' + Google Meet' : ''}</td></tr>
+              <tr><td style="padding:6px 12px 6px 0;color:#64748b"><b>Agenda</b></td><td>${esc(agenda || '—')}</td></tr>
+              <tr><td style="padding:6px 12px 6px 0;color:#64748b"><b>When</b></td><td>${esc(date)} ${esc(startTime)} (${esc(duration)} min)</td></tr>
+              <tr><td style="padding:6px 12px 6px 0;color:#64748b"><b>Where</b></td><td>${esc(location || '—')}${meetLink ? ' + Google Meet' : ''}</td></tr>
             </table>
-            ${meetLink ? `<p style="margin:20px 0"><a href="${meetLink}" style="background:#4f46e5;color:#fff;padding:10px 22px;border-radius:999px;text-decoration:none;font-weight:600">Join on Google Meet</a></p>` : ''}
+            ${safeUrl(meetLink) ? `<p style="margin:20px 0"><a href="${esc(safeUrl(meetLink))}" style="background:#4f46e5;color:#fff;padding:10px 22px;border-radius:999px;text-decoration:none;font-weight:600">Join on Google Meet</a></p>` : ''}
             <p style="color:#94a3b8;font-size:12px">Automated invitation from Civillist Meeting Management.</p>
           </div>`,
         });
@@ -186,6 +202,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ meetLink, eventId, htmlLink, emailSent });
   } catch (err: any) {
+    if (isInvalidGrant(err)) return reconnectResponse();
     console.error('Google sync error:', err?.response?.data || err);
     return NextResponse.json(
       { error: err?.response?.data?.error?.message || err?.message || 'Google sync failed' },

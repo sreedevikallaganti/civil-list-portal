@@ -124,7 +124,7 @@ export default function CreateUserPanel({ onSaved, onClose }: Props) {
             ).map((f) => (
               <div key={f.key}>
                 <label htmlFor={`usr-${f.key}`} className="mb-1 block text-sm font-medium text-gray-700">
-                  {f.label}{f.required && <span className="text-red-500"> *</span>}
+                  {f.label}{'required' in f && f.required &&<span className="text-red-500"> *</span>}
                 </label>
                 <input
                   id={`usr-${f.key}`}

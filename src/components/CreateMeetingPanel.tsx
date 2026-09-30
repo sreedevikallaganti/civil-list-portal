@@ -1,20 +1,45 @@
 'use client';
 
 /* ================================================================
-   CreateMeetingPanel — v18
-   NEW (v18):
-     (1) FIXED 404s: automations now call the routes that actually
-         exist — /api/google (Calendar + Meet + officer email) and
-         /api/invite (email to additional officers / attendees) —
-         instead of the non-existent /api/automations/* routes.
-     (2) Request bodies use the exact field names those routes read
-         (date, time, includeMeet, officerEmail, to, …), so no 400s.
+   CreateMeetingPanel — v22
+   NEW (v22) — "met before" reminder:
+     (1) City field in the Place section (suggestions for known cities;
+         auto-filled from the address when it names one).
+     (2) While creating a meeting in another city, a hint shows how many
+         people the MD has met there before. After saving, the page
+         shows a popup with those people (see onSavedMeeting).
+     (3) duplicateFrom.__prefill lets callers pre-set fields (used by the
+         popup's Schedule button).
+   v21:
+     (1) Repeat feature REMOVED completely (RepeatPicker, series
+         creation, "Create N meetings" button label). Every save now
+         creates / updates exactly one meeting.
+     (2) duplicateFrom kept: opens a NEW meeting pre-filled from an
+         existing one (date cleared so a new slot is picked) — this is
+         the simple way to set up the "same meeting again".
+   v19 — slot-conflict protection:
+     (1) 24-hour clock everywhere (00:00–23:59), no AM/PM — works for
+         India, Dubai and other regions.
+     (2) Busy-aware time picker: quick-slot chips / hour-minute options
+         that fall inside an existing meeting are striped + disabled,
+         with a tooltip naming that meeting.
+     (3) Duration chips that would run into the next meeting disable
+         themselves ("Runs into 'X' at 11:45").
+     (5) Conflict card with one-click "nearest free slot" suggestions.
+     (6) Soft warning when the same participant already has a meeting
+         that day.
+     (7) Hard block on save + friendly handling of the PocketBase
+         server-side guard (pb_hooks/meetings.pb.js).
+   v18:
+     (1) Automations call /api/google (Calendar + Meet + officer email)
+         and /api/invite (email to additional officers / attendees).
+     (2) Request bodies use the exact field names those routes read.
      (3) Google runs first, so the invite email carries the Meet link.
          Returned eventId / htmlLink / meetLink are saved back to the
          record, so editing a meeting updates the same calendar event.
      (4) Failures are shown as a red toast instead of being swallowed.
      (5) Additional officers' emails are kept in `attendees` on save.
-     (6) pb.files.getUrl() → pb.files.getURL() (removes console warnings).
+     (6) pb.files.getUrl() → pb.files.getURL().
      (7) Follow-up date + follow-up notes go into the calendar event
          description.
    v16 (kept): drag & drop / paste documents, syncDocuments() on save,
@@ -40,6 +65,14 @@ import {
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import { showToast } from '@/components/Toaster';
+import { completedTooEarly } from '@/lib/meetingRules';
+import {
+  useBusySlots, isSlotConflictError, slotConflictMessage, blockLabel, toHHMM, durationBlockReason,
+  type BusyBlock, type SlotSuggestion,
+} from '@/lib/busySlots';
+import ConflictCard, { ParticipantNotice } from '@/components/ConflictCard';
+import { CITIES, cityKey, cityLabel, findCity } from '@/lib/cities';
+import { findPeopleToRevisit, personKey } from '@/lib/revisit';
 
 /* ------------------------------- CSS ------------------------------- */
 
@@ -72,6 +105,12 @@ interface CreateMeetingPanelProps {
   defaultDate?: string;
   initialDate?: string;
   markedDates?: string[];
+  /* create a new meeting pre-filled from this one */
+  duplicateFrom?: any;
+  /* all meetings — used for the "met before in this city" hint */
+  pastMeetings?: any[];
+  /* called after a successful save: saved fields + id + __isNew */
+  onSavedMeeting?: (rec: any) => void;
 }
 
 interface Officer {
@@ -117,7 +156,8 @@ const STATUS_FLAGS = [
 export const PRESET_DURATIONS = [15, 30, 45, 60, 90, 120, 180];
 
 const QUICK_TIME_SLOTS = ['09:30','10:00','11:00','12:00','14:00','15:00','16:30','18:00'];
-const HOUR_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+/* 24-hour clock — 00 … 23 */
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'));
 const MINUTE_OPTIONS = ['00','05','10','15','20','25','30','35','40','45','50','55'];
 
 const OFFICER_EDIT_FIELDS = [
@@ -142,12 +182,13 @@ const EMPTY_FORM = {
   /* Google integrations + send invite auto-selected for every new meeting */
   send_invite: true, sync_gcal: true, add_meet: true,
   created_by: '', meet_link: '', gcal_event_id: '', gcal_link: '',
+  city: '',
 };
 
 const ACCEPTED_DOCS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg,.webp';
 const MAX_FILE_MB = 10;
 
-/* v18: the API routes that actually exist in app/api/ */
+/* the API routes that actually exist in app/api/ */
 const GOOGLE_ROUTE = '/api/google';
 const INVITE_ROUTE = '/api/invite';
 
@@ -171,23 +212,15 @@ const prettyDate = (s: string) => {
   });
 };
 
-const to12Hour = (t: string) => {
-  if (!t) return '';
-  const [h, m] = t.split(':').map(Number);
-  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+/* 24-hour display (HH:mm) everywhere */
+export const fmtTime24 = (t: string) => {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(t || '').trim());
+  return m ? `${m[1].padStart(2, '0')}:${m[2]}` : '';
 };
 
-const splitTo12 = (t: string) => {
-  if (!t) return { hour: '', minute: '00', ampm: 'AM' as 'AM' | 'PM' };
-  const [h, m] = t.split(':').map(Number);
-  return { hour: String(h % 12 || 12), minute: String(m).padStart(2, '0'),
-    ampm: (h >= 12 ? 'PM' : 'AM') as 'AM' | 'PM' };
-};
-
-const to24Hour = (h12: string, min: string, ap: string) => {
-  let h = Number(h12) % 12;
-  if (ap === 'PM') h += 12;
-  return `${String(h).padStart(2, '0')}:${min}`;
+const splitTime24 = (t: string) => {
+  const v = fmtTime24(t);
+  return v ? { hour: v.slice(0, 2), minute: v.slice(3, 5) } : { hour: '', minute: '00' };
 };
 
 export const formatDuration = (m: number) => {
@@ -267,6 +300,32 @@ const initialsOf = (name: string) =>
 let officerCache: { data: Officer[]; ts: number } | null = null;
 const OFFICER_CACHE_TTL = 60_000;
 
+/* IAS officers loaded up front; everyone else is found by server-side search */
+const IAS_PAGE = 40;
+
+const mapOfficer = (o: any, type: Officer['type']): Officer => ({
+  id: o.id,
+  name: o.name || '',
+  designation: o.designation || o.current_position || o.occupation || '',
+  type,
+  cadre: o.cadre || '',
+  state: o.state || '',
+  contact_number: o.contact_number || o.phone || '',
+  email: o.email || '',
+  department: o.department || '',
+  current_position: o.current_position || o.designation || '',
+  batch_year: o.batch_year || '',
+});
+
+/** base list + extra records, de-duplicated by id (base wins, so fresh data replaces old) */
+const mergeOfficers = (base: Officer[], extra: Officer[]) => {
+  const seen = new Set(base.map((o) => o.id));
+  return [...base, ...extra.filter((o) => !seen.has(o.id))];
+};
+
+/** PocketBase filter-safe string */
+const pbq = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
 /* fetch with hard timeout so a hanging automation never blocks forever */
 async function postJSON(url: string, body: any, timeoutMs = 12_000) {
   const ctrl = new AbortController();
@@ -274,12 +333,12 @@ async function postJSON(url: string, body: any, timeoutMs = 12_000) {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: pb.authStore.token || '' },
       body: JSON.stringify(body),
       signal: ctrl.signal,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Automation failed (${res.status})`);
+    if (!res.ok) throw Object.assign(new Error(data.error || `Automation failed (${res.status})`), data);
     return data;
   } finally {
     clearTimeout(t);
@@ -370,7 +429,7 @@ function Pill({ children }: { children: React.ReactNode }) {
 }
 
 /* ------------------------- DocumentDropzone ------------------------- */
-/* v16: unified drag-and-drop + paste + click-to-browse dropzone, used
+/* Unified drag-and-drop + paste + click-to-browse dropzone, used
    for both create and edit mode. Files are staged locally and only
    uploaded when the parent calls syncDocuments() (on Save). */
 
@@ -661,9 +720,7 @@ export function WeekStrip({ value, onChange, markedDates = [] }: {
 }
 
 /* --------------------------- MiniDatePicker --------------------------- */
-/* Compact popover calendar used for the "Follow up" date — replaces the
-   plain native <input type="date"> so the picker matches the rest of the
-   panel's look instead of the browser's default date UI. */
+/* Compact popover calendar used for the "Follow up" date. */
 
 function MiniDatePicker({ value, onChange, min }: {
   value: string; onChange: (v: string) => void; min?: string;
@@ -789,49 +846,53 @@ function MiniDatePicker({ value, onChange, min }: {
 
 /* --------------------------- TimeSlotPicker --------------------------- */
 
-export function TimeSlotPicker({ value, onChange, meetingDate }: {
-  value: string; onChange: (v: string) => void; meetingDate: string;
+/* 24-hour picker + busy awareness.
+   `busyAt(t)` (optional) returns the meeting occupying time `t`, if any —
+   those quick-slot chips / minute options are striped and can't be picked.
+   Pages that don't pass it get the plain 24-hour picker. */
+const BUSY_STRIPES = 'repeating-linear-gradient(135deg, rgba(244,63,94,.10) 0 5px, transparent 5px 10px)';
+
+export function TimeSlotPicker({ value, onChange, meetingDate, busyAt, accent = 'violet' }: {
+  value: string;
+  onChange: (v: string) => void;
+  meetingDate: string;
+  busyAt?: (t: string) => BusyBlock | undefined;
+  accent?: 'violet' | 'amber';
 }) {
-  const [hour, setHour] = useState(() => splitTo12(value).hour);
-  const [minute, setMinute] = useState(() => splitTo12(value).minute);
-  const [ampm, setAmpm] = useState<'AM' | 'PM'>(() => splitTo12(value).ampm);
+  const [hour, setHour] = useState(() => splitTime24(value).hour);
+  const [minute, setMinute] = useState(() => splitTime24(value).minute);
 
   useEffect(() => {
-    const p = splitTo12(value);
-    setHour(p.hour); setMinute(p.minute); setAmpm(p.ampm);
+    const p = splitTime24(value);
+    setHour(p.hour); setMinute(p.minute);
   }, [value]);
 
-  const isOptionPast = (h: string, m: string, ap: string) =>
-    isPastTimeToday(meetingDate, to24Hour(h, m, ap));
-  const firstAvailableMinute = (h: string, ap: string) =>
-    MINUTE_OPTIONS.find((m) => !isOptionPast(h, m, ap)) ?? '';
+  const isPast = (t: string) => isPastTimeToday(meetingDate, t);
+  const isBusy = (t: string) => !!busyAt?.(t);
+  const unavailable = (h: string, m: string) => isPast(`${h}:${m}`) || isBusy(`${h}:${m}`);
+  const firstAvailableMinute = (h: string) => MINUTE_OPTIONS.find((m) => !unavailable(h, m)) ?? '';
 
   const pickHour = (h: string) => {
     setHour(h);
     if (!h) return;
     let m = minute;
-    if (isOptionPast(h, m, ampm)) { m = firstAvailableMinute(h, ampm); setMinute(m || '00'); }
-    if (m && !isOptionPast(h, m, ampm)) onChange(to24Hour(h, m, ampm));
+    if (unavailable(h, m)) { m = firstAvailableMinute(h); setMinute(m || '00'); }
+    if (m && !unavailable(h, m)) onChange(`${h}:${m}`);
   };
   const pickMinute = (m: string) => {
     setMinute(m);
     if (!hour) return;
-    if (!isOptionPast(hour, m, ampm)) onChange(to24Hour(hour, m, ampm));
-  };
-  const pickAmpm = (ap: 'AM' | 'PM') => {
-    setAmpm(ap);
-    if (!hour) return;
-    let m = minute;
-    if (isOptionPast(hour, m, ap)) {
-      m = firstAvailableMinute(hour, ap);
-      if (!m) { setHour(''); setMinute('00'); return; }
-      setMinute(m);
-    }
-    onChange(to24Hour(hour, m, ap));
+    if (!unavailable(hour, m)) onChange(`${hour}:${m}`);
   };
 
-  const visibleSlots = QUICK_TIME_SLOTS.filter((t) => !isPastTimeToday(meetingDate, t));
-  const selectCls = 'cursor-pointer bg-transparent px-1 py-1 text-xs font-semibold text-slate-700 outline-none';
+  const visibleSlots = QUICK_TIME_SLOTS.filter((t) => !isPast(t));
+  const selectCls = 'cursor-pointer bg-transparent px-1 py-1 text-xs font-semibold tabular-nums text-slate-700 outline-none';
+  const sel = accent === 'amber'
+    ? 'border-amber-500 bg-amber-500 text-white shadow-md shadow-amber-500/25'
+    : 'border-violet-600 bg-violet-600 text-white shadow-md shadow-violet-500/25';
+  const idle = accent === 'amber'
+    ? 'border-slate-200 bg-white text-slate-600 hover:border-amber-300 hover:text-amber-700'
+    : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:text-violet-700';
 
   return (
     <div className="min-w-0 flex-1 space-y-2.5">
@@ -839,43 +900,53 @@ export function TimeSlotPicker({ value, onChange, meetingDate }: {
         <div className="grid grid-cols-3 gap-1.5">
           {visibleSlots.map((t) => {
             const selected = value === t;
+            const busy = busyAt?.(t);
+            if (busy && !selected) {
+              return (
+                <button
+                  key={t} type="button" disabled
+                  title={`Busy · ${blockLabel(busy)} · ${busy.agenda}`}
+                  className="relative cursor-not-allowed whitespace-nowrap rounded-full border border-rose-100 py-2 text-[11px] font-semibold tabular-nums text-rose-300 line-through decoration-rose-300/70"
+                  style={{ backgroundImage: BUSY_STRIPES }}
+                >
+                  {t}
+                  <span className="absolute -right-1 -top-1.5 rounded-full bg-rose-500 px-1 text-[8px] font-bold leading-[14px] text-white no-underline">Busy</span>
+                </button>
+              );
+            }
             return (
               <button
                 key={t} type="button" onClick={() => onChange(t)}
                 className={`whitespace-nowrap rounded-full border py-2 text-[11px] font-semibold tabular-nums transition-all active:scale-95 ${
-                  selected ? 'border-violet-600 bg-violet-600 text-white shadow-md shadow-violet-500/25'
-                  : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:text-violet-700'
+                  selected ? (busy ? 'border-rose-500 bg-rose-500 text-white shadow-md shadow-rose-500/25' : sel) : idle
                 }`}
-              >{to12Hour(t)}</button>
+              >{t}</button>
             );
           })}
         </div>
       )}
       <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5">
-        <span className="shrink-0 text-[11px] text-slate-400">Other</span>
-        <div className="flex items-center rounded-full border border-slate-200 bg-white p-1 transition focus-within:border-violet-400 focus-within:ring-4 focus-within:ring-violet-500/10">
+        <span className="shrink-0 text-[11px] text-slate-400">Other <span className="text-slate-300">(24h)</span></span>
+        <div className={`flex items-center rounded-full border border-slate-200 bg-white p-1 transition focus-within:ring-4 ${
+          accent === 'amber' ? 'focus-within:border-amber-400 focus-within:ring-amber-500/10' : 'focus-within:border-violet-400 focus-within:ring-violet-500/10'
+        }`}>
           <select value={hour} onChange={(e) => pickHour(e.target.value)} aria-label="Hour" className={selectCls}>
             <option value="">HH</option>
             {HOUR_OPTIONS.map((h) => (
-              <option key={h} value={h} disabled={firstAvailableMinute(h, ampm) === ''}>{h}</option>
+              <option key={h} value={h} disabled={firstAvailableMinute(h) === ''}>{h}</option>
             ))}
           </select>
           <span className="text-xs font-bold text-slate-300">:</span>
           <select value={minute} onChange={(e) => pickMinute(e.target.value)} aria-label="Minute" className={selectCls}>
-            {MINUTE_OPTIONS.map((m) => (
-              <option key={m} value={m} disabled={!!hour && isOptionPast(hour, m, ampm)}>{m}</option>
-            ))}
+            {MINUTE_OPTIONS.map((m) => {
+              const busy = !!hour && isBusy(`${hour}:${m}`);
+              return (
+                <option key={m} value={m} disabled={!!hour && unavailable(hour, m)}>
+                  {m}{busy ? ' · busy' : ''}
+                </option>
+              );
+            })}
           </select>
-          <div className="ml-1 flex rounded-full bg-slate-100 p-0.5">
-            {(['AM', 'PM'] as const).map((ap) => (
-              <button
-                key={ap} type="button" onClick={() => pickAmpm(ap)}
-                className={`rounded-full px-2 py-0.5 text-[10px] font-bold transition-all ${
-                  ampm === ap ? 'bg-white text-violet-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'
-                }`}
-              >{ap}</button>
-            ))}
-          </div>
         </div>
       </div>
     </div>
@@ -889,6 +960,9 @@ export default function CreateMeetingPanel({
   meetingToEdit, editingMeeting,
   defaultDate, initialDate,
   markedDates,
+  duplicateFrom,
+  pastMeetings,
+  onSavedMeeting,
 }: CreateMeetingPanelProps) {
   /* Accept BOTH prop names so every page works */
   const editSource = meetingToEdit ?? editingMeeting ?? null;
@@ -900,6 +974,8 @@ export default function CreateMeetingPanel({
 
   const [officers, setOfficers] = useState<Officer[]>([]);
   const [officerSearch, setOfficerSearch] = useState('');
+  const [iasTotal, setIasTotal] = useState(0);
+  const [iasSearching, setIasSearching] = useState(false);
   const [typeFilter, setTypeFilter] = useState<'All' | 'IAS' | 'IPS' | 'Other'>('All');
   const [selectedOfficer, setSelectedOfficer] = useState<Officer | null>(null);
   const [showOfficerEdit, setShowOfficerEdit] = useState(false);
@@ -957,46 +1033,36 @@ export default function CreateMeetingPanel({
   const savingRef = useRef(false);
   const loadedFollowUpRef = useRef<string>('');
   const lastLoadedKeyRef = useRef<string | null>(null);
-  /* true once follow_up_notes for the record being edited is known
-     (either present on the passed-in record or fetched fresh) */
+  /* true once follow_up_notes for the record being edited is known */
   const notesReadyRef = useRef<boolean>(true);
+  /* "date|time|duration" as loaded for edit — unchanged slot is never blocked */
+  const originalSlotRef = useRef<string>('');
 
   const goStep = (s: 1 | 2) => { stepRef.current = s; setStep(s); };
 
   /* ---------------- data loading (with cache) ---------------- */
 
   async function fetchOfficers() {
-    if (officerCache && Date.now() - officerCache.ts < OFFICER_CACHE_TTL) {
-      setOfficers(officerCache.data);
-      return;
-    }
-    setOfficerLoading(true);
+    /* show the cached directory instantly, but always re-fetch so edits to
+       officers/contacts (e.g. a corrected email) appear without a page reload */
+    const cached = officerCache && Date.now() - officerCache.ts < OFFICER_CACHE_TTL;
+    if (cached) setOfficers(officerCache!.data);
+    else setOfficerLoading(true);
     try {
+      /* IAS has thousands of officers — load one page now, the rest via search (searchIas) */
       const [ias, ips, others] = await Promise.all([
-        pb.collection('ias_officers').getFullList({ sort: 'name' }),
+        pb.collection('ias_officers').getList(1, IAS_PAGE, { sort: 'name' }),
         pb.collection('ips_officers').getFullList({ sort: 'name' }),
         pb.collection('other_contacts').getFullList({ sort: 'name' }),
       ]);
-      const mapOfficer = (o: any, type: Officer['type']): Officer => ({
-        id: o.id,
-        name: o.name || '',
-        designation: o.designation || o.current_position || o.occupation || '',
-        type,
-        cadre: o.cadre || '',
-        state: o.state || '',
-        contact_number: o.contact_number || o.phone || '',
-        email: o.email || '',
-        department: o.department || '',
-        current_position: o.current_position || o.designation || '',
-        batch_year: o.batch_year || '',
-      });
+      setIasTotal(ias.totalItems);
       const data = [
-        ...ias.map((o: any) => mapOfficer(o, 'IAS')),
+        ...ias.items.map((o: any) => mapOfficer(o, 'IAS')),
         ...ips.map((o: any) => mapOfficer(o, 'IPS')),
         ...others.map((o: any) => mapOfficer(o, 'Other')),
       ];
       officerCache = { data, ts: Date.now() };
-      setOfficers(data);
+      setOfficers((prev) => mergeOfficers(data, prev.filter((o) => o.type === 'IAS')));
     } catch (error) {
       console.error('Failed to load directory:', error);
     } finally {
@@ -1004,8 +1070,6 @@ export default function CreateMeetingPanel({
     }
   }
 
-  /* employees loader — same shape as Officer so all existing
-     list/card code works unchanged. */
   async function fetchEmployees() {
     setEmployeeLoading(true);
     try {
@@ -1014,7 +1078,7 @@ export default function CreateMeetingPanel({
         id: e.id,
         name: e.name || '',
         designation: e.designation || e.current_position || '',
-        type: 'Other' as const, /* keeps officer_type values record-safe */
+        type: 'Other' as const,
         department: e.department || '',
         contact_number: e.contact_number || e.phone || '',
         email: e.email || '',
@@ -1035,11 +1099,29 @@ export default function CreateMeetingPanel({
   useEffect(() => {
     if (!isOpen) { lastLoadedKeyRef.current = null; return; }
     const stamp = editSource?.updated ?? '';
-    const key = editingId ? `edit:${editingId}:${stamp}` : `create:${resolvedDefaultDate ?? ''}`;
+    const key = editingId ? `edit:${editingId}:${stamp}`
+      : duplicateFrom ? `dup:${duplicateFrom.id ?? ''}`
+      : `create:${resolvedDefaultDate ?? ''}`;
     if (lastLoadedKeyRef.current === key) return;
 
     if (editingId) populateForEdit(editSource);
-    else {
+    else if (duplicateFrom) {
+      /* same details, but a NEW meeting — pick a new date, fresh
+         status, no calendar links / follow-up / documents of the original */
+      populateForEdit(duplicateFrom);
+      setFormData((prev) => ({
+        ...prev,
+        meeting_date: '',
+        status: 'Scheduled', status_flag: 'Scheduled',
+        follow_up_date: '', follow_up_notes: '',
+        gcal_event_id: '', gcal_link: '', meet_link: '',
+        /* caller-supplied fields, e.g. date + city from the "met before" popup */
+        ...(duplicateFrom.__prefill || {}),
+      }));
+      loadedFollowUpRef.current = '';
+      originalSlotRef.current = '';
+      setExistingDocs([]); initialDocsRef.current = [];
+    } else {
       resetForm();
       if (resolvedDefaultDate && !isPastISODate(resolvedDefaultDate)) {
         setFormData((prev) => ({ ...prev, meeting_date: resolvedDefaultDate }));
@@ -1047,12 +1129,10 @@ export default function CreateMeetingPanel({
     }
     lastLoadedKeyRef.current = key;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, editingId, editSource, resolvedDefaultDate]);
+  }, [isOpen, editingId, editSource, resolvedDefaultDate, duplicateFrom]);
 
-  /* follow_up_notes: the record passed in from the list page may not
-     carry this field (partial fetch / mapped object). If it's missing,
-     load it straight from PocketBase so editing never shows it empty
-     and saving never wipes it. */
+  /* follow_up_notes: load straight from PocketBase if the passed-in
+     record doesn't carry it, so saving never wipes it. */
   useEffect(() => {
     if (!isOpen || !editingId) { notesReadyRef.current = true; return; }
     if (editSource && editSource.follow_up_notes !== undefined) { notesReadyRef.current = true; return; }
@@ -1074,8 +1154,68 @@ export default function CreateMeetingPanel({
   /* load both pools when the panel opens */
   useEffect(() => { if (isOpen) { fetchOfficers(); fetchEmployees(); } }, [isOpen]);
 
-  /* on edit, attendee emails matching the directory (officers +
-     employees) become extra participants */
+  /* dev only: the API routes compile on first use (Google's library is large) —
+     touch them when the form opens so they're ready by the time it's saved */
+  useEffect(() => {
+    if (!isOpen || process.env.NODE_ENV !== 'development') return;
+    [GOOGLE_ROUTE, INVITE_ROUTE].forEach((u) => fetch(u, { method: 'HEAD' }).catch(() => {}));
+  }, [isOpen]);
+
+  /* IAS search on the server — adds matching officers to the pool as you type */
+  async function searchIas(filter: string, limit = 50) {
+    try {
+      const res = await pb.collection('ias_officers').getList(1, limit, { filter, sort: 'name', requestKey: null });
+      const found = res.items.map((o: any) => mapOfficer(o, 'IAS'));
+      if (found.length) setOfficers((prev) => mergeOfficers(prev, found));
+    } catch (e) {
+      console.warn('[directory] IAS search failed', e);
+    }
+  }
+
+  const iasQuery = (formData.meeting_type === 'Internal' ? '' : (officerSearch || extraSearch)).trim();
+  useEffect(() => {
+    if (!isOpen || iasQuery.length < 2) return;
+    setIasSearching(true);
+    const q = pbq(iasQuery);
+    const t = setTimeout(() => {
+      searchIas(['name', 'current_position', 'cadre', 'state', 'email'].map((f) => `${f} ~ "${q}"`).join(' || '))
+        .finally(() => setIasSearching(false));
+    }, 250);
+    return () => { clearTimeout(t); setIasSearching(false); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [iasQuery, isOpen]);
+
+  /* when editing: make sure the meeting's IAS officer + any IAS attendee emails are in the pool */
+  useEffect(() => {
+    if (!isOpen || !editingId) return;
+    const parts: string[] = [];
+    if (formData.officer_type === 'IAS' && formData.officer_id) parts.push(`id = "${pbq(formData.officer_id)}"`);
+    attendeeList.map((a) => a.trim().toLowerCase()).filter((a) => a.includes('@')).slice(0, 20)
+      .forEach((e) => parts.push(`email = "${pbq(e)}"`));
+    if (parts.length) searchIas(parts.join(' || '), 30);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editingId, formData.officer_id, attendeeList.length]);
+
+  /* a saved meeting stores a snapshot of the officer's details — when editing,
+     refresh email/phone/designation from the directory's current record */
+  useEffect(() => {
+    const id = selectedOfficer?.id;
+    if (!id || !officers.length) return;
+    const live = officers.find((o) => o.id === id);
+    if (!live) return;
+    const fresh = {
+      email: live.email || selectedOfficer.email || '',
+      contact_number: live.contact_number || selectedOfficer.contact_number || '',
+      designation: live.designation || selectedOfficer.designation || '',
+    };
+    if (fresh.email === (selectedOfficer.email || '') &&
+        fresh.contact_number === (selectedOfficer.contact_number || '') &&
+        fresh.designation === (selectedOfficer.designation || '')) return;
+    setSelectedOfficer((prev) => (prev && prev.id === id ? { ...prev, ...fresh } : prev));
+    setFormData((prev) => (prev.officer_id === id ? { ...prev, ...fresh } : prev));
+  }, [officers, selectedOfficer]);
+
+  /* on edit, attendee emails matching the directory become extra participants */
   useEffect(() => {
     if ((!officers.length && !employees.length) || !editingId) return;
     setExtraOfficers((prev) => {
@@ -1148,7 +1288,6 @@ export default function CreateMeetingPanel({
     const priorityOpts = PRIORITIES.map((p) => p.value);
     const placeOpts = PLACE_OPTIONS.map((p) => p.value);
     const typeOpts = MEETING_TYPES.map((t) => t.value);
-    /* empty status falls back to "Scheduled" (auto-selected) */
     const normalizedStatus = matchOption(m.status_flag || m.status, statusOpts) || 'Scheduled';
 
     setFormData({
@@ -1181,7 +1320,6 @@ export default function CreateMeetingPanel({
       status_flag: normalizedStatus,
       follow_up_date: followUpRaw,
       follow_up_notes: m.follow_up_notes || '',
-      /* v18: fall back to the defaults when the record has no value */
       send_invite: m.send_invite ?? EMPTY_FORM.send_invite,
       sync_gcal: m.sync_gcal ?? EMPTY_FORM.sync_gcal,
       add_meet: m.add_meet ?? EMPTY_FORM.add_meet,
@@ -1189,9 +1327,11 @@ export default function CreateMeetingPanel({
       meet_link: m.meet_link || '',
       gcal_event_id: m.gcal_event_id || '',
       gcal_link: m.gcal_link || '',
+      city: m.city || '',
     });
 
     syncDurationUI(String(m.duration ?? ''));
+    originalSlotRef.current = `${formattedDate}|${formattedTime}|${Number(m.duration) || 0}`;
     setAttendeeList(attendeesArr);
     setAttendeeInput('');
 
@@ -1215,7 +1355,6 @@ export default function CreateMeetingPanel({
       m.meet_link || m.gcal_link || m.send_invite || m.sync_gcal || m.add_meet,
     ));
 
-    /* documents — existing files (edit mode) */
     const loadedDocs = parseJsonField(m.documents, []);
     setExistingDocs(loadedDocs);
     initialDocsRef.current = loadedDocs;
@@ -1231,6 +1370,7 @@ export default function CreateMeetingPanel({
   function resetForm() {
     setFormData(EMPTY_FORM);
     loadedFollowUpRef.current = '';
+    originalSlotRef.current = '';
     setSelectedOfficer(null);
     setExtraOfficers([]);
     setExtraSearch('');
@@ -1244,7 +1384,6 @@ export default function CreateMeetingPanel({
     setErrors({});
     setSubmitError(null);
     goStep(1);
-    /* documents */
     setExistingDocs([]); setPendingDocs([]); initialDocsRef.current = [];
   }
 
@@ -1253,11 +1392,6 @@ export default function CreateMeetingPanel({
   const isInternal = formData.meeting_type === 'Internal';
   const isExternal = formData.meeting_type === 'External';
 
-  /* v17: switching Internal <-> External used to feel slow because the
-     full (unfiltered) directory list was rendered to the DOM on every
-     switch. Filtering itself is unaffected — search still runs over the
-     entire pool — only the default (no-search) view is capped, which
-     keeps the switch instant regardless of directory size. */
   const LIST_CAP = 40;
   const filteredOfficersAll = useMemo(() => {
     const pool = isInternal ? employees : officers;
@@ -1277,7 +1411,7 @@ export default function CreateMeetingPanel({
 
   const officerSearchActive = !!officerSearch.trim();
   const filteredOfficers = officerSearchActive ? filteredOfficersAll : filteredOfficersAll.slice(0, LIST_CAP);
-  const officersTruncated = !officerSearchActive && filteredOfficersAll.length > LIST_CAP;
+  const officersTruncated = !officerSearchActive && (filteredOfficersAll.length > LIST_CAP || (!isInternal && iasTotal > IAS_PAGE));
 
   const extraCandidates = useMemo(() => {
     const q = extraSearch.trim().toLowerCase();
@@ -1305,8 +1439,55 @@ export default function CreateMeetingPanel({
   const endTime = formData.meeting_time && durationNum > 0
     ? addMinutesToTime(formData.meeting_time, durationNum) : '';
   const timeRangeLabel = formData.meeting_time && endTime
-    ? `${to12Hour(formData.meeting_time)} – ${to12Hour(endTime)}` : '';
+    ? `${fmtTime24(formData.meeting_time)} – ${fmtTime24(endTime)}` : '';
   const crossesMidnight = !!(formData.meeting_time && endTime && endTime < formData.meeting_time);
+
+  /* ---------------- "met before" hint ---------------- */
+
+  const formCityKey = cityKey(formData.city) || findCity(formData.location)?.key || null;
+  const revisitCount = !isEditMode && pastMeetings?.length && formData.meeting_date
+    ? findPeopleToRevisit(pastMeetings, {
+        city: formCityKey,
+        date: formData.meeting_date,
+        exclude: [personKey(formData), ...extraOfficers.map((o) => `id:${o.id}`)],
+      }).length
+    : 0;
+
+  /* fill City from the address when it names a known city */
+  const handleLocationBlur = () => {
+    if (formData.city.trim()) return;
+    const found = findCity(formData.location);
+    if (found) setFormData((prev) => ({ ...prev, city: found.label }));
+  };
+
+  /* ---------------- slot conflicts ---------------- */
+
+  const busy = useBusySlots(formData.meeting_date, editingId, isOpen);
+  /* a Cancelled meeting never occupies a slot (same rule as the server hook) */
+  const slotBlocking = (formData.status_flag || 'Scheduled').toLowerCase() !== 'cancelled';
+  /* edit mode: only hard-block when date/time/duration actually changed */
+  const slotKey = `${formData.meeting_date}|${formData.meeting_time}|${durationNum}`;
+  const slotChanged = !editingId || slotKey !== originalSlotRef.current;
+
+  const busyAt = (t: string) => busy.findConflicts(t, 1)[0];
+  const conflicts: BusyBlock[] = slotBlocking && formData.meeting_date && formData.meeting_time
+    ? busy.findConflicts(formData.meeting_time, durationNum || 15) : [];
+  const conflictIds = new Set(conflicts.map((c) => c.id));
+  const suggestions = conflicts.length ? busy.suggest(formData.meeting_time, durationNum || 30) : [];
+  const freeAfter = slotBlocking && formData.meeting_time ? busy.freeMinutesFrom(formData.meeting_time) : null;
+
+  const participantClashes = formData.meeting_date
+    ? busy.participantMeetings({
+        officerIds: [formData.officer_id, ...extraOfficers.map((o) => o.id)],
+        emails: [formData.email, ...extraOfficers.map((o) => o.email || '')],
+      }).filter((m) => !conflictIds.has(m.id))
+    : [];
+
+  const applySuggestion = (s: SlotSuggestion) => {
+    setFormData((prev) => ({ ...prev, meeting_date: s.date, meeting_time: s.time }));
+    setErrors((p) => ({ ...p, date: '', time: '' }));
+    setSubmitError(null);
+  };
 
   /* ---------------- handlers ---------------- */
 
@@ -1398,7 +1579,7 @@ export default function CreateMeetingPanel({
     setIsCustomMode(false);
     setCustomHours(''); setCustomMinutes('');
     setFormData((prev) => ({ ...prev, duration: String(minutes) }));
-    if (errors.duration) setErrors((p) => ({ ...p, duration: '' }));
+    setErrors((p) => ({ ...p, duration: '', time: p.time === PAST_TIME_MSG ? p.time : '' }));
   };
 
   const handleOpenCustom = () => {
@@ -1416,7 +1597,7 @@ export default function CreateMeetingPanel({
     const m = parseInt(minutes, 10) || 0;
     const total = h * 60 + m;
     setFormData((prev) => ({ ...prev, duration: total > 0 ? String(total) : '' }));
-    if (total > 0 && errors.duration) setErrors((p) => ({ ...p, duration: '' }));
+    if (total > 0) setErrors((p) => ({ ...p, duration: '', time: p.time === PAST_TIME_MSG ? p.time : '' }));
   };
 
   const handleCustomDone = () => {
@@ -1457,13 +1638,11 @@ export default function CreateMeetingPanel({
   const removeAttendee = (a: string) =>
     setAttendeeList((p) => p.filter((x) => x !== a));
 
-  /* documents (Follow up section) */
   const meetingFileUrl = (filename: string) => {
     if (!filename || !editingId) return '';
     try {
       const stub: any = { collectionName: 'meetings', id: editingId };
       const anyPb = pb as any;
-      /* v18: getURL is the current PocketBase SDK name (getUrl is deprecated) */
       if (anyPb.files?.getURL) return anyPb.files.getURL(stub, filename);
       if (anyPb.files?.getUrl) return anyPb.files.getUrl(stub, filename);
       if (anyPb.getFileUrl) return anyPb.getFileUrl(stub, filename);
@@ -1471,8 +1650,6 @@ export default function CreateMeetingPanel({
     return '';
   };
 
-  /* pick documents BEFORE saving (create + edit) — used by both the
-     click-to-browse input and drag/drop/paste inside DocumentDropzone */
   const handlePickDocs = (files: FileList | null) => {
     if (!files?.length) return;
     const list = Array.from(files);
@@ -1499,9 +1676,6 @@ export default function CreateMeetingPanel({
     pendingDocs.length > 0 ||
     existingDocs.join('||') !== initialDocsRef.current.join('||');
 
-  /* v16 FIX: this used to be defined but never called from
-     handleSubmit(), so attached documents silently vanished. It is
-     now awaited right after create/update below. */
   async function syncDocuments(recordId: string) {
     if (!docsDirty || !recordId) return;
     const fd = new FormData();
@@ -1520,12 +1694,12 @@ export default function CreateMeetingPanel({
     }
   }
 
-  /* ---------------- automations (v18) ---------------- */
-  /* Calls the routes that exist — /api/google and /api/invite — with the
-     field names they read. Google runs first so the email can carry the
-     Meet link. Returns a list of human-readable failures (empty = all OK). */
+  /* ---------------- automations ---------------- */
+  /* Google runs first so the email can carry the Meet link.
+     Returns a list of human-readable failures (empty = all OK). */
   async function runAutomations(recId: string, payload: Record<string, any>) {
     const failures: string[] = [];
+    const wantInvite = formData.send_invite;
 
     const isEmail = (e: string) => /^\S+@\S+\.\S+$/.test(e);
     const primaryEmail = (formData.email || '').trim().toLowerCase();
@@ -1541,7 +1715,7 @@ export default function CreateMeetingPanel({
     ].filter(Boolean).join('\n');
 
     let meetLink = formData.meet_link || '';
-    let primaryInvited = false; // true if /api/google already emailed the primary officer
+    let primaryInvited = false;
 
     /* 1) Google Calendar / Meet (+ email to the primary officer) */
     if (formData.sync_gcal || formData.add_meet) {
@@ -1557,11 +1731,11 @@ export default function CreateMeetingPanel({
           officerName: payload.officer_name,
           officerEmail: primaryEmail || allEmails[0] || '',
           includeMeet: formData.add_meet,
-          sendInvite: formData.send_invite,
+          sendInvite: wantInvite,
           syncCalendar: formData.sync_gcal,
           gcalEventId: formData.gcal_event_id || '',
           existingMeetLink: formData.meet_link || '',
-        }, 30_000);
+        }, 45_000);
 
         if (r.meetLink) meetLink = r.meetLink;
         primaryInvited = !!r.emailSent;
@@ -1577,12 +1751,16 @@ export default function CreateMeetingPanel({
         if (formData.add_meet && !r.meetLink) failures.push('Calendar saved, but no Meet link was created');
       } catch (err: any) {
         console.error(`${GOOGLE_ROUTE} failed:`, err);
-        failures.push(`Calendar/Meet: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+        if (err?.needsReconnect) {
+          failures.push('Calendar/Meet: Google connection expired — an admin must click “Reconnect Google” on the Meetings page');
+        } else {
+          failures.push(`Calendar/Meet: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+        }
       }
     }
 
     /* 2) Invite email — skips the primary officer if /api/google already emailed them */
-    if (formData.send_invite) {
+    if (wantInvite) {
       const recipients = primaryInvited ? allEmails.filter((e) => e !== primaryEmail) : allEmails;
       if (!allEmails.length) {
         failures.push('Invite skipped: no participant has an email address');
@@ -1595,9 +1773,14 @@ export default function CreateMeetingPanel({
             date: new Date(`${payload.meeting_date}T00:00:00`).toLocaleDateString('en-IN', {
               weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
             }),
-            time: `${to12Hour(payload.meeting_time)} (${formatDuration(Number(payload.duration) || 0)})`,
+            time: `${fmtTime24(payload.meeting_time)} hrs (${formatDuration(Number(payload.duration) || 0)})`,
             location: payload.location,
             meetLink,
+            // → calendar invite (.ics) attached, with Yes / No / Maybe
+            isoDate: payload.meeting_date,
+            isoTime: payload.meeting_time,
+            duration: Number(payload.duration) || 30,
+            meetingId: recId,
           }, 20_000);
         } catch (err: any) {
           console.error(`${INVITE_ROUTE} failed:`, err);
@@ -1651,10 +1834,19 @@ export default function CreateMeetingPanel({
       formData.follow_up_date !== loadedFollowUpRef.current &&
       formData.follow_up_date < followUpMin
     ) e.follow_up = 'Follow-up date must be tomorrow or later.';
+    /* a future meeting can't already be Completed */
+    const early = !e.date && !e.time && completedTooEarly(formData, formData.status_flag || '');
+    if (early) e.time = early;
+    /* hard block — the slot overlaps another meeting */
+    if (!e.time && conflicts.length && slotChanged) {
+      e.time = `This time overlaps “${conflicts[0].agenda}” (${blockLabel(conflicts[0])}). Pick a free slot below.`;
+    }
 
     if (Object.keys(e).length) {
       setErrors(e);
-      setSubmitError('Please fix the highlighted fields.');
+      setSubmitError(e.time && conflicts.length && Object.keys(e).length === 1
+        ? 'This time slot is already booked.'
+        : 'Please fix the highlighted fields.');
       const firstKey = Object.keys(e)[0];
       if (firstKey === 'meeting_type' || firstKey === 'officer' || firstKey === 'agenda') goStep(1);
       scrollToSection(firstKey);
@@ -1694,7 +1886,6 @@ export default function CreateMeetingPanel({
         meeting_place: formData.meeting_place,
         follow_up_date: formData.follow_up_date,
         follow_up_notes: formData.follow_up_notes.trim(),
-        /* v18: keep additional officers' emails on the record */
         attendees: Array.from(new Set([
           ...attendeeList,
           ...extraOfficers.map((o) => o.email || '').filter(Boolean),
@@ -1703,6 +1894,7 @@ export default function CreateMeetingPanel({
         sync_gcal: formData.sync_gcal,
         add_meet: formData.add_meet,
         created_by: formData.created_by,
+        city: formData.city.trim(),
       };
 
       /* never overwrite saved notes with '' before they've loaded */
@@ -1722,19 +1914,39 @@ export default function CreateMeetingPanel({
         }
       }
 
-      /* v16 FIX: actually attach any picked/dropped/pasted documents
-         now that we have a record id. */
       await syncDocuments(rec.id);
 
-      /* v18: Google Calendar / Meet / invite email via the real routes */
-      const failures = await runAutomations(rec.id, payload);
-
-      showToast(editingId ? 'Meeting updated' : 'Meeting created', 'success');
-      if (failures.length) showToast(failures.join(' · '), 'error');
+      /* The meeting is saved — close right away. Google Calendar / Meet and the
+         invite emails can take several seconds, so they finish in the background
+         and report back with a second toast (the list picks up the Meet link live). */
+      const hasAutomations = formData.sync_gcal || formData.add_meet || formData.send_invite;
+      showToast(
+        `${editingId ? 'Meeting updated' : 'Meeting created'}${hasAutomations ? ' — calendar & invites are being sent in the background' : ''}`,
+        'success',
+      );
+      onSavedMeeting?.({ ...payload, id: rec.id, __isNew: !editingId });
       onSuccess();
       onClose();
+
+      if (hasAutomations) {
+        runAutomations(rec.id, payload)
+          .then((failures) => {
+            if (failures.length) showToast(failures.join(' · '), 'error');
+            else showToast(`Calendar & invites done — ${payload.agenda || 'meeting'}`, 'success');
+          })
+          .catch((e) => showToast(`Calendar / invites failed: ${e?.message || 'unknown error'}`, 'error'));
+      }
     } catch (err: any) {
-      setSubmitError(err?.message || 'Something went wrong. Please try again.');
+      /* the PocketBase hook rejected it — someone booked this slot
+         moments ago. Reload busy slots so suggestions appear. */
+      if (isSlotConflictError(err)) {
+        busy.refresh();
+        setErrors((p) => ({ ...p, time: slotConflictMessage(err) }));
+        setSubmitError('Someone just booked this slot — pick one of the free slots below.');
+        scrollToSection('time');
+      } else {
+        setSubmitError(err?.message || 'Something went wrong. Please try again.');
+      }
     } finally {
       setLoading(false);
       savingRef.current = false;
@@ -1767,7 +1979,7 @@ export default function CreateMeetingPanel({
           )}
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-bold text-slate-900">
-              {isEditMode ? 'Edit meeting' : 'Create meeting'}
+              {isEditMode ? 'Edit meeting' : duplicateFrom?.id ? 'New meeting (copy)' : 'Create meeting'}
             </p>
             <p className="truncate text-[11px] text-slate-400">
               {step === 1 ? 'Who is it with & what about?' : 'Date, time & details'}
@@ -1841,10 +2053,7 @@ export default function CreateMeetingPanel({
                     <p className="text-xs text-slate-400">Choose “Internal” or “External” above to see who you can add.</p>
                   </div>
                 ) : !selectedOfficer ? (
-                  /* v17: keyed on meeting_type so Internal <-> External swaps
-                     with a quick fade instead of an abrupt content jump */
                   <div key={`list-${formData.meeting_type}`} className="c-fade-in">
-                    {/* IAS / IPS / Other filter chips — External only */}
                     {isExternal && (
                       <div className="mb-2 flex flex-wrap gap-1.5">
                         {(['All', 'IAS', 'IPS', 'Other'] as const).map((t) => (
@@ -1907,7 +2116,14 @@ export default function CreateMeetingPanel({
                       )}
                       {officersTruncated && (
                         <p className="mt-1.5 text-center text-[10px] text-slate-400">
-                          Showing first {LIST_CAP} — type to search the full {isInternal ? 'employee' : 'officer'} list
+                          {isInternal
+                            ? `Showing first ${LIST_CAP} — type to search the full employee list`
+                            : `Showing a few of ${iasTotal.toLocaleString('en-IN')} IAS officers — type a name, post, cadre or state to search them all`}
+                        </p>
+                      )}
+                      {iasSearching && !isInternal && (
+                        <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-slate-400">
+                          <Loader2 className="h-3 w-3 animate-spin" /> Searching the IAS directory…
                         </p>
                       )}
 
@@ -2034,6 +2250,7 @@ export default function CreateMeetingPanel({
                       value={formData.meeting_time}
                       onChange={handleTimeChange}
                       meetingDate={formData.meeting_date}
+                      busyAt={slotBlocking ? busyAt : undefined}
                     />
                     <FieldError message={errors.time} />
                   </div>
@@ -2046,10 +2263,21 @@ export default function CreateMeetingPanel({
                     <div className="flex flex-wrap items-center gap-1.5">
                       {PRESET_DURATIONS.map((m) => {
                         const active = !isCustomMode && Number(formData.duration) === m;
+                        const blocked = durationBlockReason(freeAfter, m);
+                        if (blocked && !active) {
+                          return (
+                            <button key={m} type="button" disabled title={blocked}
+                              className="cursor-not-allowed rounded-full border border-dashed border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold tabular-nums text-slate-300 line-through">
+                              {formatDuration(m)}
+                            </button>
+                          );
+                        }
                         return (
                           <button key={m} type="button" onClick={() => handlePresetDuration(m)}
                             className={`rounded-full border px-3 py-1.5 text-xs font-semibold tabular-nums transition-all active:scale-95 ${
-                              active ? 'border-violet-600 bg-violet-600 text-white shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300'
+                              active
+                                ? (blocked ? 'border-rose-500 bg-rose-500 text-white shadow-sm' : 'border-violet-600 bg-violet-600 text-white shadow-sm')
+                                : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300'
                             }`}>
                             {formatDuration(m)}
                           </button>
@@ -2079,8 +2307,23 @@ export default function CreateMeetingPanel({
                       </div>
                     )}
                     <FieldError message={errors.duration} />
+                    {freeAfter?.next && freeAfter.minutes > 0 && (
+                      <p className="mt-2 flex items-center gap-1 text-[11px] text-slate-500">
+                        <Timer className="h-3 w-3 text-violet-400" />
+                        Free for {formatDuration(freeAfter.minutes)} — next: “{freeAfter.next.agenda}” at {toHHMM(freeAfter.next.start)}
+                      </p>
+                    )}
                   </div>
                 </div>
+
+                {/* conflict card + participant heads-up */}
+                <ConflictCard
+                  date={formData.meeting_date}
+                  conflicts={conflicts}
+                  suggestions={suggestions}
+                  onPick={applySuggestion}
+                />
+                <ParticipantNotice meetings={participantClashes} />
               </div>
 
               {/* place */}
@@ -2110,9 +2353,26 @@ export default function CreateMeetingPanel({
                 <input
                   value={formData.location}
                   onChange={(e) => setFormData((prev) => ({ ...prev, location: e.target.value }))}
+                  onBlur={handleLocationBlur}
                   placeholder={formData.meeting_place === 'Outside' ? 'Venue / address' : 'Room / floor (optional)'}
                   className={`${inputCls} mt-2`}
                 />
+                <input
+                  list="cmp-city-options"
+                  value={formData.city}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, city: e.target.value }))}
+                  placeholder="City (e.g. Hyderabad, Dubai)"
+                  className={`${inputCls} mt-2`}
+                />
+                <datalist id="cmp-city-options">
+                  {CITIES.map((c) => <option key={c.key} value={c.label} />)}
+                </datalist>
+                {revisitCount > 0 && (
+                  <p className="c-fade-in mt-2 flex items-center gap-1.5 rounded-xl bg-violet-50 px-3 py-2 text-[11px] font-semibold text-violet-700 ring-1 ring-inset ring-violet-500/15">
+                    <Users className="h-3.5 w-3.5 shrink-0" />
+                    You’ve met {revisitCount} {revisitCount === 1 ? 'person' : 'people'} in {cityLabel(formCityKey ?? '', formData.city)} before — we’ll suggest them after you save.
+                  </p>
+                )}
                 <FieldError message={errors.place} />
               </div>
 
@@ -2137,13 +2397,8 @@ export default function CreateMeetingPanel({
                 <FieldError message={errors.priority} />
               </div>
 
-              {/* "Follow up" — Status (Scheduled auto-selected, optional) ·
-                     Follow-up date (optional) · Documents (v16: unified dropzone) */}
-              {/* v17: relative + z-20 so the follow-up mini calendar's popover
-                  reliably paints above the "More details" card below it —
-                  both sections pick up their own stacking context from the
-                  c-fade-up animation, and without this the later "More
-                  details" sibling was winning and overlapping the calendar */}
+              {/* Follow up — relative + z-20 so the mini calendar popover
+                  paints above the "More details" card below it */}
               <div id="cmp-sec-followup" className="c-fade-up relative z-20 rounded-2xl border border-slate-200 bg-white p-3.5">
                 <SectionHead icon={Flag} title="Follow up" optional size="lg"
                   sub="Status, follow-up date & documents" />
@@ -2220,7 +2475,7 @@ export default function CreateMeetingPanel({
                         value={formData.follow_up_notes}
                         onChange={(e) => setFormData((prev) => ({ ...prev, follow_up_notes: e.target.value }))}
                         rows={3}
-                        placeholder="Action items, next steps, things to follow up on…"
+                        placeholder="Next steps, things to follow up on…"
                         className={`${inputCls} resize-y`}
                       />
                     </div>

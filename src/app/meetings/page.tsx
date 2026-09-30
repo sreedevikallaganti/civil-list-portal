@@ -1,1312 +1,90 @@
 'use client';
 
 /* ================================================================
-   MeetingsPage — v25
-   NEW (v25):
-     (1) Clicking a KPI/stat card (Total, Scheduled, Completed,
-         Rescheduled, Cancelled) now also smooth-scrolls down to the
-         meetings table, in addition to setting the status filter it
-         already set — same scroll-into-view behavior the overdue
-         banner's "Review now" button uses.
-   v24 NEW:
-     (1) "Review now" on the overdue banner now smooth-scrolls down to
-         the meetings table instead of leaving the user to scroll past
-         the KPI cards manually.
-     (2) Extra spacing between the Type and Status badge columns in the
-         desktop row (and whitespace-nowrap on both) so combinations
-         like "Rescheduled" next to "External" no longer crowd/collapse
-         into each other.
-     (3) The status badge itself is now the click target for the quick
-         status dropdown (same popover as before), with a chevron built
-         into the badge and always visible, instead of a separate,
-         easy-to-miss chevron-only icon button next to it.
-   v23 NEW:
-     (1) Reschedule time picker now hides quick-slot times (and "Other"
-         hours) that have already passed whenever the new date is today —
-         a completed time can no longer be picked, instead of just being
-         shown and silently rejected. If the date changes to today after
-         a past time was already picked, that time is cleared. Saving a
-         reschedule for today with a past time now also fails with a
-         clear inline error as a last-resort guard.
-     (2) Follow-up note save failures now log the attempted field names
-         and the record's actual field names to the console, to make it
-         obvious which field name your PocketBase "meetings" collection
-         actually needs (see saveFollowUpNote for details — PocketBase
-         silently drops unknown fields instead of erroring, so guessing
-         wrong looks identical to "nothing happened").
-   v22 NEW:
-     (1) Quick-status chevron is now visible by default (was opacity-0
-         and effectively invisible against most row backgrounds) —
-         it now has a border/background at baseline and pops fully
-         on hover.
-     (2) Reschedule fields (date/time/duration) in the Update panel
-         now use the same quick-slot / chip UI as CreateMeetingPanel's
-         Step 2 (Time & Duration), instead of native <input type=date/time>.
-     (3) Fixed a status-button rendering bug: the selected state used
-         `ring-2 ring-slate-900` stacked ON TOP of the badge's own
-         `ring-1 ring-inset` — two competing ring box-shadows on
-         adjacent buttons could visually bleed into each other. Now
-         uses a plain border for the selected state.
-     (4) Follow-up notes can now be edited inline from the detail
-         panel (Edit button on the Follow-up Notes card) without
-         opening the full Update panel.
-   v17 (kept): quick status popover, notes popover, keyboard shortcuts,
-         bulk selection, overdue banner, command palette, status-history
-         trail, drag-and-drop/paste document picker.
-   All prior functionality (search, filters, sort, pagination, the
-   detail panel, edit/update/delete flows) is unchanged.
+   MeetingsPage — v29
+   NEW (v29) — "met before" reminder:
+     After a NEW meeting is saved in another city (not the home city),
+     a popup lists the people the MD has met in that city before and
+     isn't already meeting on this visit (±3 days): "You've met these
+     4 people in Dubai before. Meet them again?" → Schedule (opens a
+     pre-filled new meeting on the same date & city) or Not now.
+     Scheduling one person and saving brings the popup back with the
+     rest. "Maybe later" hides it for that visit.
+   v28 — cleanup:
+     (1) Action items REMOVED completely. No more `meeting_actions`
+         requests (that collection never existed → the 404s in the
+         console). useOpenActions / MinutesActions are no longer used.
+     (2) Minutes of Meeting is now a simple built-in card in the
+         detail panel (MinutesOfMeetingCard): write the MoM, Save, and
+         optionally attach MoM files (stored in the meeting's existing
+         `documents` field). Saving checks the value really landed —
+         if the `minutes` field is missing you get a clear toast.
+     (3) Unused TodayHero leftovers and old 12-hour helpers removed.
+     (4) pb.files.getURL() used (getUrl kept as fallback).
+   v27 (kept): participant history, duplicate, undo delete, empty state.
+   v26 (kept): slot-conflict protection for Reschedule.
+   v25 / v24 / v23 / v22 / v17 (kept): KPI-card scroll, overdue banner,
+         badge-as-status-dropdown, past-time guard, follow-up note
+         helpers, quick status / notes popovers, keyboard shortcuts,
+         bulk selection, command palette, status-history trail,
+         drag-and-drop/paste documents.
 ================================================================ */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
-  Calendar, CalendarClock, CheckCircle2, RotateCcw, XCircle,
-  Clock, MapPin, Search, Plus, Edit2, Trash2, X, ChevronRight, ChevronLeft,
-  ChevronDown, User, Briefcase, Tag, AlignLeft, FileText, Phone, Mail,
-  ArrowUpDown, Loader2, RefreshCw, CalendarDays, Building2, Globe, StickyNote, Upload,
-  Check, AlertTriangle, Command, History, Timer,
+  Suspense, useEffect, useRef, useState,
+} from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import {
+  Calendar, CalendarClock, CheckCircle2, RotateCcw, XCircle, Clock, MapPin, Search, Plus, Edit2, Trash2, X, ChevronRight, ChevronLeft, ChevronDown, User, Briefcase, Tag, AlignLeft, FileText, Phone, Mail, ArrowUpDown, Loader2, RefreshCw, CalendarDays, StickyNote, Check, AlertTriangle, Command, History, Copy, MessageCircle,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
-import CreateMeetingPanel, {
-  WeekStrip, TimeSlotPicker, clampInt,
-} from '@/components/CreateMeetingPanel';
-import { showToast } from '@/components/Toaster';
+import CreateMeetingPanel from '@/components/CreateMeetingPanel';
+import {
+  showToast,
+} from '@/components/Toaster';
+
+import ParticipantHistory from '@/components/meetings/ParticipantHistory';
+import UndoBar, { UNDO_MS } from '@/components/meetings/UndoBar';
+import RevisitPopup from '@/components/meetings/RevisitPopup';
+import {
+  findPeopleToRevisit, personKey, type RevisitPerson,
+} from '@/lib/revisit';
+import {
+  cityKey, cityLabel, findCity, isHomeCity,
+} from '@/lib/cities';
+import {
+  useAuth,
+} from '@/contexts/AuthContext';
+import {
+  canEdit, canManageIntegrations,
+} from '@/lib/roles';
+import {
+  reconnectGoogle, removeGoogleEvent,
+} from '@/lib/apiClient';
+import {
+  completedTooEarly,
+} from '@/lib/meetingRules';
+import DayBriefPanel from '@/components/meetings/DayBriefPanel';
 
 /* ----------------------------- Global CSS / Animations ----------------------------- */
 
-const CUSTOM_CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-.meetings-root { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
-::selection { background: rgba(139, 92, 246, 0.18); }
-@keyframes mFadeUp   { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes mFadeIn   { from { opacity: 0; } to { opacity: 1; } }
-@keyframes mScaleIn  { from { opacity: 0; transform: scale(0.94) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
-@keyframes mPanelIn  { from { opacity: 0; transform: translateX(64px); } to { opacity: 1; transform: translateX(0); } }
-@keyframes mRowIn    { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes mShimmer  { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-@keyframes mBob      { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-@keyframes mBlob     { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(14px, -18px) scale(1.07); } }
-.anim-fade-up  { animation: mFadeUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-fade-in  { animation: mFadeIn 0.4s ease both; }
-.anim-scale-in { animation: mScaleIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-panel    { animation: mPanelIn 0.38s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-overlay  { animation: mFadeIn 0.25s ease both; }
-.anim-row      { animation: mRowIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-bob      { animation: mBob 3.2s ease-in-out infinite; }
-.anim-blob     { animation: mBlob 9s ease-in-out infinite; }
-.skeleton { background: linear-gradient(90deg, #f1effc 25%, #e5e1f5 40%, #f1effc 55%); background-size: 200% 100%; animation: mShimmer 1.6s linear infinite; }
-.nice-scroll::-webkit-scrollbar { width: 8px; }
-.nice-scroll::-webkit-scrollbar-track { background: transparent; }
-.nice-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 999px; }
-.nice-scroll::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
-.progress-shimmer { background: linear-gradient(90deg,#a78bfa 25%,#7c3aed 40%,#a78bfa 55%); background-size: 200% 100%; animation: mShimmer 1.2s linear infinite; }
-`;
+import {
+  CustomStyles, STATUS_STYLES, STATUS_ORDER, whatsappLink, getTypeConfig, PRIORITY_BADGE, STAT_CARDS, DIST_SEGMENTS, PER_PAGE_OPTIONS, ARCHIVE_COLLECTION, DEFAULT_SORT, SORT_GROUPS, ALL_SORT_OPTIONS, PRIORITY_WEIGHT, getPaginationRange, dayTag, parseHistory, appendStatusHistory, saveFollowUpNote, AnimatedNumber, InfoTile, MinutesOfMeetingCard, PopoverPos, popoverPosition, QuickStatusPopover, NotesPopover, CommandPalette, InlineUpdateStatusPanel,
+} from '@/components/meetings/meetingsPageParts';
 
-function CustomStyles() {
-  return <style dangerouslySetInnerHTML={{ __html: CUSTOM_CSS }} />;
-}
 
-/* ----------------------------- Status Styling ----------------------------- */
-
-const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string }> = {
-  scheduled:   { label: 'Scheduled',   dot: 'bg-violet-400',  badge: 'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-600/20' },
-  completed:   { label: 'Completed',   dot: 'bg-emerald-400', badge: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20' },
-  rescheduled: { label: 'Rescheduled', dot: 'bg-amber-400',   badge: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20' },
-  cancelled:   { label: 'Cancelled',   dot: 'bg-rose-400',    badge: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20' },
-  rejected:    { label: 'Rejected',    dot: 'bg-slate-400',   badge: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-500/20' },
-};
-
-/* v17: fixed order for the 1–5 keyboard shortcuts & the quick-status popover.
-   v20: "Rejected" removed from the selectable set per request — STATUS_STYLES
-   above is left intact so any existing "Rejected" records still render
-   correctly everywhere else (badges, filters, history trail, etc.). */
-const STATUS_ORDER = ['scheduled', 'completed', 'rescheduled', 'cancelled'];
-
-/* ----------------------------- Follow-up date helpers (v20) ----------------------------- */
-
-function pad2(n: number) { return String(n).padStart(2, '0'); }
-function toISO(d: Date) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
-function startOfDay(d: Date) { const c = new Date(d); c.setHours(0, 0, 0, 0); return c; }
-const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-const WEEKDAY_LETTERS = ['S','M','T','W','T','F','S'];
-
-/* ---- v22: mirrors CreateMeetingPanel's Time & Duration UI (Step 2) ---- */
-const QUICK_TIME_SLOTS = ['09:30','10:00','11:00','12:00','14:00','15:00','16:30','18:00'];
-const PRESET_DURATIONS = [15, 30, 45, 60, 90, 120, 180];
-const HOUR_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
-const MINUTE_OPTIONS = ['00','05','10','15','20','25','30','35','40','45','50','55'];
-
-function to12Hour(t: string) {
-  if (!t) return '';
-  const [h, m] = t.split(':').map(Number);
-  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-}
-function splitTo12(t: string) {
-  if (!t) return { hour: '', minute: '00', ampm: 'AM' as 'AM' | 'PM' };
-  const [h, m] = t.split(':').map(Number);
-  return { hour: String(h % 12 || 12), minute: String(m).padStart(2, '0'), ampm: (h >= 12 ? 'PM' : 'AM') as 'AM' | 'PM' };
-}
-function to24Hour(h12: string, min: string, ap: string) {
-  let h = Number(h12) % 12;
-  if (ap === 'PM') h += 12;
-  return `${String(h).padStart(2, '0')}:${min}`;
-}
-function formatDuration(m: number) {
-  if (m < 60) return `${m} min`;
-  const h = Math.floor(m / 60), mm = m % 60;
-  return mm === 0 ? `${h} hr` : `${h}h ${mm}m`;
-}
-
-/* Small app-styled calendar dropdown, future-and-today-only, used for the
-   Update panel's Follow-up date instead of the native browser date input.
-   v22: also reused for the reschedule "New Date" field. */
-function FollowUpCalendar({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: string;
-  onChange: (iso: string) => void;
-  disabled?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const todayISO = toISO(startOfDay(new Date()));
-  const [viewMonth, setViewMonth] = useState<Date>(() => {
-    const base = value ? new Date(`${value}T00:00:00`) : new Date();
-    return Number.isNaN(base.getTime()) ? new Date() : new Date(base.getFullYear(), base.getMonth(), 1);
-  });
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  const year = viewMonth.getFullYear();
-  const month = viewMonth.getMonth();
-  const firstWeekday = new Date(year, month, 1).getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const cells: { iso: string; day: number; isPast: boolean; isToday: boolean }[] = [];
-  for (let i = 0; i < firstWeekday; i++) cells.push(null as any);
-  for (let d = 1; d <= daysInMonth; d++) {
-    const iso = `${year}-${pad2(month + 1)}-${pad2(d)}`;
-    cells.push({ iso, day: d, isPast: iso < todayISO, isToday: iso === todayISO });
-  }
-
-  const isCurrentOrFutureMonth = year > new Date().getFullYear() ||
-    (year === new Date().getFullYear() && month >= new Date().getMonth());
-
-  const displayLabel = value
-    ? new Date(`${value}T00:00:00`).toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
-    : 'No date set';
-
-  return (
-    <div ref={rootRef} className="relative">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
-        className={`flex w-full items-center justify-between gap-2 rounded-xl border bg-white px-3 py-2 text-left text-sm transition-all focus:outline-none focus:ring-4 focus:ring-violet-500/10 disabled:opacity-50 ${
-          open ? 'border-violet-400 ring-4 ring-violet-500/10' : 'border-slate-200 hover:border-slate-300'
-        }`}
-      >
-        <span className={`inline-flex items-center gap-2 ${value ? 'text-slate-900' : 'text-slate-400'}`}>
-          <CalendarDays className="h-4 w-4 text-violet-500" />
-          {displayLabel}
-        </span>
-        {value && !disabled && (
-          <span
-            role="button"
-            tabIndex={0}
-            onClick={(e) => { e.stopPropagation(); onChange(''); }}
-            className="rounded-full p-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500"
-            aria-label="Clear date"
-          >
-            <X className="h-3.5 w-3.5" />
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <div className="anim-scale-in absolute left-0 top-[calc(100%+6px)] z-30 w-72 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl">
-          <div className="mb-2 flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => setViewMonth(new Date(year, month - 1, 1))}
-              disabled={isCurrentOrFutureMonth && month === new Date().getMonth() && year === new Date().getFullYear()}
-              className="flex h-7 w-7 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
-              aria-label="Previous month"
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-            <p className="text-xs font-bold text-slate-700">{MONTH_NAMES[month]} {year}</p>
-            <button
-              type="button"
-              onClick={() => setViewMonth(new Date(year, month + 1, 1))}
-              className="flex h-7 w-7 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
-              aria-label="Next month"
-            >
-              <ChevronRight className="h-4 w-4" />
-            </button>
-          </div>
-
-          <div className="mb-1 grid grid-cols-7 gap-1">
-            {WEEKDAY_LETTERS.map((w, i) => (
-              <div key={i} className="flex h-6 items-center justify-center text-[10px] font-bold text-slate-400">{w}</div>
-            ))}
-          </div>
-          <div className="grid grid-cols-7 gap-1">
-            {cells.map((c, i) =>
-              c === null ? (
-                <div key={i} />
-              ) : (
-                <button
-                  key={c.iso}
-                  type="button"
-                  disabled={c.isPast}
-                  onClick={() => { onChange(c.iso); setOpen(false); }}
-                  className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold transition-all ${
-                    c.iso === value
-                      ? 'bg-violet-600 text-white shadow-sm'
-                      : c.isPast
-                      ? 'cursor-not-allowed text-slate-300'
-                      : c.isToday
-                      ? 'text-violet-700 ring-1 ring-inset ring-violet-300 hover:bg-violet-50'
-                      : 'text-slate-700 hover:bg-violet-50 hover:text-violet-700'
-                  }`}
-                >
-                  {c.day}
-                </button>
-              )
-            )}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => { onChange(todayISO); setOpen(false); }}
-            className="mt-2 w-full rounded-xl border border-slate-200 py-1.5 text-[11px] font-bold text-slate-500 transition-colors hover:border-violet-300 hover:bg-violet-50 hover:text-violet-700"
-          >
-            Today
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ---------------- Meeting-type color classification (light colors) ---------------- */
-
-const TYPE_CONFIG: Record<string, {
-  label: string; badge: string; badgeDot: string; rowBg: string; rowHover: string;
-  strip: string; dateCard: string; monthText: string; mobileBorder: string;
-  band: string; headerBg: string; highlightCard: string; legendDot: string; icon: any;
-}> = {
-  internal: {
-    label: 'Internal',
-    badge:         'bg-violet-100 text-violet-800 ring-1 ring-inset ring-violet-500/30',
-    badgeDot:      'bg-violet-500',
-    rowBg:         'bg-violet-50/60',
-    rowHover:      'hover:bg-violet-100/60',
-    strip:         'bg-gradient-to-b from-violet-500 to-purple-500',
-    dateCard:      'border-violet-300 bg-gradient-to-b from-violet-100 to-violet-50',
-    monthText:     'text-violet-500',
-    mobileBorder:  'border-l-4 border-l-violet-500',
-    band:          'bg-gradient-to-r from-violet-500 to-purple-500',
-    headerBg:      'border-violet-100 bg-violet-50/60',
-    highlightCard: 'border-violet-200 bg-violet-50',
-    legendDot:     'bg-violet-500',
-    icon:          Building2,
-  },
-  external: {
-    label: 'External',
-    badge:         'bg-sky-100 text-sky-800 ring-1 ring-inset ring-sky-500/30',
-    badgeDot:      'bg-sky-500',
-    rowBg:         'bg-sky-50/60',
-    rowHover:      'hover:bg-sky-100/60',
-    strip:         'bg-gradient-to-b from-sky-500 to-cyan-500',
-    dateCard:      'border-sky-300 bg-gradient-to-b from-sky-100 to-sky-50',
-    monthText:     'text-sky-500',
-    mobileBorder:  'border-l-4 border-l-sky-500',
-    band:          'bg-gradient-to-r from-sky-500 to-cyan-500',
-    headerBg:      'border-sky-100 bg-sky-50/60',
-    highlightCard: 'border-sky-200 bg-sky-50',
-    legendDot:     'bg-sky-500',
-    icon:          Globe,
-  },
-};
-
-const getTypeConfig = (t: any) => TYPE_CONFIG[String(t || '').toLowerCase()] || null;
-
-const PRIORITY_BADGE: Record<string, { badge: string; text: string; dot: string }> = {
-  high:   { badge: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20',   text: 'text-rose-600',   dot: 'bg-rose-300' },
-  medium: { badge: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20', text: 'text-amber-600', dot: 'bg-amber-300' },
-  low:    { badge: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20', text: 'text-emerald-600', dot: 'bg-emerald-300' },
-};
-
-/* ---------------------------- KPI / Stat card config ---------------------------- */
-
-const STAT_CARDS = [
-  { key: 'all',          label: 'Total',        caption: 'All meetings',  icon: CalendarClock,
-    card: 'from-violet-100 to-purple-100',  iconTint: 'text-violet-600' },
-  { key: 'scheduled',    label: 'Scheduled',    caption: 'Upcoming',      icon: Calendar,
-    card: 'from-sky-100 to-blue-100',       iconTint: 'text-sky-600' },
-  { key: 'completed',    label: 'Completed',    caption: 'Finished',      icon: CheckCircle2,
-    card: 'from-emerald-100 to-green-100',  iconTint: 'text-emerald-600' },
-  { key: 'rescheduled',  label: 'Rescheduled',  caption: 'Moved dates',   icon: RotateCcw,
-    card: 'from-amber-100 to-orange-100',   iconTint: 'text-amber-600' },
-  { key: 'cancelled',    label: 'Cancelled',    caption: 'Called off',    icon: XCircle,
-    card: 'from-rose-100 to-pink-100',      iconTint: 'text-rose-600' },
-];
-
-const DIST_SEGMENTS = [
-  { key: 'scheduled',   label: 'Scheduled',   bar: 'bg-violet-400' },
-  { key: 'completed',   label: 'Completed',   bar: 'bg-emerald-400' },
-  { key: 'rescheduled', label: 'Rescheduled', bar: 'bg-amber-400' },
-  { key: 'cancelled',   label: 'Cancelled',   bar: 'bg-rose-400' },
-];
-
-const PER_PAGE_OPTIONS = [8, 12, 24, 48];
-
-/* SOFT DELETE — collection that archives a full snapshot of a record before
-   it's removed from its source collection, so it can be recovered later.
-   Same archive collection used by the officers, employees and users pages. */
-const ARCHIVE_COLLECTION = 'deleted_records';
-
-/* ------------------------------- Sort options ------------------------------ */
-
-const DEFAULT_SORT = 'created-desc';
-
-const SORT_GROUPS: { group: string; options: { value: string; label: string }[] }[] = [
-  { group: 'Created', options: [
-    { value: 'created-desc', label: 'Newest Created' },
-    { value: 'created-asc',  label: 'Oldest Created' },
-  ]},
-  { group: 'Meeting Date', options: [
-    { value: 'date-desc', label: 'Newest Date' },
-    { value: 'date-asc',  label: 'Oldest Date' },
-  ]},
-  { group: 'Meeting Time', options: [
-    { value: 'time-asc',  label: 'Earliest Time' },
-    { value: 'time-desc', label: 'Latest Time' },
-  ]},
-  { group: 'Duration', options: [
-    { value: 'duration-desc', label: 'Longest First' },
-    { value: 'duration-asc',  label: 'Shortest First' },
-  ]},
-  { group: 'Priority', options: [
-    { value: 'priority-desc', label: 'High → Low' },
-    { value: 'priority-asc',  label: 'Low → High' },
-  ]},
-  { group: 'Agenda', options: [
-    { value: 'agenda-asc',  label: 'A → Z' },
-    { value: 'agenda-desc', label: 'Z → A' },
-  ]},
-  { group: 'Officer', options: [
-    { value: 'officer-asc',  label: 'A → Z' },
-    { value: 'officer-desc', label: 'Z → A' },
-  ]},
-];
-
-const ALL_SORT_OPTIONS = SORT_GROUPS.flatMap((g) => g.options);
-const PRIORITY_WEIGHT: Record<string, number> = { high: 3, medium: 2, low: 1 };
-
-function getPaginationRange(current: number, total: number): (number | 'dots')[] {
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
-  if (current <= 4) return [1, 2, 3, 4, 5, 'dots', total];
-  if (current >= total - 3) return [1, 'dots', total - 4, total - 3, total - 2, total - 1, total];
-  return [1, 'dots', current - 1, current, current + 1, 'dots', total];
-}
-
-/* --------------------------- Date helpers --------------------------- */
-
-const toLocalISO = (d: Date) => {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-};
-
-function dayTag(dateValue: any, statusKey: string): { label: string; cls: string } | null {
-  if (!dateValue) return null;
-  const raw = String(dateValue);
-  const iso = raw.length > 10 ? raw.slice(0, 10) : raw;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
-  const today = toLocalISO(new Date());
-  const tomorrow = toLocalISO(new Date(Date.now() + 86400000));
-  if (iso === today)    return { label: 'Today',    cls: 'bg-violet-50 text-violet-700 ring-violet-500/15' };
-  if (iso === tomorrow) return { label: 'Tomorrow', cls: 'bg-sky-50 text-sky-700 ring-sky-500/15' };
-  if (statusKey === 'scheduled' && iso < today)
-    return { label: 'Overdue', cls: 'bg-rose-50 text-rose-700 ring-rose-500/15' };
-  return null;
-}
-
-/* --------------------------- status_history helpers --------------------------- */
-/* v17: best-effort activity trail. If the `status_history` field
-   doesn't exist on your PocketBase schema, the write silently no-ops
-   and everything else keeps working — exactly like the existing
-   `status_note` / `notes` fallback pattern used elsewhere. */
-
-function parseHistory(v: any): { status: string; date: string }[] {
-  if (!v) return [];
-  try {
-    const parsed = typeof v === 'string' ? JSON.parse(v) : v;
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
-}
-
-async function appendStatusHistory(id: string, existing: any, label: string) {
-  try {
-    const history = parseHistory(existing);
-    history.push({ status: label, date: new Date().toISOString() });
-    await pb.collection('meetings').update(id, { status_history: JSON.stringify(history.slice(-25)) });
-  } catch { /* field may not exist on this schema — ignore */ }
-}
-
-/* --------------------------- follow-up note save helper (v23) --------------------------- */
-/* Shared by the Update panel's Note field and the detail panel's inline
-   editor — tries only field names that unambiguously mean "follow-up
-   note" (never `notes` or `status_note`, which already mean something
-   else on this schema — see the long comment in InlineUpdateStatusPanel
-   for why that distinction matters). Returns the field name it
-   succeeded on, or null if none worked.
-
-   v23: PocketBase does NOT throw when you send a field that isn't in the
-   collection's schema — it just silently drops it and still returns 200,
-   so the try/catch below rarely fires. The real signal is whether the
-   field comes back on the updated record with our value, which is what
-   the `rec[field] === text` check does. If every candidate fails that
-   check, none of those field names exist on this "meetings" collection —
-   this logs the actual record keys to the console so it's easy to spot
-   the real field name (or confirm one needs to be added) without
-   guessing blind. */
-async function saveFollowUpNote(meetingId: string, text: string): Promise<string | null> {
-  const candidates = ['follow_up_notes', 'followup_notes', 'follow_up', 'followup', 'follow_up_note', 'followUpNotes'];
-  for (const field of candidates) {
-    try {
-      const rec: any = await pb.collection('meetings').update(meetingId, { [field]: text });
-      if (rec && rec[field] === text) return field;
-    } catch (e) {
-      console.error(`[follow-up note] update rejected while trying field "${field}":`, e);
-    }
-  }
-  try {
-    const fresh: any = await pb.collection('meetings').getOne(meetingId);
-    console.error(
-      '[follow-up note] none of these field names stuck:', candidates,
-      '— actual fields on this "meetings" record:', Object.keys(fresh || {})
-    );
-  } catch { /* ignore — the diagnostic itself failing shouldn't block anything */ }
-  return null;
-}
-
-/* ------------------------- Animated count-up ------------------------- */
-
-function AnimatedNumber({ value, duration = 900 }: { value: number; duration?: number }) {
-  const [display, setDisplay] = useState(0);
-  const prevRef = useRef(0);
-
-  useEffect(() => {
-    const from = prevRef.current;
-    const to = value;
-    if (from === to) return;
-    let raf = 0;
-    const start = performance.now();
-    const step = (now: number) => {
-      const p = Math.min((now - start) / duration, 1);
-      const eased = 1 - Math.pow(1 - p, 3);
-      const cur = Math.round(from + (to - from) * eased);
-      prevRef.current = cur;
-      setDisplay(cur);
-      if (p < 1) raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [value, duration]);
-
-  return <span className="tabular-nums">{display}</span>;
-}
-
-/* ------------------------------ Info tile ----------------------------- */
-
-function InfoTile({ icon: Icon, tint, label, children }: { icon: any; tint: string; label: string; children: ReactNode }) {
-  return (
-    <div className="group/tile rounded-2xl border border-slate-200/80 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md hover:shadow-slate-900/[0.04]">
-      <div className="flex items-center gap-2">
-        <span className={`flex h-6 w-6 items-center justify-center rounded-lg ${tint} transition-transform duration-300 group-hover/tile:scale-110`}>
-          <Icon className="h-3.5 w-3.5" />
-        </span>
-        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</p>
-      </div>
-      <div className="mt-2 text-sm font-semibold text-slate-900">{children}</div>
-    </div>
-  );
-}
-
-/* =================================================================================
-   ★ v17: QuickStatusPopover — fixed-position (escapes the table's overflow-hidden
-   ancestor), opened by the small chevron next to a row's status badge. One click,
-   optimistic update, no panel.
-================================================================================= */
-
-function QuickStatusPopover({ top, left, align, current, onPick, onClose }: {
-  top: number; left: number; align: 'left' | 'right';
-  current: string; onPick: (key: string) => void; onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function onDocClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onClose(); }
-    document.addEventListener('mousedown', onDocClick);
-    window.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', onClose, true);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', onClose, true);
-    };
-  }, [onClose]);
-
-  return (
-    <div
-      ref={ref}
-      style={{ top, [align]: left }}
-      className="anim-scale-in fixed z-[75] w-48 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15"
-    >
-      <p className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Set status</p>
-      {STATUS_ORDER.map((key, i) => {
-        const s = STATUS_STYLES[key];
-        const active = current === key;
-        return (
-          <button
-            key={key}
-            onClick={() => onPick(key)}
-            className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs font-semibold transition-colors ${
-              active ? 'bg-slate-100 text-slate-900' : 'text-slate-600 hover:bg-slate-50'
-            }`}
-          >
-            <span className={`h-2 w-2 rounded-full ${s.dot}`} />
-            {s.label}
-            <kbd className="ml-auto rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">{i + 1}</kbd>
-            {active && <Check className="h-3.5 w-3.5 text-violet-600" />}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-/* =================================================================================
-   ★ v17: NotesPopover — quick preview of follow-up notes without opening the full
-   detail panel. Fixed-position card with a link into the full panel.
-================================================================================= */
-
-function NotesPopover({ top, left, align, text, onOpenFull, onClose }: {
-  top: number; left: number; align: 'left' | 'right';
-  text: string; onOpenFull: () => void; onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function onDocClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onClose(); }
-    document.addEventListener('mousedown', onDocClick);
-    window.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', onClose, true);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', onClose, true);
-    };
-  }, [onClose]);
-
-  return (
-    <div
-      ref={ref}
-      style={{ top, [align]: left }}
-      className="anim-scale-in fixed z-[75] w-72 rounded-2xl border border-amber-200 bg-white p-3.5 shadow-2xl shadow-slate-900/15"
-    >
-      <div className="mb-2 flex items-center gap-2">
-        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
-          <StickyNote className="h-3.5 w-3.5" />
-        </span>
-        <p className="text-[10px] font-bold uppercase tracking-wider text-amber-700">Follow-up note</p>
-      </div>
-      <p className="nice-scroll max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-700">
-        {text}
-      </p>
-      <button
-        onClick={onOpenFull}
-        className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-full bg-slate-900 px-3 py-2 text-[11px] font-semibold text-white transition-colors hover:bg-slate-800"
-      >
-        View full details <ChevronRight className="h-3 w-3" />
-      </button>
-    </div>
-  );
-}
-
-/* =================================================================================
-   ★ v17: CommandPalette — Cmd/Ctrl+K. Fuzzy-search meetings by agenda/officer and
-   jump to one, or start a new meeting.
-================================================================================= */
-
-function CommandPalette({ meetings, onClose, onSelectMeeting, onNewMeeting, getStatusStyle, getStatusKey, getMeetingTitle, formatDateShort }: {
-  meetings: any[];
-  onClose: () => void;
-  onSelectMeeting: (m: any) => void;
-  onNewMeeting: () => void;
-  getStatusStyle: (key: string) => { label: string; dot: string; badge: string };
-  getStatusKey: (m: any) => string;
-  getMeetingTitle: (m: any) => string;
-  formatDateShort: (v: any) => string;
-}) {
-  const [query, setQuery] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 30); }, []);
-
-  const q = query.trim().toLowerCase();
-  const results = q
-    ? meetings.filter((m) =>
-        getMeetingTitle(m).toLowerCase().includes(q) ||
-        String(m.officer_name || '').toLowerCase().includes(q) ||
-        String(m.location || '').toLowerCase().includes(q)
-      ).slice(0, 8)
-    : meetings.slice(0, 6);
-
-  return (
-    <div className="fixed inset-0 z-[90] flex items-start justify-center px-4 pt-[12vh]">
-      <div className="anim-overlay absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="anim-scale-in relative w-full max-w-lg overflow-hidden rounded-3xl bg-white shadow-2xl">
-        <div className="flex items-center gap-2.5 border-b border-slate-100 px-4 py-3.5">
-          <Search className="h-4 w-4 shrink-0 text-slate-400" />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search meetings by agenda, officer, location…"
-            className="w-full bg-transparent text-sm outline-none placeholder:text-slate-400"
-          />
-          <kbd className="shrink-0 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">ESC</kbd>
-        </div>
-
-        <div className="nice-scroll max-h-80 overflow-y-auto p-2">
-          <button
-            onClick={onNewMeeting}
-            className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors hover:bg-violet-50"
-          >
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white">
-              <Plus className="h-4 w-4" />
-            </span>
-            <span className="text-sm font-semibold text-slate-800">New meeting</span>
-            <kbd className="ml-auto rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">N</kbd>
-          </button>
-
-          {results.length > 0 && (
-            <p className="mb-1 mt-2 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              {q ? `Results for "${query}"` : 'Recent meetings'}
-            </p>
-          )}
-
-          {results.map((m) => {
-            const sk = getStatusKey(m);
-            const st = getStatusStyle(sk);
-            return (
-              <button
-                key={m.id}
-                onClick={() => onSelectMeeting(m)}
-                className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors hover:bg-violet-50"
-              >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
-                  <CalendarDays className="h-4 w-4" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold text-slate-800">{getMeetingTitle(m)}</span>
-                  <span className="block truncate text-[11px] text-slate-400">
-                    {formatDateShort(m.meeting_date || m.created_date)}
-                    {m.officer_name ? ` · with ${m.officer_name}` : ''}
-                  </span>
-                </span>
-                <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${st.badge}`}>
-                  <span className={`h-1.5 w-1.5 rounded-full ${st.dot}`} />
-                  {st.label}
-                </span>
-              </button>
-            );
-          })}
-
-          {q && results.length === 0 && (
-            <p className="px-3 py-6 text-center text-xs text-slate-400">No meetings match “{query}”.</p>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* =================================================================================
-   ★ Inline "Update Meeting" panel — MANUAL ONLY, zero automations.
-   v22: reschedule Date/Time/Duration now use the same quick-slot UI as
-   CreateMeetingPanel (FollowUpCalendar for date, RescheduleTimePicker for
-   time, preset chips + custom input for duration) instead of native
-   <input type=date/time/number>. Status-button selected state switched
-   from a stacked ring to a plain border (fixes visual bleed onto
-   neighboring buttons). Still: full "Follow up" section — Status,
-   Follow-up date & Documents. Documents attach on Save.
-================================================================================= */
-
-function InlineUpdateStatusPanel({ meeting, onClose, onSaved }: { meeting: any; onClose: () => void; onSaved: () => void }) {
-  /* v21: __forceStatus lets a caller (quick popover, keyboard shortcut) open
-     this panel pre-selected on "Rescheduled" without having written that
-     status yet, so the date/time/duration below are always asked for first. */
-  const [status, setStatus] = useState<string>(() => String(meeting?.__forceStatus || meeting?.status || 'scheduled').toLowerCase());
-  const [newDate, setNewDate] = useState<string>(() => String(meeting?.meeting_date || '').slice(0, 10) || '');
-  const [newTime, setNewTime] = useState<string>(() => (String(meeting?.meeting_time || '').match(/\d{1,2}:\d{2}/)?.[0] || ''));
-  const [newDuration, setNewDuration] = useState<string>(() => (meeting?.duration != null ? String(meeting.duration) : ''));
-  /* v25: duration chip UI now matches CreateMeetingPanel's Step 2 exactly
-     (preset chips + a custom hours/minutes mode), so this mirrors its
-     isCustomMode/customHours/customMinutes state. */
-  const [isCustomDuration, setIsCustomDuration] = useState(() => {
-    const n = Number(meeting?.duration);
-    return !!meeting?.duration && n > 0 && !PRESET_DURATIONS.includes(n);
-  });
-  const [customHours, setCustomHours] = useState(() => {
-    const n = Number(meeting?.duration);
-    return n > 0 && !PRESET_DURATIONS.includes(n) ? String(Math.floor(n / 60)) : '';
-  });
-  const [customMinutes, setCustomMinutes] = useState(() => {
-    const n = Number(meeting?.duration);
-    return n > 0 && !PRESET_DURATIONS.includes(n) ? String(n % 60) : '';
-  });
-  const handlePresetDuration = (minutes: number) => {
-    setIsCustomDuration(false);
-    setCustomHours(''); setCustomMinutes('');
-    setNewDuration(String(minutes));
-  };
-  const handleOpenCustomDuration = () => {
-    const n = Number(newDuration);
-    if (n > 0 && !PRESET_DURATIONS.includes(n)) {
-      setCustomHours(String(Math.floor(n / 60)));
-      setCustomMinutes(String(n % 60));
-    } else { setCustomHours(''); setCustomMinutes(''); }
-    setIsCustomDuration(true);
-  };
-  const handleCustomDurationChange = (hours: string, minutes: string) => {
-    setCustomHours(hours); setCustomMinutes(minutes);
-    const h = parseInt(hours, 10) || 0;
-    const m = parseInt(minutes, 10) || 0;
-    const total = h * 60 + m;
-    setNewDuration(total > 0 ? String(total) : '');
-  };
-  const customDurationTotal = (parseInt(customHours, 10) || 0) * 60 + (parseInt(customMinutes, 10) || 0);
-  const handleCustomDurationDone = () => {
-    if (customDurationTotal <= 0) {
-      setIsCustomDuration(false);
-      setCustomHours(''); setCustomMinutes('');
-      setNewDuration('');
-      return;
-    }
-    setIsCustomDuration(false);
-  };
-  const [followUpDate, setFollowUpDate] = useState<string>(() => String(meeting?.follow_up_date || meeting?.followup_date || '').slice(0, 10) || '');
-  const todayISO = toISO(startOfDay(new Date()));
-  const [note, setNote] = useState('');
-  /* v23: if the new date is (or becomes) today and the already-picked time
-     has since passed, clear it instead of silently keeping a "completed"
-     time selected behind the scenes. */
-  useEffect(() => {
-    if (newDate !== todayISO || !newTime) return;
-    const now = new Date();
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
-    const [h, m] = newTime.split(':').map(Number);
-    if (!Number.isNaN(h) && !Number.isNaN(m) && h * 60 + m <= nowMinutes) {
-      setNewTime('');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newDate]);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const [dragOver, setDragOver] = useState(false);
-
-  /* ── documents (same flow as CreateMeetingPanel v16) ──
-     existingDocs → files already on the record
-     pendingDocs  → newly picked files, uploaded on Save        */
-  const [existingDocs, setExistingDocs] = useState<string[]>(() => {
-    const v = meeting?.documents;
-    if (!v) return [];
-    try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return []; }
-  });
-  const [pendingDocs, setPendingDocs] = useState<File[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const docInputRef = useRef<HTMLInputElement>(null);
-  const initialDocsRef = useRef<string[]>([]);
-
-  useEffect(() => { initialDocsRef.current = existingDocs; /* eslint-disable-line react-hooks/exhaustive-deps */ }, []);
-
-  const MAX_FILE_MB = 10;
-  const ACCEPTED_DOCS = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg,.webp';
-
-  const handlePickDocs = (files: FileList | null) => {
-    if (!files?.length) return;
-    const list = Array.from(files);
-    const tooBig = list.find((f) => f.size > MAX_FILE_MB * 1024 * 1024);
-    if (tooBig) showToast(`"${tooBig.name}" is larger than ${MAX_FILE_MB} MB`, 'error');
-    const ok = list.filter((f) => f.size <= MAX_FILE_MB * 1024 * 1024);
-    if (ok.length) {
-      setPendingDocs((prev) => {
-        const seen = new Set(prev.map((p) => `${p.name}:${p.size}`));
-        return [...prev, ...ok.filter((f) => !seen.has(`${f.name}:${f.size}`))];
-      });
-    }
-    if (docInputRef.current) docInputRef.current.value = '';
-  };
-
-  /* v17: drag & drop + paste, same behavior as CreateMeetingPanel's DocumentDropzone */
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    if (!saving) handlePickDocs(e.dataTransfer.files);
-  };
-  const handlePaste = (e: React.ClipboardEvent) => {
-    if (saving) return;
-    const files = Array.from(e.clipboardData?.items || [])
-      .filter((i) => i.kind === 'file')
-      .map((i) => i.getAsFile())
-      .filter((f): f is File => !!f);
-    if (!files.length) return;
-    const dt = new DataTransfer();
-    files.forEach((f) => dt.items.add(f));
-    handlePickDocs(dt.files);
-  };
-
-  const removePendingDoc = (idx: number) =>
-    setPendingDocs((prev) => prev.filter((_, i) => i !== idx));
-
-  const removeExistingDoc = (name: string) =>
-    setExistingDocs((prev) => prev.filter((n) => n !== name));
-
-  const fileUrl = (filename: string) => {
-    try {
-      const anyPb = pb as any;
-      if (anyPb.files?.getUrl) return anyPb.files.getUrl(meeting, filename);
-      if (anyPb.getFileUrl) return anyPb.getFileUrl(meeting, filename);
-    } catch { /* noop */ }
-    return '';
-  };
-
-  /* PocketBase semantics: re-appending existing filenames KEEPS them;
-     omitted names get deleted; File parts get added; '' clears all. */
-  const docsDirty =
-    pendingDocs.length > 0 ||
-    existingDocs.join('||') !== initialDocsRef.current.join('||');
-
-  async function syncDocuments(recordId: string) {
-    if (!docsDirty) return;
-    const fd = new FormData();
-    if (!existingDocs.length && !pendingDocs.length) {
-      fd.append('documents', '');                              // clear all
-    } else {
-      existingDocs.forEach((n) => fd.append('documents', n));  // keep remaining
-      pendingDocs.forEach((f) => fd.append('documents', f));   // add new
-    }
-    setUploading(true);
-    try {
-      await pb.collection('meetings').update(recordId, fd);
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  const handleSave = async () => {
-    if (!meeting?.id || saving) return;
-
-    /* v21: Rescheduling always needs a new date, time & duration — this is
-       what actually makes it a *reschedule* rather than just a label
-       change, so all three are required before saving. */
-    if (status === 'rescheduled') {
-      if (!newDate || !newTime || !newDuration) {
-        setError('Please fill in the new date, time, and duration for the rescheduled meeting.');
-        return;
-      }
-      if (newDate < todayISO) {
-        setError('The rescheduled date can\'t be in the past — pick today or a future date.');
-        return;
-      }
-      if (newDate === todayISO) {
-        const now = new Date();
-        const nowMinutes = now.getHours() * 60 + now.getMinutes();
-        const [h, m] = newTime.split(':').map(Number);
-        if (!Number.isNaN(h) && !Number.isNaN(m) && h * 60 + m <= nowMinutes) {
-          setError('That time has already passed today — pick a later time or a future date.');
-          return;
-        }
-      }
-    }
-
-    setSaving(true);
-    setError('');
-    try {
-      /* PocketBase select expects capitalized values ("Cancelled"),
-      same as what CreateMeetingPanel saves — map key → label */
-      const statusLabel = STATUS_STYLES[status]?.label || status;
-      const payload: Record<string, any> = {
-        status: statusLabel,
-        status_flag: statusLabel,   // keep in sync — the create panel writes both
-        follow_up_date: followUpDate,
-      };
-
-      if (status === 'rescheduled') {
-        payload.meeting_date = newDate;
-        payload.meeting_time = newTime;
-        payload.duration = Number(newDuration) || newDuration;
-      }
-      await pb.collection('meetings').update(meeting.id, payload);
-
-      /* v17: best-effort activity trail entry for this manual change */
-      appendStatusHistory(meeting.id, meeting.status_history, statusLabel).catch(() => {});
-
-      /* documents — attach now, same as the Create/Edit panel */
-      await syncDocuments(meeting.id);
-
-      /* Optional note — tried separately so an unknown field never blocks the
-         status update. Only names that unambiguously mean "follow-up note"
-         are tried (never `notes` or `status_note`, which already mean
-         something else on this schema). If none of those exist, nothing
-         is written — you get a clear toast instead of a silent, wrong-field
-         save. */
-      const trimmedNote = note.trim();
-      if (trimmedNote) {
-        const savedField = await saveFollowUpNote(meeting.id, trimmedNote);
-        if (!savedField) {
-          /* toast, not the inline `error` state — this panel closes via
-             onSaved() right below, so an inline message would never be seen */
-          showToast(
-            'Status saved, but the note wasn’t stored — your "meetings" collection needs a text field named follow_up_notes (add one in PocketBase; followup_notes / follow_up / followup also work). See the browser console for the field names actually on this record.',
-            'error'
-          );
-        }
-      }
-      onSaved();
-    } catch (e: any) {
-      setError(e?.message || 'Failed to update. Please try again.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const di = (() => {
-    const raw = String(meeting?.meeting_date || '');
-    if (!raw) return null;
-    const d = new Date(raw.includes(' ') ? raw.replace(' ', 'T') : raw);
-    return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
-  })();
-
-  return (
-    <div className="fixed inset-0 z-50">
-      <div className="anim-overlay absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => !saving && onClose()} />
-
-      <aside className="anim-panel absolute right-0 top-0 flex h-full w-full flex-col bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">
-        <div className="h-1.5 w-full bg-gradient-to-r from-amber-400 to-orange-400" />
-
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
-          <div className="min-w-0">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Update Meeting</p>
-            <h2 className="mt-0.5 truncate text-base font-bold text-slate-900">{meeting?.agenda || meeting?.title || 'General Discussion'}</h2>
-            <p className="mt-0.5 text-xs text-slate-400">
-              {di || '—'}{meeting?.meeting_time ? ` · ${meeting.meeting_time}` : ''}
-            </p>
-          </div>
-          <button
-            onClick={() => !saving && onClose()}
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        {/* Body — everything here is manual */}
-        <div className="nice-scroll flex-1 space-y-5 overflow-y-auto px-5 py-5">
-
-          {/* Status */}
-          <div>
-            <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">Status</p>
-            <div className="grid grid-cols-2 gap-2">
-              {STATUS_ORDER.map((key) => {
-                const s = STATUS_STYLES[key];
-                if (!s) return null;
-                const selected = status === key;
-                return (
-                <button
-                  key={key}
-                  onClick={() => setStatus(key)}
-                  disabled={saving}
-                  className={`inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all duration-200 active:scale-[0.97] disabled:opacity-50 ${
-                    selected
-                      /* v22 FIX: was `${s.badge} ring-2 ring-slate-900` — stacking a
-                         second ring on top of the badge's own `ring-1 ring-inset`
-                         made two box-shadows compete, which could visually bleed
-                         into the adjacent button at small gaps. A plain border
-                         doesn't have that problem. */
-                      ? `${s.badge} border-2 border-slate-900`
-                      : 'border border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50'
-                  }`}
-                >
-                  <span className={`h-2 w-2 rounded-full ${s.dot}`} />
-                  {s.label}
-                </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Reschedule fields — only shown (and only saved) for Rescheduled.
-              v25: Date/Time/Duration now reuse CreateMeetingPanel's own
-              WeekStrip + TimeSlotPicker components and duration-chip layout
-              (Step 2, "Date" / "Time & duration") verbatim, so the reschedule
-              flow looks exactly like the create-meeting flow.
-              v21: date/time/duration are all required to save a reschedule,
-              and the new date can't be set in the past. */}
-          {status === 'rescheduled' && (
-            <div className="anim-fade-in space-y-3 rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
-              <p className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-700">
-                <RotateCcw className="h-3.5 w-3.5" />
-                Rescheduling needs a new date, time & duration
-              </p>
-
-              {/* Date */}
-              <div>
-                <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-amber-700">New Date</label>
-                <WeekStrip value={newDate} onChange={setNewDate} />
-              </div>
-
-              {/* Time & duration — side by side, exactly like CreateMeetingPanel Step 2 */}
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-amber-200 bg-white p-3.5">
-                  <label className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-amber-700">
-                    <Clock className="h-3.5 w-3.5" /> New Time
-                  </label>
-                  <TimeSlotPicker value={newTime} onChange={setNewTime} meetingDate={newDate} />
-                </div>
-
-                <div className="rounded-2xl border border-amber-200 bg-white p-3.5">
-                  <label className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-amber-700">
-                    <Timer className="h-3.5 w-3.5" /> Duration
-                  </label>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {PRESET_DURATIONS.map((m) => {
-                      const active = !isCustomDuration && Number(newDuration) === m;
-                      return (
-                        <button
-                          key={m}
-                          type="button"
-                          disabled={saving}
-                          onClick={() => handlePresetDuration(m)}
-                          className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold tabular-nums transition-all active:scale-95 disabled:opacity-50 ${
-                            active
-                              ? 'border-amber-500 bg-amber-500 text-white shadow-sm'
-                              : 'border-slate-200 bg-white text-slate-600 hover:border-amber-300'
-                          }`}
-                        >
-                          {formatDuration(m)}
-                        </button>
-                      );
-                    })}
-                    {!isCustomDuration && (
-                      <button
-                        type="button"
-                        disabled={saving}
-                        onClick={handleOpenCustomDuration}
-                        className="rounded-full border border-dashed border-slate-300 px-3 py-1.5 text-[11px] font-semibold text-slate-500 transition-colors hover:border-amber-400 hover:text-amber-600 disabled:opacity-50"
-                      >
-                        Custom
-                      </button>
-                    )}
-                  </div>
-                  {isCustomDuration && (
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <input
-                        type="number"
-                        min={0}
-                        max={23}
-                        value={customHours}
-                        disabled={saving}
-                        onChange={(e) => handleCustomDurationChange(clampInt(e.target.value, 23), customMinutes)}
-                        placeholder="H"
-                        className="w-14 rounded-xl border border-amber-200 bg-white px-2 py-1.5 text-center text-sm font-semibold tabular-nums text-slate-800 outline-none transition focus:border-amber-400 focus:ring-2 focus:ring-amber-500/10 disabled:opacity-50"
-                      />
-                      <span className="text-xs font-semibold text-slate-400">hr</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={59}
-                        value={customMinutes}
-                        disabled={saving}
-                        onChange={(e) => handleCustomDurationChange(customHours, clampInt(e.target.value, 59))}
-                        placeholder="M"
-                        className="w-14 rounded-xl border border-amber-200 bg-white px-2 py-1.5 text-center text-sm font-semibold tabular-nums text-slate-800 outline-none transition focus:border-amber-400 focus:ring-2 focus:ring-amber-500/10 disabled:opacity-50"
-                      />
-                      <span className="text-xs font-semibold text-slate-400">min</span>
-                      <button
-                        type="button"
-                        disabled={saving}
-                        onClick={handleCustomDurationDone}
-                        className="ml-auto inline-flex items-center gap-1 rounded-xl bg-slate-900 px-3 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-800 disabled:opacity-50"
-                      >
-                        <Check className="h-3.5 w-3.5" /> Done
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Follow-up date (optional) */}
-          <div>
-            <label className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              Follow-up date (optional)
-            </label>
-            <FollowUpCalendar value={followUpDate} onChange={setFollowUpDate} disabled={saving} />
-            <p className="mt-1 text-[11px] text-slate-400">
-              Only today or a future date can be chosen. Included in the Google Calendar sync when syncing is enabled.
-            </p>
-          </div>
-
-          {/* Documents — attach before saving (v17: drag & drop / paste) */}
-          <div onPaste={handlePaste}>
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Documents</p>
-              <span className="text-[10px] font-semibold text-slate-400">max {MAX_FILE_MB} MB each</span>
-            </div>
-            <input
-              ref={docInputRef}
-              type="file"
-              multiple
-              accept={ACCEPTED_DOCS}
-              className="hidden"
-              onChange={(e) => handlePickDocs(e.target.files)}
-            />
-            <button
-              type="button"
-              onClick={() => docInputRef.current?.click()}
-              onDragOver={(e) => { e.preventDefault(); if (!saving) setDragOver(true); }}
-              onDragEnter={(e) => { e.preventDefault(); if (!saving) setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              disabled={saving}
-              className={`flex w-full flex-col items-center justify-center gap-1.5 rounded-2xl border-2 border-dashed px-3 py-4 text-xs font-semibold transition-all disabled:opacity-50 ${
-                dragOver
-                  ? 'scale-[1.01] border-violet-400 bg-violet-50/80 text-violet-700'
-                  : 'border-slate-200 bg-slate-50/50 text-slate-600 hover:border-violet-300 hover:bg-violet-50/50 hover:text-violet-700'
-              }`}
-            >
-              <Upload className={`h-4 w-4 ${dragOver ? 'animate-bounce' : ''}`} />
-              {dragOver ? 'Drop to attach' : 'Attach documents'}
-              <span className="text-[10px] font-normal text-slate-400">Drag &amp; drop, paste, or click · PDF, Word, Excel, images</span>
-            </button>
-
-            {uploading && (
-              <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-100">
-                <div className="progress-shimmer h-full w-1/3 rounded-full" />
-              </div>
-            )}
-
-            {existingDocs.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {existingDocs.map((name) => {
-                  const url = fileUrl(name);
-                  return (
-                    <span key={name} className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-white py-1 pl-2.5 pr-1 text-[11px] font-medium text-slate-600">
-                      <FileText className="h-3 w-3 shrink-0 text-violet-500" />
-                      {url ? (
-                        <a href={url} target="_blank" rel="noreferrer" className="max-w-[140px] truncate hover:text-violet-600 hover:underline">{name}</a>
-                      ) : (
-                        <span className="max-w-[140px] truncate">{name}</span>
-                      )}
-                      <button type="button" onClick={() => removeExistingDoc(name)} disabled={saving} className="rounded-full p-0.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-500">
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </span>
-                  );
-                })}
-              </div>
-            )}
-
-            {pendingDocs.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {pendingDocs.map((f, i) => (
-                  <span key={`${f.name}-${i}`} className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 py-1 pl-2.5 pr-1 text-[11px] font-medium text-violet-700">
-                    <FileText className="h-3 w-3 shrink-0" />
-                    <span className="max-w-[140px] truncate">{f.name}</span>
-                    <button type="button" onClick={() => removePendingDoc(i)} disabled={saving} className="rounded-full p-0.5 text-violet-400 transition-colors hover:bg-violet-100 hover:text-rose-500">
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Note */}
-          <div>
-            <label className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Note (optional)</label>
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              rows={4}
-              disabled={saving}
-              placeholder="Add a short note about this status change..."
-              className="w-full resize-none rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm text-slate-900 placeholder-slate-400 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
-            />
-          </div>
-
-          {error && (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-600">
-              {error}
-            </div>
-          )}
-        </div>
-
-        {/* Footer — manual save only */}
-        <div className="border-t border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={onClose}
-              disabled={saving}
-              className="flex-1 rounded-full border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="inline-flex flex-[2] items-center justify-center gap-1.5 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98] disabled:opacity-60"
-            >
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-              {saving ? 'Saving...' : 'Save Changes'}
-            </button>
-          </div>
-        </div>
-      </aside>
-    </div>
-  );
-}
-
+/* useSearchParams needs a Suspense boundary (links from notifications carry ?open= / ?schedule= …) */
 export default function MeetingsPage() {
+  return (
+    <Suspense>
+      <MeetingsPageContent />
+    </Suspense>
+  );
+}
+
+function MeetingsPageContent() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const [meetings, setMeetings] = useState<any[]>([]);
   const [selectedMeeting, setSelectedMeeting] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -1322,51 +100,61 @@ export default function MeetingsPage() {
   const [editingMeeting, setEditingMeeting] = useState<any>(null);
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  const [deleting] = useState(false);
 
-  /* proper modal for bulk (soft) delete */
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
 
   const [updateMeeting, setUpdateMeeting] = useState<any>(null);
 
-  /* ★ Follow-up notes expand state for the detail panel */
+  /* Follow-up notes expand / inline edit state (detail panel) */
   const [followUpOpen, setFollowUpOpen] = useState(false);
-
-  /* ★ v22: inline follow-up note editor state (detail panel) */
   const [followUpEditing, setFollowUpEditing] = useState(false);
   const [followUpDraft, setFollowUpDraft] = useState('');
   const [followUpSaving, setFollowUpSaving] = useState(false);
 
-  /* Pagination state */
+  /* Pagination */
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(8);
 
-  /* ★ v17: quick status popover (row chevron) */
-  const [quickStatus, setQuickStatus] = useState<{ id: string; top: number; left: number; align: 'left' | 'right' } | null>(null);
+  /* quick status popover */
+const [quickStatus, setQuickStatus] = useState<{ id: string; pos: PopoverPos } | null>(null);
   const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
-  /* ★ v24: mirrors hoveredRowId but updates synchronously (no re-render
-     lag) and is the source of truth the 1-4 keyboard shortcut reads from —
-     see the shortcut's useEffect below for why this fixes the "changes a
-     different meeting" bug. */
+  /* synchronous mirror of hoveredRowId — source of truth for the 1-4 shortcut */
   const hoveredRowIdRef = useRef<string | null>(null);
 
-  /* ★ v17: notes popover (StickyNote badge) */
-  const [notesPopover, setNotesPopover] = useState<{ id: string; top: number; left: number; align: 'left' | 'right'; text: string } | null>(null);
-
-  /* ★ v17: bulk selection */
+  /* notes popover */
+const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; text: string } | null>(null);
+  /* bulk selection */
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
 
-  /* ★ v17: overdue banner */
+  /* overdue banner */
   const [overdueDismissed, setOverdueDismissed] = useState(false);
 
-  /* ★ v17: command palette */
+  /* command palette */
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
-  /* ★ v24: the meetings table's DOM node, so the overdue banner's "Review
-     now" button can smooth-scroll straight to it instead of leaving the
-     user to scroll past the KPI cards manually. */
   const tableRef = useRef<HTMLDivElement>(null);
+
+  /* participant history / duplicate / undo delete */
+  const [historyPerson, setHistoryPerson] = useState<{ id?: string; name: string } | null>(null);
+  const [duplicateSource, setDuplicateSource] = useState<any>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ records: any[]; message: string; startedAt: number } | null>(null);
+  const pendingDeleteRef = useRef<{ records: any[]; timer: ReturnType<typeof setTimeout> } | null>(null);
+
+  /* ★ v29: "met before" popup — which visit it's for, and who was skipped */
+  const [revisit, setRevisit] = useState<{ city: string; cityLabel: string; date: string; exclude: string[] } | null>(null);
+  const [revisitSkips, setRevisitSkips] = useState<Record<string, string[]>>({});
+  const [revisitClosed, setRevisitClosed] = useState<Set<string>>(new Set());
+
+  /* day brief panel */
+  const [dayBriefOpen, setDayBriefOpen] = useState(false);
+
+  /* roles — viewers get a read-only page (PocketBase rules enforce the same on the server) */
+  const { user } = useAuth();
+  const editable = canEdit(user);
+  const isAdmin = canManageIntegrations(user);
+  const viewOnly = () => { showToast('Your account is view-only — ask an admin for edit access.', 'error'); return false; };
 
   const [distMounted, setDistMounted] = useState(false);
   useEffect(() => {
@@ -1376,20 +164,91 @@ export default function MeetingsPage() {
 
   useEffect(() => { loadData(); }, []);
 
+  /* deep links from notifications / the visit planner:
+       ?open=<meetingId>                         → open that meeting's details
+       ?schedule=<meetingId>&date=&city=         → new meeting with that person, on that visit
+       ?person=<IAS|IPS|Contact>:<id>&date=&city= → new meeting with a directory person
+       ?filter=<status>                          → filter the list */
+  useEffect(() => {
+    if (loading || !searchParams.toString()) return;
+    const q = new URLSearchParams(searchParams.toString());
+    router.replace('/meetings', { scroll: false }); // handle once
+    const prefill = {
+      meeting_date: q.get('date') || '', city: q.get('city') || '', meeting_place: 'Outside',
+      agenda: '', meeting_time: '', location: '', follow_up_date: '', follow_up_notes: '',
+    };
+    const byId = (id: string) => meetings.find((m) => m.id === id);
+
+    if (q.get('open')) {
+      const id = q.get('open')!;
+      const m = byId(id);
+      if (m) setSelectedMeeting(m);
+      else fetchFreshMeeting(id).then((r) => r && setSelectedMeeting(r));
+    } else if (q.get('schedule')) {
+      const m = byId(q.get('schedule')!);
+      if (m) openDuplicate(m, { __prefill: prefill });
+    } else if (q.get('person')) {
+      const [kind, id] = q.get('person')!.split(':');
+      const col = kind === 'IAS' ? 'ias_officers' : kind === 'IPS' ? 'ips_officers' : 'other_contacts';
+      pb.collection(col).getOne(id).then((o: any) => {
+        openDuplicate({
+          officer_name: o.name, officer_id: o.id, officer_type: kind === 'Contact' ? 'Other' : kind,
+          designation: o.current_position || o.designation || '', current_position: o.current_position || o.designation || '',
+          email: o.email || '', contact_number: o.contact_number || o.mobile_no || '',
+          cadre: o.cadre || '', state: o.state || '', batch_year: o.batch_year || '', department: o.department || '',
+          meeting_type: 'External',
+        }, { __prefill: prefill });
+      }).catch(() => showToast('Couldn’t load that person from the directory.', 'error'));
+    } else if (q.get('filter')) {
+      setStatusFilter(q.get('filter')!);
+      requestAnimationFrame(() => tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, searchParams]);
+
+  /* live updates — changes made by anyone (or another tab) show up without a refresh */
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unsub: (() => void) | null = null;
+    let cancelled = false;
+    pb.collection('meetings')
+      .subscribe('*', () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => loadData({ silent: true }), 400); // one reload per burst
+      })
+      .then((fn) => { if (cancelled) fn(); else unsub = fn; })
+      // status 0 = the attempt was cancelled (dev mode mounts twice) — not a real failure
+      .catch((e) => { if (e?.status !== 0 && !e?.isAbort) console.warn('[meetings] live updates unavailable:', e); });
+    return () => { cancelled = true; if (timer) clearTimeout(timer); unsub?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => { setPage(1); }, [searchQuery, statusFilter, typeFilter, priorityFilter, sortBy, perPage]);
 
-  /* Reset the follow-up expansion/edit state whenever a different meeting is opened */
   useEffect(() => {
     setFollowUpOpen(false);
     setFollowUpEditing(false);
     setFollowUpDraft('');
   }, [selectedMeeting?.id]);
 
-  const anyModalOpen = isPanelOpen || !!updateMeeting || !!selectedMeeting || showDeleteConfirm || showBulkDeleteConfirm || commandPaletteOpen;
+  const anyModalOpen = isPanelOpen || !!updateMeeting || !!selectedMeeting || showDeleteConfirm || showBulkDeleteConfirm || commandPaletteOpen || !!historyPerson || !!revisit || dayBriefOpen;
+
+  /* Esc closes the day brief */
+  useEffect(() => {
+    if (!dayBriefOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDayBriefOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dayBriefOpen]);
+
+  async function handleReconnectGoogle() {
+    try { await reconnectGoogle(); }
+    catch (e: any) { showToast(e?.message || 'Could not start the Google connection', 'error'); }
+  }
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key !== 'Escape' || isPanelOpen || updateMeeting) return;
+      if (e.key !== 'Escape' || isPanelOpen || updateMeeting || historyPerson || revisit) return;
       if (showBulkDeleteConfirm) setShowBulkDeleteConfirm(false);
       else if (showDeleteConfirm) setShowDeleteConfirm(false);
       else if (commandPaletteOpen) setCommandPaletteOpen(false);
@@ -1397,25 +256,9 @@ export default function MeetingsPage() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedMeeting, showDeleteConfirm, showBulkDeleteConfirm, isPanelOpen, updateMeeting, commandPaletteOpen]);
+  }, [selectedMeeting, showDeleteConfirm, showBulkDeleteConfirm, isPanelOpen, updateMeeting, commandPaletteOpen, historyPerson, revisit]);
 
-  /* ★ v24: global shortcuts — Cmd/Ctrl+K for the command palette, N for
-     new meeting, 1–4 to set status. All skipped while typing in an
-     input/textarea/select, or while any modal is open.
-
-     FIX for "pressing 1-4 changes a DIFFERENT meeting than the one I
-     picked": this used to always target whichever row `hoveredRowId`
-     last pointed at via onMouseEnter/onMouseLeave — state that can go
-     stale (a re-render, a popover opening/closing, or a fast scroll can
-     leave it pointing at a row the mouse isn't over anymore). Two
-     changes fix it:
-       1) If you've checkbox-SELECTED meeting(s) in the list, 1-4 now
-          targets those selected meetings and ignores hover entirely —
-          "selecting a particular meeting" now does what it sounds like.
-       2) With nothing checkbox-selected, 1-4 still falls back to the
-          hovered row, but reads it from `hoveredRowIdRef` (kept in sync
-          live by onMouseMove, not just enter/leave — see the row
-          handlers below) instead of the possibly-stale React state. */
+  /* global shortcuts — Cmd/Ctrl+K, N, 1–4 */
   useEffect(() => {
     function isTypingTarget() {
       const tag = (document.activeElement?.tagName || '').toLowerCase();
@@ -1440,9 +283,6 @@ export default function MeetingsPage() {
       if (idx === -1 || !STATUS_ORDER[idx]) return;
       const targetStatus = STATUS_ORDER[idx];
 
-      /* Checkbox selection always wins over hover — it's explicit, so it
-         can never be confused with "whatever the mouse happens to be
-         over right now". */
       if (selectedIds.size > 0) {
         e.preventDefault();
         bulkUpdateStatus(targetStatus);
@@ -1463,10 +303,6 @@ export default function MeetingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meetings, anyModalOpen, selectedIds]);
 
-  /* ★ v24: a scroll or a tab/window blur can move the row out from under
-     the pointer without ever firing that row's onMouseLeave — the classic
-     way `hoveredRowId` used to go stale and let 1-4 hit the wrong
-     meeting. Clearing it on both events closes that gap. */
   useEffect(() => {
     function clearHover() {
       hoveredRowIdRef.current = null;
@@ -1481,28 +317,36 @@ export default function MeetingsPage() {
   }, []);
 
   const openCreate = () => {
+    if (!editable) return viewOnly();
     setEditingMeeting(null);
+    setDuplicateSource(null);
     setIsPanelOpen(true);
   };
 
-  async function loadData() {
-    try {
-      setLoading(true);
-      const meetingsData = await pb.collection('meetings').getFullList({ sort: '-created_date' });
-      /* Deleted meetings are archived into `deleted_records` and removed
-         from this collection (see confirmDelete/performBulkDelete below),
-         so nothing needs filtering here. The `!m.deleted` check is kept
-         only so any meeting soft-deleted by the OLD flag-based approach
-         (before this change) still stays hidden until it's cleaned up. */
-      setMeetings(meetingsData.filter((m: any) => !m.deleted));
-    } catch (error) {
-      console.error('Error loading data:', error);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const openDuplicate = async (source: any, overrides: Record<string, any> = {}) => {
+    if (!editable) return viewOnly();
+    const fresh = source?.id ? await fetchFreshMeeting(source.id) : null;
+    setSelectedMeeting(null);
+    setHistoryPerson(null);
+    setEditingMeeting(null);
+    setDuplicateSource({ ...(fresh || source), ...overrides });
+    setIsPanelOpen(true);
+  };
 
-  /* Fetch the freshest FULL record before opening edit/update */
+async function loadData({ silent = false }: { silent?: boolean } = {}) {
+  try {
+    if (!silent) setLoading(true);
+    // the meetings collection has no `created` field (sorting by it returns 400) — the client sort handles order
+    const meetingsData: any[] = await pb.collection('meetings').getFullList();
+    const pendingIds = new Set((pendingDeleteRef.current?.records || []).map((r: any) => r.id));
+    setMeetings(meetingsData.filter((m: any) => !m.deleted && !pendingIds.has(m.id)));
+  } catch (error) {
+    console.error('Error loading data:', error);
+  } finally {
+    setLoading(false);
+  }
+}
+
   const fetchFreshMeeting = async (id: string) => {
     try {
       return await pb.collection('meetings').getOne(id);
@@ -1513,6 +357,7 @@ export default function MeetingsPage() {
 
   const handleEdit = async () => {
     if (!selectedMeeting) return;
+    if (!editable) return viewOnly();
     const snapshot = selectedMeeting;
     setSelectedMeeting(null);
     const fresh = await fetchFreshMeeting(snapshot.id);
@@ -1522,6 +367,7 @@ export default function MeetingsPage() {
 
   const handleOpenUpdate = async () => {
     if (!selectedMeeting) return;
+    if (!editable) return viewOnly();
     const snapshot = selectedMeeting;
     setSelectedMeeting(null);
     const fresh = await fetchFreshMeeting(snapshot.id);
@@ -1531,52 +377,157 @@ export default function MeetingsPage() {
   const handlePanelSaved = () => {
     setIsPanelOpen(false);
     setEditingMeeting(null);
+    setDuplicateSource(null);
     loadData();
   };
 
   const handlePanelClosed = () => {
     setIsPanelOpen(false);
     setEditingMeeting(null);
+    setDuplicateSource(null);
   };
 
-  /* Soft delete: a full snapshot of the record is archived into
-     `deleted_records` first — the same archive collection the officers,
-     employees and users pages use — and only then removed from `meetings`,
-     so a meeting can never be permanently wiped out by an accidental (or
-     malicious) click. If the archive step fails, the meeting is left
-     untouched (nothing is lost). */
+  /* ------------------------------- v29: "met before" popup ------------------------------- */
+
+  const visitKey = (city: string, date: string) => `${city}|${date}`;
+
+  /* after a NEW meeting in another city → offer people met there before */
+function handleMeetingSaved(rec: any) {
+  /* only new, non-cancelled meetings in a recognised city other than home */
+  if (!rec?.__isNew) return;
+  if (String(rec.status || '').toLowerCase() === 'cancelled') return;
+
+  const city = cityKey(rec.city) || findCity(rec.location)?.key || null;
+  const date = String(rec.meeting_date || '').slice(0, 10);
+  if (!city || isHomeCity(city) || !date) return;
+  if (revisitClosed.has(visitKey(city, date))) return;
+
+  const exclude = [
+    personKey(rec),
+    ...String(rec.attendees || '').split(',').map((e: string) => e.trim()).filter(Boolean).map((e: string) => `email:${e.toLowerCase()}`),
+  ];
+
+  setRevisit({
+    city,
+    cityLabel: cityLabel(city, String(rec.city || '').split(',')[0].trim()),
+    date,
+    exclude,
+  });
+}
+
+  /* who to show — recomputed live, so it updates as meetings reload */
+  const revisitPeople: RevisitPerson[] = revisit
+    ? findPeopleToRevisit(meetings, {
+        city: revisit.city,
+        date: revisit.date,
+        exclude: [...revisit.exclude, ...(revisitSkips[visitKey(revisit.city, revisit.date)] || [])],
+      })
+    : [];
+
+  /* nobody left to suggest → drop the popup so shortcuts work again */
+  useEffect(() => {
+    if (revisit && !isPanelOpen && revisitPeople.length === 0) setRevisit(null);
+  }, [revisit, isPanelOpen, revisitPeople.length]);
+
+  /* Schedule → new meeting pre-filled with that person, same date & city */
+  function scheduleRevisit(p: RevisitPerson) {
+    if (!revisit) return;
+    const { date, cityLabel: label } = revisit;
+    setRevisit(null);
+    openDuplicate(p.lastMeeting, {
+      __prefill: {
+        meeting_date: date, city: label, meeting_place: 'Outside',
+        agenda: '', meeting_time: '', location: '', follow_up_date: '', follow_up_notes: '',
+      },
+    });
+  }
+
+  function skipRevisit(p: RevisitPerson) {
+    if (!revisit) return;
+    const k = visitKey(revisit.city, revisit.date);
+    setRevisitSkips((prev) => ({ ...prev, [k]: [...(prev[k] || []), p.key] }));
+  }
+
+  function closeRevisit() {
+    if (revisit) {
+      const k = visitKey(revisit.city, revisit.date);
+      setRevisitClosed((prev) => new Set(prev).add(k));
+    }
+    setRevisit(null);
+  }
+
+  /* archive one record into `deleted_records`, then delete it */
+  async function archiveAndDelete(record: any, deletedAt: string) {
+    const { id: originalId, ...recordData } = record;
+    await pb.collection(ARCHIVE_COLLECTION).create({
+      original_collection: 'meetings',
+      original_id: originalId,
+      record_type: 'Meeting',
+      record_data: recordData,
+      deleted_at: deletedAt,
+    });
+    await pb.collection('meetings').delete(originalId);
+  }
+
+  /* delete with Undo — real archive + delete runs after UNDO_MS */
+  async function commitPendingDelete() {
+    const pending = pendingDeleteRef.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingDeleteRef.current = null;
+    setPendingDelete(null);
+    const deletedAt = new Date().toISOString();
+    const results = await Promise.allSettled(pending.records.map(async (r) => {
+      await archiveAndDelete(r, deletedAt);
+      removeGoogleEvent(r, { clearRecord: false }); // record is gone — just drop the calendar event
+    }));
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    if (failed) {
+      showToast(`${failed} meeting${failed > 1 ? 's' : ''} could not be archived/deleted and ${failed > 1 ? 'were' : 'was'} restored.`, 'error');
+      loadData();
+    }
+  }
+
+  function scheduleDelete(records: any[]) {
+    if (!records.length) return;
+    if (!editable) { viewOnly(); return; }
+    if (pendingDeleteRef.current) commitPendingDelete();
+    const ids = new Set(records.map((r) => r.id));
+    setMeetings((prev) => prev.filter((m) => !ids.has(m.id)));
+    const timer = setTimeout(() => { commitPendingDelete(); }, UNDO_MS);
+    pendingDeleteRef.current = { records, timer };
+    setPendingDelete({
+      records,
+      startedAt: Date.now(),
+      message: records.length === 1 ? 'Meeting deleted' : `${records.length} meetings deleted`,
+    });
+  }
+
+  function undoDelete() {
+    const pending = pendingDeleteRef.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingDeleteRef.current = null;
+    setPendingDelete(null);
+    setMeetings((prev) => {
+      const have = new Set(prev.map((m) => m.id));
+      return [...prev, ...pending.records.filter((r) => !have.has(r.id))];
+    });
+    showToast('Restored', 'success');
+  }
+
+  useEffect(() => {
+    const flush = () => { if (pendingDeleteRef.current) commitPendingDelete(); };
+    window.addEventListener('beforeunload', flush);
+    return () => { window.removeEventListener('beforeunload', flush); flush(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const confirmDelete = async () => {
     if (!selectedMeeting || deleting) return;
-    setDeleting(true);
-    let failedStep: 'archive' | 'delete' = 'archive';
-    try {
-      const { id: originalId, ...recordData } = selectedMeeting;
-
-      await pb.collection(ARCHIVE_COLLECTION).create({
-        original_collection: 'meetings',
-        original_id: originalId,
-        record_type: 'Meeting',
-        record_data: recordData,
-        deleted_at: new Date().toISOString(),
-      });
-
-      failedStep = 'delete';
-      await pb.collection('meetings').delete(selectedMeeting.id);
-
-      showToast('Meeting deleted', 'success');
-      setSelectedMeeting(null);
-      setShowDeleteConfirm(false);
-      loadData();
-    } catch {
-      showToast(
-        failedStep === 'archive'
-          ? 'Failed to archive this meeting before deleting it. Please try again.'
-          : 'This meeting was archived, but the delete step failed. Please try again.',
-        'error'
-      );
-    } finally {
-      setDeleting(false);
-    }
+    scheduleDelete([selectedMeeting]);
+    setSelectedMeeting(null);
+    setShowDeleteConfirm(false);
   };
 
   /* -------------------------------- Helpers -------------------------------- */
@@ -1592,7 +543,7 @@ export default function MeetingsPage() {
     const ts = dateToTime(value);
     if (!ts) return '—';
     const date = new Date(ts);
-    return `${date.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })} · ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+    return `${date.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })} · ${date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })}`;
   };
 
   const formatDateShort = (value: any): string => {
@@ -1603,7 +554,9 @@ export default function MeetingsPage() {
   };
 
   const meetingDateTs = (m: any) => dateToTime(m.meeting_date) || dateToTime(m.created_date);
-  const createdTs = (m: any) => dateToTime(m.created_date) || dateToTime(m.updated_date) || 0;
+/* creation time — custom created_date, else PocketBase's built-in `created` */
+const createdRaw = (m: any) => m?.created_date || m?.created || m?.updated_date || m?.updated || '';
+const createdTs = (m: any) => dateToTime(createdRaw(m));
 
   const timeMinutes = (m: any): number | null => {
     const t = String(m.meeting_time || '');
@@ -1617,6 +570,7 @@ export default function MeetingsPage() {
 
   const priorityWeight = (m: any) => PRIORITY_WEIGHT[String(m.priority || '').toLowerCase()] || 0;
 
+  /* always 24-hour HH:mm (old "2:30 PM" values are converted) */
   const formatTimeDisplay = (timeString: string): string => {
     if (!timeString) return '—';
     const match = timeString.trim().match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
@@ -1624,9 +578,8 @@ export default function MeetingsPage() {
     const hour = parseInt(match[1], 10);
     const minutes = match[2];
     const meridiem = match[3]?.toUpperCase();
-    if (meridiem) return `${hour % 12 || 12}:${minutes} ${meridiem}`;
-    const modifier = hour >= 12 ? 'PM' : 'AM';
-    return `${hour % 12 || 12}:${minutes} ${modifier}`;
+    const h24 = meridiem ? (hour % 12) + (meridiem === 'PM' ? 12 : 0) : hour;
+    return `${String(h24).padStart(2, '0')}:${minutes}`;
   };
 
   const formatDate = (dateString: any) => {
@@ -1664,57 +617,43 @@ export default function MeetingsPage() {
   const internalCount = meetings.filter((m) => String(m.meeting_type || '').toLowerCase() === 'internal').length;
   const externalCount = meetings.filter((m) => String(m.meeting_type || '').toLowerCase() === 'external').length;
 
-  /* ------------------------------- v17: quick status / bulk / popovers ------------------------------- */
+  /* ------------------------------- quick status / bulk / popovers ------------------------------- */
 
-  /* Optimistic status update — flips the badge immediately, writes in the
-     background, and rolls back with an alert if the write fails.
-     v21: "Rescheduled" is the one status that always needs more input (a new
-     date, time & duration), so a quick popover pick or a 1–4 keyboard
-     shortcut never writes it blind — it opens the full Update panel,
-     pre-selected on Rescheduled, instead. */
+  /* Optimistic status update. "Rescheduled" opens the Update panel instead. */
   async function updateStatusInline(meeting: any, key: string) {
     setQuickStatus(null);
+    if (!editable) { viewOnly(); return; }
     if (key === 'rescheduled') {
       const fresh = await fetchFreshMeeting(meeting.id);
       setUpdateMeeting({ ...(fresh || meeting), __forceStatus: 'rescheduled' });
       return;
     }
     const label = STATUS_STYLES[key]?.label || key;
+    const tooEarly = completedTooEarly(meeting, label);
+    if (tooEarly) { showToast(tooEarly, 'error'); return; }
     const prevSnapshot = meetings;
     setMeetings((prev) => prev.map((m) => (m.id === meeting.id ? { ...m, status: label, status_flag: label } : m)));
     try {
       await pb.collection('meetings').update(meeting.id, { status: label, status_flag: label });
       appendStatusHistory(meeting.id, meeting.status_history, label).catch(() => {});
+      if (key === 'cancelled') removeGoogleEvent(meeting); // attendees get Google's cancellation notice
     } catch {
       setMeetings(prevSnapshot);
       showToast('Failed to update status. Please try again.', 'error');
     }
   }
 
-  function openQuickStatus(e: React.MouseEvent, meeting: any) {
-    e.stopPropagation();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const align: 'left' | 'right' = rect.left > window.innerWidth / 2 ? 'right' : 'left';
-    setQuickStatus({
-      id: meeting.id,
-      top: rect.bottom + 6,
-      left: align === 'right' ? window.innerWidth - rect.right : rect.left,
-      align,
-    });
-  }
+function openQuickStatus(e: React.MouseEvent, meeting: any) {
+  e.stopPropagation();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  setQuickStatus({ id: meeting.id, pos: popoverPosition(rect, 210) });
+}
 
-  function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
-    e.stopPropagation();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const align: 'left' | 'right' = rect.left > window.innerWidth / 2 ? 'right' : 'left';
-    setNotesPopover({
-      id: meeting.id,
-      top: rect.bottom + 6,
-      left: align === 'right' ? window.innerWidth - rect.right : rect.left,
-      align,
-      text,
-    });
-  }
+function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
+  e.stopPropagation();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  setNotesPopover({ id: meeting.id, pos: popoverPosition(rect, 260), text });
+}
 
   function toggleSelect(id: string) {
     setSelectedIds((prev) => {
@@ -1728,7 +667,13 @@ export default function MeetingsPage() {
 
   async function bulkUpdateStatus(key: string) {
     if (bulkBusy || selectedIds.size === 0) return;
+    if (!editable) { viewOnly(); return; }
     const label = STATUS_STYLES[key]?.label || key;
+    const early = meetings.filter((m) => selectedIds.has(m.id) && completedTooEarly(m, label));
+    if (early.length) {
+      showToast(`${early.length} of the selected meeting${early.length > 1 ? 's haven’t' : ' hasn’t'} happened yet, so ${early.length > 1 ? 'they' : 'it'} can’t be marked Completed. Unselect ${early.length > 1 ? 'them' : 'it'} and try again.`, 'error');
+      return;
+    }
     const count = selectedIds.size;
     const ids = Array.from(selectedIds);
     setBulkBusy(true);
@@ -1739,6 +684,7 @@ export default function MeetingsPage() {
       ids.forEach((id) => {
         const m = prevSnapshot.find((mm) => mm.id === id);
         appendStatusHistory(id, m?.status_history, label).catch(() => {});
+        if (key === 'cancelled' && m) removeGoogleEvent(m);
       });
       clearSelection();
       showToast(`Marked ${count} meeting${count > 1 ? 's' : ''} as ${label}`, 'success');
@@ -1750,65 +696,15 @@ export default function MeetingsPage() {
     }
   }
 
-  /* Bulk soft delete: archives a full snapshot of every selected record
-     into `deleted_records`, then removes it from `meetings` — same
-     reasoning and same archive collection as the single-meeting delete
-     above, so a bulk click can't wipe out records either. Each meeting is
-     archived-then-deleted as one unit, so a meeting that fails to archive
-     is simply left alone rather than deleted without a backup. */
   async function performBulkDelete() {
     if (bulkBusy || selectedIds.size === 0) return;
-    const count = selectedIds.size;
-    const ids = Array.from(selectedIds);
-    setBulkBusy(true);
-    try {
-      const deletedAt = new Date().toISOString();
-      const results = await Promise.allSettled(
-        ids.map(async (id) => {
-          const record = meetings.find((m) => m.id === id);
-          if (!record) throw new Error('Meeting not found in current list');
-          const { id: originalId, ...recordData } = record;
-
-          await pb.collection(ARCHIVE_COLLECTION).create({
-            original_collection: 'meetings',
-            original_id: originalId,
-            record_type: 'Meeting',
-            record_data: recordData,
-            deleted_at: deletedAt,
-          });
-          await pb.collection('meetings').delete(id);
-          return id;
-        })
-      );
-
-      const succeededIds = new Set(
-        results
-          .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
-          .map((r) => r.value)
-      );
-      const failedCount = results.length - succeededIds.size;
-
-      setMeetings((prev) => prev.filter((m) => !succeededIds.has(m.id)));
-      clearSelection();
-      setShowBulkDeleteConfirm(false);
-
-      if (failedCount === 0) {
-        showToast(`Deleted ${count} meeting${count > 1 ? 's' : ''}`, 'success');
-      } else {
-        showToast(
-          `Deleted ${succeededIds.size} of ${count} meetings — ${failedCount} could not be archived/deleted. Please try again.`,
-          'error'
-        );
-      }
-    } catch {
-      showToast('Some meetings could not be deleted. Please try again.', 'error');
-      loadData();
-    } finally {
-      setBulkBusy(false);
-    }
+    const records = meetings.filter((m) => selectedIds.has(m.id));
+    scheduleDelete(records);
+    clearSelection();
+    setShowBulkDeleteConfirm(false);
   }
 
-  /* ------------------------------- v22: inline follow-up note edit ------------------------------- */
+  /* ------------------------------- inline follow-up note edit ------------------------------- */
 
   function startFollowUpEdit(currentText: string) {
     setFollowUpDraft(currentText);
@@ -1824,13 +720,11 @@ export default function MeetingsPage() {
       const savedField = await saveFollowUpNote(selectedMeeting.id, trimmed);
       if (!savedField) {
         showToast(
-          'Couldn’t save the note — your "meetings" collection needs a text field named follow_up_notes (followup_notes / follow_up / followup also work). See the browser console for the field names actually on this record.',
+          'Couldn’t save the note — your "meetings" collection needs a text field named follow_up_notes. See the browser console for the field names actually on this record.',
           'error'
         );
         return;
       }
-      /* reflect immediately in both the open detail panel and the list,
-         under whichever field name actually accepted the write */
       setSelectedMeeting((prev: any) => (prev ? { ...prev, [savedField]: trimmed } : prev));
       setMeetings((prev) => prev.map((m) => (m.id === selectedMeeting.id ? { ...m, [savedField]: trimmed } : m)));
       setFollowUpEditing(false);
@@ -1908,18 +802,10 @@ export default function MeetingsPage() {
     .map((s) => ({ ...s, count: statusCount(s.key) }))
     .filter((s) => s.count > 0);
 
-  /* ------------------------------ v17: overdue banner ----------------------------- */
-
   const overdueMeetings = meetings.filter(
     (m) => getStatusKey(m) === 'scheduled' && dayTag(m.meeting_date || m.created_date, 'scheduled')?.label === 'Overdue'
   );
 
-  /* ------------------------------ v25: KPI card click ----------------------------- */
-  /* Sets the status filter AND smooth-scrolls down to the meetings table,
-     the same way the overdue banner's "Review now" button already does —
-     so clicking a KPI card jumps straight to the filtered results instead
-     of leaving the user to scroll down past the stat cards/search bar
-     manually. */
   function handleStatCardClick(key: string) {
     setStatusFilter(key);
     requestAnimationFrame(() => {
@@ -2015,7 +901,25 @@ export default function MeetingsPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {isAdmin && (
+              <button
+                onClick={handleReconnectGoogle}
+                title="Re-authorise the Google account used for Calendar, Meet and invites"
+                className="hidden items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 lg:inline-flex"
+              >
+                <RefreshCw className="h-3.5 w-3.5" /> Reconnect Google
+              </button>
+            )}
+
+            <button
+              onClick={() => setDayBriefOpen(true)}
+              title="Printable prep sheet for a day"
+              className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-600 transition-colors hover:border-violet-200 hover:text-violet-600"
+            >
+              <FileText className="h-3.5 w-3.5" /> Day brief
+            </button>
+
             <button
               onClick={() => setCommandPaletteOpen(true)}
               className="hidden items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 sm:inline-flex"
@@ -2025,21 +929,25 @@ export default function MeetingsPage() {
               <kbd className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">⌘K</kbd>
             </button>
 
-            <button
-              onClick={openCreate}
-              className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
-            >
-              <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
-              New Meeting
-              <kbd className="ml-1 hidden rounded-md bg-white/20 px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ring-white/30 sm:inline">N</kbd>
-            </button>
+            {editable ? (
+              <button
+                onClick={openCreate}
+                className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
+              >
+                <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
+                New Meeting
+                <kbd className="ml-1 hidden rounded-md bg-white/20 px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ring-white/30 sm:inline">N</kbd>
+              </button>
+            ) : (
+              <span className="rounded-full bg-slate-100 px-3.5 py-2 text-xs font-semibold text-slate-500">View only</span>
+            )}
           </div>
         </div>
 
         {/* ------------------------------- Content ------------------------------ */}
         <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
 
-          {/* ------------------------- v17: Overdue banner ------------------------ */}
+          {/* ------------------------- Overdue banner ------------------------ */}
           {overdueMeetings.length > 0 && !overdueDismissed && (
             <div className="anim-fade-up flex items-center gap-3 rounded-3xl border border-rose-200 bg-rose-50 px-4 py-3.5 shadow-sm sm:px-5">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-600">
@@ -2052,9 +960,6 @@ export default function MeetingsPage() {
                 onClick={() => {
                   setStatusFilter('scheduled');
                   setSortBy('date-asc');
-                  /* v24: scroll the meetings table into view so overdue rows
-                     (now filtered to the top) don't require a manual scroll
-                     past the KPI cards to find. */
                   requestAnimationFrame(() => {
                     tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                   });
@@ -2275,8 +1180,22 @@ export default function MeetingsPage() {
                       <CalendarClock className="h-8 w-8 text-slate-300" />
                     </div>
                   </div>
-                  <h3 className="mt-5 text-base font-bold text-slate-800">No meetings found</h3>
-                  <p className="mt-1 max-w-xs text-sm text-slate-500">Try adjusting your search or filters, or create a new meeting.</p>
+                  <h3 className="mt-5 text-base font-bold text-slate-800">
+                    {meetings.length === 0 ? 'Welcome! Let’s schedule your first meeting' : 'No meetings match these filters'}
+                  </h3>
+                  <p className="mt-1 max-w-xs text-sm text-slate-500">
+                    {meetings.length === 0
+                      ? 'Pick a participant, a date and a free time slot — it takes less than a minute.'
+                      : 'Try a different search, or clear the filters to see everything.'}
+                  </p>
+                  {meetings.length > 0 && (searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all') && (
+                    <button
+                      onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); }}
+                      className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+                    >
+                      <X className="h-3.5 w-3.5" /> Clear filters
+                    </button>
+                  )}
                   <button
                     onClick={openCreate}
                     className="mt-5 inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
@@ -2296,21 +1215,19 @@ export default function MeetingsPage() {
                   const typeCfg = getTypeConfig(meeting.meeting_type);
                   const TypeIcon = typeCfg?.icon;
 
-                  const createdMs = dateToTime(meeting.created_date);
+                  const createdMs = createdTs(meeting);
                   const createdDateStr = createdMs
                     ? new Date(createdMs).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })
                     : '—';
                   const createdTimeStr = createdMs
-                    ? new Date(createdMs).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+                    ? new Date(createdMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
                     : '';
 
                   const priority = PRIORITY_BADGE[String(meeting.priority || '').toLowerCase()];
                   const followUpText = String(meeting.follow_up_notes || meeting.followup_notes || meeting.follow_up || meeting.followup || '');
                   const hasFollowUp = !!followUpText;
+                  const hasMinutes = !!String(meeting.minutes || '').trim();
                   const isSelected = selectedIds.has(meeting.id);
-                  /* ★ v24: only shown when nothing is checkbox-selected, so the
-                     ring always matches whichever row 1-4 would actually act on
-                     (see the shortcut's useEffect above). */
                   const isKeyboardTarget = selectedIds.size === 0 && hoveredRowId === meeting.id;
 
                   return (
@@ -2339,7 +1256,6 @@ export default function MeetingsPage() {
 
                         <div className="col-span-1 flex justify-center">
                           <div className="relative">
-                            {/* v17: bulk-select checkbox — shows on row hover or when selected */}
                             <button
                               type="button"
                               onClick={(e) => { e.stopPropagation(); toggleSelect(meeting.id); }}
@@ -2373,6 +1289,14 @@ export default function MeetingsPage() {
                                 {dateTag.label}
                               </span>
                             )}
+                            {hasMinutes && (
+                              <span
+                                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] font-bold text-violet-700 ring-1 ring-inset ring-violet-500/20"
+                                title="Minutes of meeting recorded"
+                              >
+                                <FileText className="h-2.5 w-2.5" /> MoM
+                              </span>
+                            )}
                             {hasFollowUp && (
                               <button
                                 onClick={(e) => openNotesPopover(e, meeting, followUpText)}
@@ -2384,10 +1308,15 @@ export default function MeetingsPage() {
                             )}
                           </div>
                           {meeting.officer_name && (
-                            <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
-                              <User className="h-3 w-3 text-slate-400" />
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setHistoryPerson({ id: meeting.officer_id, name: meeting.officer_name }); }}
+                              title="See all meetings with this person"
+                              className="mt-1 flex max-w-full items-center gap-1.5 rounded-md text-left text-xs text-slate-500 transition-colors hover:text-violet-600 hover:underline"
+                            >
+                              <User className="h-3 w-3 shrink-0 text-slate-400" />
                               <span className="truncate">with {meeting.officer_name}</span>
-                            </p>
+                            </button>
                           )}
                         </div>
 
@@ -2415,21 +1344,13 @@ export default function MeetingsPage() {
                           )}
                         </div>
 
-                        {/* v24: pl-3 (was pl-1.5) gives this column extra breathing
-                            room from the Type badge to its left — they used to
-                            visually crowd/collapse into each other, e.g.
-                            "Rescheduled" next to "External". The status badge is
-                            now itself the click target — the whole pill opens the
-                            quick-status dropdown, with its chevron always visible
-                            as part of the badge instead of a separate,
-                            easy-to-miss icon-only button. */}
                         <div className="col-span-1 flex items-center justify-center pl-3">
                           <button
                             onClick={(e) => openQuickStatus(e, meeting)}
                             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-semibold transition-all duration-150 hover:-translate-y-0.5 hover:shadow-sm active:scale-95 ${style.badge}`}
                             title="Click to change status"
                           >
-                            <span className={`h-1.5 w-1.5 rounded-full ${style.dot} ${statusKey === 'Scheduled' ? 'animate-pulse' : ''}`} />
+                            <span className={`h-1.5 w-1.5 rounded-full ${style.dot} ${statusKey === 'scheduled' ? 'animate-pulse' : ''}`} />
                             {style.label}
                             <ChevronDown className="h-3 w-3 opacity-70" />
                           </button>
@@ -2495,10 +1416,14 @@ export default function MeetingsPage() {
                               </div>
                             </div>
                             {meeting.officer_name && (
-                              <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-500">
-                                <User className="h-3 w-3 text-slate-400" />
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setHistoryPerson({ id: meeting.officer_id, name: meeting.officer_name }); }}
+                                className="mt-1 flex max-w-full items-center gap-1.5 text-left text-xs text-slate-500 underline-offset-2 active:text-violet-600"
+                              >
+                                <User className="h-3 w-3 shrink-0 text-slate-400" />
                                 <span className="truncate">with {meeting.officer_name}</span>
-                              </p>
+                              </button>
                             )}
 
                             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
@@ -2525,6 +1450,11 @@ export default function MeetingsPage() {
                                 <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize ${priority.badge}`}>
                                   <span className={`h-1 w-1 rounded-full ${priority.dot}`} />
                                   {meeting.priority}
+                                </span>
+                              )}
+                              {hasMinutes && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700 ring-1 ring-inset ring-violet-500/20">
+                                  <FileText className="h-2.5 w-2.5" /> MoM
                                 </span>
                               )}
                             </div>
@@ -2600,39 +1530,43 @@ export default function MeetingsPage() {
         </div>
       </div>
 
-      {/* ------------------------- v17: Quick status popover ------------------------ */}
-      {quickStatus && (() => {
-        const m = meetings.find((mm) => mm.id === quickStatus.id);
-        if (!m) return null;
-        return (
-          <QuickStatusPopover
-            top={quickStatus.top}
-            left={quickStatus.left}
-            align={quickStatus.align}
-            current={getStatusKey(m)}
-            onPick={(key) => updateStatusInline(m, key)}
-            onClose={() => setQuickStatus(null)}
-          />
-        );
-      })()}
-
-      {/* ------------------------- v17: Notes popover ------------------------ */}
-      {notesPopover && (
-        <NotesPopover
-          top={notesPopover.top}
-          left={notesPopover.left}
-          align={notesPopover.align}
-          text={notesPopover.text}
-          onClose={() => setNotesPopover(null)}
-          onOpenFull={() => {
-            const m = meetings.find((mm) => mm.id === notesPopover.id);
-            setNotesPopover(null);
-            if (m) { setSelectedMeeting(m); setFollowUpOpen(true); }
-          }}
+      {/* ------------------------------ Day brief ------------------------------ */}
+      {dayBriefOpen && (
+        <DayBriefPanel
+          meetings={meetings}
+          onClose={() => setDayBriefOpen(false)}
+          onOpenMeeting={(m) => { setDayBriefOpen(false); setSelectedMeeting(m); }}
         />
       )}
 
-      {/* ------------------------- v17: Command palette ------------------------ */}
+      {/* ------------------------- Quick status popover ------------------------ */}
+{quickStatus && (() => {
+  const m = meetings.find((mm) => mm.id === quickStatus.id);
+  if (!m) return null;
+  return (
+    <QuickStatusPopover
+      pos={quickStatus.pos}
+      current={getStatusKey(m)}
+      onPick={(key) => updateStatusInline(m, key)}
+      onClose={() => setQuickStatus(null)}
+    />
+  );
+})()}
+
+{notesPopover && (
+  <NotesPopover
+    pos={notesPopover.pos}
+    text={notesPopover.text}
+    onClose={() => setNotesPopover(null)}
+    onOpenFull={() => {
+      const m = meetings.find((mm) => mm.id === notesPopover.id);
+      setNotesPopover(null);
+      if (m) { setSelectedMeeting(m); setFollowUpOpen(true); }
+    }}
+  />
+)}
+
+      {/* ------------------------- Command palette ------------------------ */}
       {commandPaletteOpen && (
         <CommandPalette
           meetings={meetings}
@@ -2646,14 +1580,7 @@ export default function MeetingsPage() {
         />
       )}
 
-      {/* ------------------------- v17: Bulk action bar ------------------------
-          FIX: this used to render at z-[65], which sits ABOVE the detail
-          panel (z-50). If a row's select-checkbox was clicked by accident
-          (it overlaps the date card's corner) while a panel was later
-          opened, this bar would silently intercept clicks meant for the
-          panel's Edit/Update/Delete buttons. It's now (a) hidden whenever
-          any panel/modal is open, and (b) kept below them (z-40) as a
-          safety net even if that guard is ever bypassed. */}
+      {/* ------------------------- Bulk action bar (hidden while any panel is open) ------------------------ */}
       {selectedIds.size > 0 && !anyModalOpen && (
         <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">
           <div className="anim-scale-in flex flex-wrap items-center gap-1.5 rounded-full bg-slate-900 px-3 py-2 shadow-2xl shadow-slate-900/30 sm:gap-2 sm:px-4 sm:py-2.5">
@@ -2705,10 +1632,8 @@ export default function MeetingsPage() {
         const phoneVal = d.contact_phone || d.phone || '';
         const emailVal = d.contact_email || d.email || '';
 
-        /* ★ Follow-up notes (checked across common field names) */
         const followUpText = d.follow_up_notes || d.followup_notes || d.follow_up || d.followup || '';
 
-        /* ★ v17: activity trail from the best-effort status_history field */
         const history = parseHistory(d.status_history);
 
         return (
@@ -2727,7 +1652,7 @@ export default function MeetingsPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${st.badge}`}>
-                        <span className={`h-1.5 w-1.5 rounded-full ${st.dot} ${sk === 'Scheduled' ? 'animate-pulse' : ''}`} />
+                        <span className={`h-1.5 w-1.5 rounded-full ${st.dot} ${sk === 'scheduled' ? 'animate-pulse' : ''}`} />
                         {st.label}
                       </span>
                       {d.meeting_type && (
@@ -2737,7 +1662,6 @@ export default function MeetingsPage() {
                         </span>
                       )}
 
-                      {/* ★ FOLLOW-UP SHORTCUT — visible only when follow-up notes exist */}
                       {followUpText && (
                         <button
                           onClick={() => setFollowUpOpen(true)}
@@ -2750,7 +1674,6 @@ export default function MeetingsPage() {
                         </button>
                       )}
 
-                      {/* v22: when there's no follow-up note yet, offer to add one right here */}
                       {!followUpText && (
                         <button
                           onClick={() => startFollowUpEdit('')}
@@ -2778,8 +1701,6 @@ export default function MeetingsPage() {
                   </button>
                 </div>
 
-                {/* Action buttons — moved up to the header, right under the
-                    title, instead of a footer at the bottom of the panel. */}
                 <div className="mt-3.5 flex items-center gap-2">
                   <button
                     onClick={handleEdit}
@@ -2794,7 +1715,16 @@ export default function MeetingsPage() {
                     <RotateCcw className="h-3.5 w-3.5" /> Update
                   </button>
                   <button
+                    onClick={() => openDuplicate(d)}
+                    title="Duplicate — create a new meeting with the same details"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-600 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-200 hover:text-violet-700 active:scale-[0.98]"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">Duplicate</span>
+                  </button>
+                  <button
                     onClick={() => setShowDeleteConfirm(true)}
+                    title="Delete"
                     className="inline-flex items-center justify-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs font-semibold text-rose-600 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 active:scale-[0.98]"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -2804,7 +1734,6 @@ export default function MeetingsPage() {
 
               {/* Body */}
               <div className="flex-1 space-y-4 px-5 py-5">
-                {/* Type highlight */}
                 {d.meeting_type && (
                   <div className={`flex items-center gap-3 rounded-2xl border p-4 ${tc ? tc.highlightCard : 'border-slate-200 bg-slate-50'}`}>
                     <span className={`flex h-10 w-10 items-center justify-center rounded-xl text-white shadow-sm ${tc ? tc.strip : 'bg-slate-300'}`}>
@@ -2818,8 +1747,7 @@ export default function MeetingsPage() {
                   </div>
                 )}
 
-                {/* ★ FOLLOW-UP NOTES — expandable card, opened by the header shortcut or directly.
-                    v22: now editable inline via an Edit button, no need to open the Update panel. */}
+                {/* Follow-up notes — expandable, editable inline */}
                 {(followUpText || followUpOpen) && (
                   <div className="overflow-hidden rounded-2xl border border-amber-200 bg-amber-50/60">
                     <button
@@ -2900,9 +1828,18 @@ export default function MeetingsPage() {
                   </InfoTile>
                   <InfoTile icon={MapPin} tint="bg-sky-50 text-sky-600" label="Location">
                     <span className="break-words">{d.location || '—'}</span>
+                    {d.city && <span className="mt-0.5 block text-[11px] font-medium text-slate-400">{d.city}</span>}
                   </InfoTile>
                   <InfoTile icon={User} tint="bg-emerald-50 text-emerald-600" label="Officer">
                     <span className="break-words">{d.officer_name || '—'}</span>
+                    {d.officer_name && (
+                      <button
+                        onClick={() => setHistoryPerson({ id: d.officer_id, name: d.officer_name })}
+                        className="mt-1 block text-[11px] font-semibold text-violet-600 hover:underline"
+                      >
+                        View history →
+                      </button>
+                    )}
                   </InfoTile>
                   <InfoTile icon={Tag} tint="bg-amber-50 text-amber-600" label="Priority">
                     {d.priority ? (
@@ -2917,6 +1854,15 @@ export default function MeetingsPage() {
                   </InfoTile>
                 </div>
 
+                {/* ★ v28: minutes of meeting (no action items) */}
+                <MinutesOfMeetingCard
+                  meeting={d}
+                  onPatched={(patch) => {
+                    setSelectedMeeting((prev: any) => (prev ? { ...prev, ...patch } : prev));
+                    setMeetings((prev) => prev.map((m) => (m.id === d.id ? { ...m, ...patch } : m)));
+                  }}
+                />
+
                 {notesText && (
                   <InfoTile icon={AlignLeft} tint="bg-indigo-50 text-indigo-600" label="Agenda / Notes">
                     <p className="whitespace-pre-wrap break-words font-normal leading-relaxed text-slate-700">
@@ -2927,7 +1873,20 @@ export default function MeetingsPage() {
 
                 {phoneVal && (
                   <InfoTile icon={Phone} tint="bg-rose-50 text-rose-600" label="Phone">
-                    {phoneVal}
+                    <span className="flex flex-wrap items-center gap-2">
+                      {phoneVal}
+                      {whatsappLink(phoneVal, d) && (
+                        <a
+                          href={whatsappLink(phoneVal, d)!}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="Opens WhatsApp with a reminder message ready to send"
+                          className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-500/20 hover:bg-emerald-100"
+                        >
+                          <MessageCircle className="h-3.5 w-3.5" /> WhatsApp reminder
+                        </a>
+                      )}
+                    </span>
                   </InfoTile>
                 )}
                 {emailVal && (
@@ -2936,7 +1895,6 @@ export default function MeetingsPage() {
                   </InfoTile>
                 )}
 
-                {/* ★ v17: activity trail — best-effort, only shows if entries exist */}
                 {history.length > 0 && (
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
                     <div className="mb-2.5 flex items-center gap-2">
@@ -2950,7 +1908,7 @@ export default function MeetingsPage() {
                         const hs = STATUS_STYLES[String(h.status || '').toLowerCase()];
                         const when = (() => {
                           const t = new Date(h.date).getTime();
-                          return Number.isNaN(t) ? '' : new Date(t).toLocaleString('en-US', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+                          return Number.isNaN(t) ? '' : new Date(t).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
                         })();
                         return (
                           <li key={idx} className="flex items-center gap-2 text-xs">
@@ -3019,10 +1977,7 @@ export default function MeetingsPage() {
         </div>
       )}
 
-      {/* ------------------------- Bulk delete confirmation ------------------------
-          Same visual pattern as the single-meeting delete modal above, and
-          the same soft-delete behavior — records are archived, not removed
-          without a backup. */}
+      {/* ------------------------- Bulk delete confirmation ------------------------ */}
       {showBulkDeleteConfirm && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div
@@ -3065,31 +2020,50 @@ export default function MeetingsPage() {
       )}
 
       {/* ---------------- Create / Edit panel ---------------- */}
-      {isPanelOpen && (() => {
-        const panelProps: any = {
-          isOpen: true,
-          isEdit: !!editingMeeting,
-          mode: editingMeeting ? 'edit' : 'create',
-          meeting: editingMeeting,
-          editMeeting: editingMeeting,
-          editingMeeting: editingMeeting,
-          initialMeeting: editingMeeting,
-          meetingData: editingMeeting,
-          initialData: editingMeeting,
-          onClose: handlePanelClosed,
-          onSaved: handlePanelSaved,
-          onSave: handlePanelSaved,
-          onSuccess: handlePanelSaved,
-        };
-        return (
-          <CreateMeetingPanel
-            key={editingMeeting ? `edit-${editingMeeting.id}` : 'create'}
-            {...panelProps}
-          />
-        );
-      })()}
+      {isPanelOpen && (
+        <CreateMeetingPanel
+          key={editingMeeting ? `edit-${editingMeeting.id}` : duplicateSource ? `dup-${duplicateSource.id || 'new'}` : 'create'}
+          isOpen
+          editingMeeting={editingMeeting}
+          duplicateFrom={editingMeeting ? null : duplicateSource}
+          onClose={handlePanelClosed}
+          onSuccess={handlePanelSaved}
+          pastMeetings={meetings}
+          onSavedMeeting={handleMeetingSaved}
+        />
+      )}
 
-      {/* -------- Update status panel (inline, manual-only, no automations) -------- */}
+      {/* -------- v29: "you've met these people here before" -------- */}
+      {revisit && !isPanelOpen && revisitPeople.length > 0 && (
+        <RevisitPopup
+          cityLabel={revisit.cityLabel}
+          date={revisit.date}
+          people={revisitPeople}
+          onSchedule={scheduleRevisit}
+          onSkip={skipRevisit}
+          onClose={closeRevisit}
+        />
+      )}
+
+      {/* -------- participant history (no action items) -------- */}
+      {historyPerson && (
+        <ParticipantHistory
+          person={historyPerson}
+          meetings={meetings}
+          onClose={() => setHistoryPerson(null)}
+          onOpenMeeting={(m) => { setHistoryPerson(null); setSelectedMeeting(m); }}
+          onScheduleWith={(m) => openDuplicate(m, {
+            agenda: '', meeting_date: '', meeting_time: '', follow_up_date: '', follow_up_notes: '', minutes: '',
+          })}
+        />
+      )}
+
+      {/* -------- undo delete -------- */}
+      {pendingDelete && (
+        <UndoBar message={pendingDelete.message} startedAt={pendingDelete.startedAt} onUndo={undoDelete} />
+      )}
+
+      {/* -------- Update status panel -------- */}
       {updateMeeting && (
         <InlineUpdateStatusPanel
           meeting={updateMeeting}

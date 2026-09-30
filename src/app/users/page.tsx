@@ -697,7 +697,7 @@ export default function UsersPage() {
               } ${stat.clickable ? 'cursor-pointer' : 'cursor-default'}`;
 
               return stat.clickable ? (
-                <button key={stat.key} onClick={() => handleCardClick(stat.key)} style={{ animationDelay: `${90 + i * 90}ms` }} className={cls}>
+                <button key={stat.key} onClick={() => handleCardClick(stat.key as 'all' | 'verified' | 'pending')} style={{ animationDelay: `${90 + i * 90}ms` }} className={cls}>
                   {inner}
                 </button>
               ) : (

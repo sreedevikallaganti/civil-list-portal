@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import Link from "next/link";
-import { ArrowRight, Play, Trophy } from "lucide-react";
+import { ArrowRight, Crown, Play, Trophy } from "lucide-react";
 import { computeRecap } from "@/lib/memories/recap";
 import type { MemoryMeeting } from "@/lib/memories/meetingUtils";
 import MemoryStyles from "@/components/memories/MemoryStyles";
@@ -20,9 +20,10 @@ export default function RecapTeaserCard({ meetings, loading, delay = 0 }: Props)
 
   const stats: [string, number][] = [
     ["Meetings", recap.total],
-    ["Officers", recap.officers],
+    ["People", recap.officers],
     ["Photos", recap.photos],
   ];
+  const leaders = recap.topOfficers.filter((o) => o.rank === 1);
 
   return (
     <section
@@ -58,6 +59,29 @@ export default function RecapTeaserCard({ meetings, loading, delay = 0 }: Props)
           </div>
         ))}
       </div>
+
+      {!loading && leaders.length > 0 && (
+        <div className="relative mt-3 flex items-center gap-3 rounded-2xl bg-white/70 px-3 py-2.5 backdrop-blur-sm">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white">
+            <Crown className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-medium text-slate-500">
+              Most met{leaders.length > 1 ? ` (tied, ${leaders[0].count} each)` : ""}
+              {leaders.length === 1 && leaders[0].upcoming > 0 && ` · ${leaders[0].held} held, ${leaders[0].upcoming} upcoming`}
+            </p>
+            <p className="truncate text-sm font-bold text-slate-900">
+              {leaders[0].name}
+              {leaders.length > 1 && <span className="font-medium text-slate-500"> +{leaders.length - 1} more</span>}
+            </p>
+          </div>
+          {leaders.length === 1 && (
+            <span className="shrink-0 rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold tabular-nums text-violet-700">
+              {leaders[0].count} meetings
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="relative mt-4 flex items-center gap-2">
         <Link

@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { X, Save, Loader2 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
+import { showToast } from '@/components/Toaster';
 
 interface CreateContactPanelProps {
   isOpen: boolean;
@@ -79,7 +80,7 @@ export default function CreateContactPanel({ isOpen, onClose, onSuccess, contact
     e.preventDefault();
     
     if (!formData.name) {
-      alert('Please fill in the required Name field');
+      showToast('Please fill in the required Name field', 'error');
       return;
     }
 
@@ -98,7 +99,7 @@ export default function CreateContactPanel({ isOpen, onClose, onSuccess, contact
     } catch (error: any) {
       console.error('Error saving contact:', error);
       setLoading(false);
-      alert('Failed to save contact. Please check the fields.');
+      showToast(error?.response?.message || 'Failed to save contact. Please check the fields.', 'error');
     }
   };
 

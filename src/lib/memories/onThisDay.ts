@@ -2,6 +2,7 @@ import {
   daysBetween,
   isCancelled,
   meetingDay,
+  meetingImages,
   startOfToday,
   type MemoryMeeting,
 } from "@/lib/memories/meetingUtils";
@@ -51,7 +52,7 @@ export function computeMemories(meetings: MemoryMeeting[], today: Date = startOf
       .map(([yearsAgo, items]) => ({
         yearsAgo,
         // meetings with photos first, so the card leads with a picture
-        meetings: items.sort((a, b) => (b.meeting.photos?.length ?? 0) - (a.meeting.photos?.length ?? 0)),
+        meetings: items.sort((a, b) => meetingImages(b.meeting).length - meetingImages(a.meeting).length),
       }));
   };
 

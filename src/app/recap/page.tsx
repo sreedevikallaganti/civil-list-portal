@@ -8,6 +8,7 @@ import {
   ShieldCheck, Sparkles, TrendingDown, TrendingUp, Trophy, Users, XCircle,
 } from "lucide-react";
 import ProtectedRoute from "@/components/auth/ProtectedRoute";
+import { hydrate, useLivePeople } from "@/lib/liveDirectory";
 import { currentUserName, fetchAllMeetings, formatDayLong, meetingTitle, photoUrl, type MemoryMeeting } from "@/lib/memories/meetingUtils";
 import { computeRecap, recapYears, MONTHS, WEEKDAYS, type ServiceFilter } from "@/lib/memories/recap";
 import RecapStory, { CountUp } from "@/components/memories/RecapStory";
@@ -62,8 +63,11 @@ function RecapView() {
     };
   }, [params]);
 
-  const years = useMemo(() => recapYears(meetings), [meetings]);
-  const recap = useMemo(() => computeRecap(meetings, year, service), [meetings, year, service]);
+  /* show today's designation for each person, not the one saved on old meetings */
+  const { people } = useLivePeople(meetings);
+  const liveMeetings = useMemo(() => hydrate(meetings, people), [meetings, people]);
+  const years = useMemo(() => recapYears(liveMeetings), [liveMeetings]);
+  const recap = useMemo(() => computeRecap(liveMeetings, year, service), [liveMeetings, year, service]);
   const change = recap.prevYearTotal ? Math.round(((recap.total - recap.prevYearTotal) / recap.prevYearTotal) * 100) : null;
   const maxMonth = Math.max(1, ...recap.byMonth);
 
@@ -187,7 +191,7 @@ function RecapView() {
           <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <Kpi accent="blue" icon={<CalendarDays className="h-5 w-5" />} label="Meetings held" value={recap.total} loading={loading} delay={80} down={change !== null && change < 0}
               sub={change === null ? `${recap.completed} completed` : `${change >= 0 ? "+" : ""}${change}% vs ${year - 1}`} />
-            <Kpi accent="violet" icon={<Users className="h-5 w-5" />} label="Officers met" value={recap.officers} loading={loading} delay={150}
+            <Kpi accent="violet" icon={<Users className="h-5 w-5" />} label={service === "all" ? "People met" : `${service} officers met`} value={recap.officers} loading={loading} delay={150}
               sub={recap.newOfficers ? `${recap.newOfficers} met for the first time` : "All familiar faces"} />
             <Kpi accent="rose" icon={<Camera className="h-5 w-5" />} label="Photos captured" value={recap.photos} loading={loading} delay={220}
               sub={`${recap.highlights.length ? "See moments below" : "Add photos to meetings"}`} />
@@ -262,7 +266,11 @@ function RecapView() {
 
             <div className="space-y-6">
               {/* Most met */}
-              <Card title="Most met officers" subtitle="By number of meetings" delay={240}>
+              <Card
+                title={service === "all" ? "Most met people" : `Most met ${service} officers`}
+                subtitle={`All ${year} meetings, upcoming included · ties share a rank`}
+                delay={240}
+              >
                 {loading ? (
                   <div className="space-y-2">{[0, 1, 2].map((i) => <div key={i} className="mem-skeleton h-14 rounded-2xl" />)}</div>
                 ) : recap.topOfficers.length === 0 ? (
@@ -273,14 +281,22 @@ function RecapView() {
                       <li key={o.key} className="mem-fade-up flex items-center gap-3 rounded-2xl border border-slate-100 p-3 transition-colors hover:border-violet-200 hover:bg-violet-50/40"
                         style={{ animationDelay: `${i * 60}ms` }}>
                         <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-sm font-extrabold ${
-                          i === 0 ? "bg-slate-900 text-white" : "bg-gradient-to-b from-violet-100 to-violet-50 text-violet-900"}`}>
-                          {i + 1}
+                          o.rank === 1 ? "bg-slate-900 text-white" : "bg-gradient-to-b from-violet-100 to-violet-50 text-violet-900"}`}>
+                          {o.rank}
                         </span>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-semibold text-slate-900">{o.name}</p>
-                          <p className="truncate text-xs text-slate-500">{[o.designation, o.service].filter(Boolean).join(" · ") || "Officer"}</p>
+                          <p className="truncate text-xs text-slate-500">
+                            {[o.designation, o.service].filter(Boolean).join(" · ") || "Participant"}
+                          </p>
+                          <p className="mt-0.5 truncate text-[11px] text-slate-400">
+                            {o.held} held{o.upcoming ? ` · ${o.upcoming} upcoming` : ""}
+                            {o.next ? ` · next ${o.next.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}` : o.lastMet ? ` · last ${o.lastMet.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}` : ""}
+                          </p>
                         </div>
-                        <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold tabular-nums text-violet-700">{o.count}</span>
+                        <span className="shrink-0 rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold tabular-nums text-violet-700">
+                          {o.count} {o.count === 1 ? "meeting" : "meetings"}
+                        </span>
                       </li>
                     ))}
                   </ol>

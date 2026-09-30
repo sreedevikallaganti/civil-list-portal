@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import {
   X, Calendar, ChevronLeft, ChevronRight, AlertCircle, Flag,
-  Sunrise, Sun, Sunset, Feather, Activity, Zap, Building2, Globe, Users,
+  Sunrise, Sun, Sunset, Feather, Activity, Zap, Building2, Globe, Users, Clock, Check,
 } from 'lucide-react';
 
 /* ================================================================

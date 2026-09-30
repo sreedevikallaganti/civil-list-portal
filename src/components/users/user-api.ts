@@ -69,7 +69,7 @@ export async function createUser(payload: NewUserPayload): Promise<PBUser> {
     const body = await res.json().catch(() => null);
     // PocketBase returns per-field errors: { data: { email: { message: "..." } } }
     const fieldError =
-      body?.data && Object.values(body.data)[0]?.message;
+      body?.data && (Object.values(body.data)[0] as { message?: string } | undefined)?.message;
     throw new Error(fieldError ?? body?.message ?? `Failed to create user (${res.status})`);
   }
   return res.json();

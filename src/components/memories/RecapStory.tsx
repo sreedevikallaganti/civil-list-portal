@@ -180,10 +180,10 @@ function buildSlides(r: Recap, name: string): Slide[] {
         <>
           <Kicker icon={<Users className="h-3.5 w-3.5" />}>Most met</Kicker>
           <ol className="mt-8 space-y-3">
-            {r.topOfficers.map((o, i) => (
+            {r.topOfficers.slice(0, 3).map((o, i) => (
               <li key={o.key} className={`mem-fade-up mem-d${(i + 1) as 1 | 2 | 3} flex items-center gap-4 rounded-3xl bg-white/12 p-3.5 backdrop-blur`}>
-                <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-xl font-black ${i === 0 ? "bg-white text-orange-600" : "bg-white/20"}`}>
-                  {i + 1}
+                <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-xl font-black ${o.rank === 1 ? "bg-white text-orange-600" : "bg-white/20"}`}>
+                  {o.rank}
                 </span>
                 <div className="min-w-0">
                   <p className="truncate text-xl font-extrabold leading-tight">{o.name}</p>

@@ -183,40 +183,9 @@ export default function CalendarPage() {
       setLoading(true);
       setError('');
 
-      console.log('[calendar] authStore valid?', pb.authStore.isValid);
-
-      const attempts = [{ sort: '-created' }, { sort: '-id' }, {}];
-
-      let data: any[] = [];
-      let lastError: any = null;
-
-      for (const attempt of attempts) {
-        try {
-          data = await pb.collection('meetings').getFullList({
-            requestKey: null,
-            ...attempt,
-          });
-          console.log('[calendar] ✅ success with:', attempt, '→', data.length, 'records');
-          lastError = null;
-          break;
-        } catch (e: any) {
-          console.
-          warn('[calendar] ❌ attempt failed:', attempt, '| status:', e?.status, '| msg:', e?.message);
-          lastError = e;
-          if (e?.status === 401 || e?.status === 403) break;
-        }
-      }
-
-      if (lastError) throw lastError;
-
-      console.log('[calendar] loaded meetings:', data.length);
-      if (data.length > 0) {
-        console.log('[calendar] sample record:', data[0]);
-      } else {
-        console.warn('[calendar] 0 records returned → likely the List/Search API rule is filtering everything out');
-      }
-
-      setMeetings(data);
+      // no server-side sort — the meetings collection has no `created` field; the calendar orders by date itself
+      const data = await pb.collection('meetings').getFullList({ requestKey: null });
+      setMeetings(data.filter((m: any) => !m.deleted));
     } catch (err: any) {
       console.error('[calendar] load error:', JSON.stringify(
         { status: err?.status, message: err?.message, url: err?.url, response: err?.response },

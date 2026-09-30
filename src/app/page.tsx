@@ -1,46 +1,57 @@
 "use client";
 
 import {
-  AlignLeft,
   ArrowRight,
   BarChart3,
   Briefcase,
-  Building2,
-  Calendar,
   CalendarDays,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  Clock,
   Clock3,
-  Edit2,
   FileText,
-  Mail,
-  MapPin,
   Plus,
   RefreshCw,
-  RotateCcw,
   Search,
   ShieldCheck,
-  Tag,
-  Trash2,
+  Sparkles,
   TrendingUp,
   User,
   Users,
   X,
   XCircle,
 } from "lucide-react";
-import pb from "@/lib/pocketbase";
-import CreateMeetingPanel from "@/components/CreateMeetingPanel";
-import UpdateMeetingPanel from "@/components/UpdateMeetingPanel";
-import MeetingDetailsPanel from "@/components/MeetingDetailsPanel";
-import ProtectedRoute from "@/components/auth/ProtectedRoute";
-import OnThisDayCard from "@/components/memories/OnThisDayCard"; // NEW: On This Day
-import RecapTeaserCard from "@/components/memories/RecapTeaserCard"; // NEW: Yearly Recap
-import { Sparkles } from "lucide-react"; // NEW: icon for the Yearly Recap quick action
-import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { Inter } from "next/font/google";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import pb from "@/lib/pocketbase";
+import { hydrate, useLivePeople } from "@/lib/liveDirectory";
+import ProtectedRoute from "@/components/auth/ProtectedRoute";
+
+/* ────────────────────────────────────────────────
+   PERF: self-hosted font via next/font (no render-blocking
+   Google Fonts @import). Ideally move this to app/layout.tsx.
+──────────────────────────────────────────────── */
+const inter = Inter({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800", "900"],
+  display: "swap",
+});
+
+/* ────────────────────────────────────────────────
+   PERF: code-split everything that isn't needed for the first paint.
+   Panels only load when opened; memory cards load in parallel with data.
+──────────────────────────────────────────────── */
+const CreateMeetingPanel = dynamic(() => import("@/components/CreateMeetingPanel"), { ssr: false });
+const UpdateMeetingPanel = dynamic(() => import("@/components/UpdateMeetingPanel"), { ssr: false });
+const MeetingDetailsPanel = dynamic(() => import("@/components/MeetingDetailsPanel"), { ssr: false });
+const OnThisDayCard = dynamic(() => import("@/components/memories/OnThisDayCard"), { ssr: false });
+const ReconnectCard = dynamic(() => import("@/components/memories/ReconnectCard"), { ssr: false });
+const RecapTeaserCard = dynamic(() => import("@/components/memories/RecapTeaserCard"), { ssr: false });
+const VisitPlannerCard = dynamic(() => import("@/components/meetings/VisitPlannerCard"), { ssr: false });
+const PeopleUpdatesCard = dynamic(() => import("@/components/memories/PeopleUpdatesCard"), { ssr: false });
 
 /* ────────────────────────────────────────────────
    Types
@@ -78,14 +89,6 @@ type Meeting = {
   created_date?: string;
 };
 
-type PocketBaseResponse<T> = {
-  page: number;
-  perPage: number;
-  totalItems: number;
-  totalPages: number;
-  items: T[];
-};
-
 type DashboardStats = {
   totalMeetings: number;
   scheduled: number;
@@ -109,12 +112,20 @@ type ActivityBucket = {
 
 type KpiAccent = "blue" | "violet" | "rose" | "emerald";
 
+type DashboardCache = {
+  meetings: Meeting[];
+  iasCount: number;
+  ipsCount: number;
+  savedAt: number;
+};
+
 /* ────────────────────────────────────────────────
    Constants
 ──────────────────────────────────────────────── */
 
-const PB_URL = process.env.NEXT_PUBLIC_POCKETBASE_URL;
 const UPCOMING_PAGE_SIZE = 5;
+const MEETINGS_FETCH_LIMIT = 500;
+const CACHE_KEY = "civillist:dashboard:v1";
 
 const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string }> = {
   scheduled:   { label: "Scheduled",   dot: "bg-violet-400",  badge: "bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-600/20" },
@@ -123,7 +134,6 @@ const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string 
   cancelled:   { label: "Cancelled",   dot: "bg-rose-400",    badge: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20" },
 };
 
-/* v2: gradient-card KPI theme, matching the Meetings page's stat-card look */
 const KPI_THEME: Record<KpiAccent, { card: string; icon: string; trend: string }> = {
   blue:    { card: "from-sky-100 to-blue-100",      icon: "bg-white text-sky-600",     trend: "text-sky-700" },
   violet:  { card: "from-violet-100 to-purple-100", icon: "bg-white text-violet-600",  trend: "text-violet-700" },
@@ -132,34 +142,33 @@ const KPI_THEME: Record<KpiAccent, { card: string; icon: string; trend: string }
 };
 
 /* ────────────────────────────────────────────────
-   Global CSS / Animations — mirrors the Meetings page
-   (same keyframes, prefixed to avoid clashing with any
-   class names that might already exist elsewhere).
+   Global CSS / Animations
+   PERF: shorter durations, GPU-friendly blobs, and
+   animations disabled for users who prefer reduced motion.
 ──────────────────────────────────────────────── */
 
 const CUSTOM_CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-.dash-root { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+.dash-root { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 ::selection { background: rgba(139, 92, 246, 0.18); }
-@keyframes dFadeUp   { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes dFadeUp   { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes dFadeIn   { from { opacity: 0; } to { opacity: 1; } }
-@keyframes dScaleIn  { from { opacity: 0; transform: scale(0.94) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
-@keyframes dPanelIn  { from { opacity: 0; transform: translateX(64px); } to { opacity: 1; transform: translateX(0); } }
-@keyframes dRowIn    { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes dScaleIn  { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes dRowIn    { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes dShimmer  { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-@keyframes dBlob     { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(14px, -18px) scale(1.07); } }
-.anim-fade-up  { animation: dFadeUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-fade-in  { animation: dFadeIn 0.4s ease both; }
-.anim-scale-in { animation: dScaleIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-panel    { animation: dPanelIn 0.38s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-overlay  { animation: dFadeIn 0.25s ease both; }
-.anim-row      { animation: dRowIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.anim-blob     { animation: dBlob 9s ease-in-out infinite; }
+@keyframes dBlob     { 0%, 100% { transform: translate3d(0, 0, 0) scale(1); } 50% { transform: translate3d(14px, -18px, 0) scale(1.07); } }
+.anim-fade-up  { animation: dFadeUp 0.35s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-fade-in  { animation: dFadeIn 0.25s ease both; }
+.anim-scale-in { animation: dScaleIn 0.25s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-row      { animation: dRowIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.anim-blob     { animation: dBlob 12s ease-in-out infinite; will-change: transform; }
 .skeleton { background: linear-gradient(90deg, #f1effc 25%, #e5e1f5 40%, #f1effc 55%); background-size: 200% 100%; animation: dShimmer 1.6s linear infinite; }
 .nice-scroll::-webkit-scrollbar { width: 8px; }
 .nice-scroll::-webkit-scrollbar-track { background: transparent; }
 .nice-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 999px; }
 .nice-scroll::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-up, .anim-fade-in, .anim-scale-in, .anim-row, .anim-blob, .skeleton { animation: none !important; }
+}
 `;
 
 function CustomStyles() {
@@ -184,39 +193,12 @@ function getMeetingStatus(meeting: Meeting): string {
   return (meeting.status || "scheduled").toLowerCase().trim();
 }
 
-const getStatusKey = (meeting: Meeting): string =>
-  (meeting.status || "scheduled").toLowerCase();
-
 const getStatusStyle = (key: string) =>
   STATUS_STYLES[key] || {
     label: key.replace(/\b\w/g, (c) => c.toUpperCase()),
     dot: "bg-gray-400",
     badge: "bg-gray-100 text-gray-600 ring-1 ring-inset ring-gray-500/20",
   };
-
-const formatTimeDisplay = (timeString: string): string => {
-  if (!timeString || !timeString.includes(":")) return "—";
-  const [hours, minutes] = timeString.split(":");
-  const hour = parseInt(hours, 10);
-  const modifier = hour >= 12 ? "PM" : "AM";
-  return `${hour % 12 || 12}:${minutes} ${modifier}`;
-};
-
-const formatDate = (dateString?: string | null) => {
-  if (!dateString) return null;
-  try {
-    const date = new Date(dateString);
-    return {
-      day: date.getDate(),
-      month: date.toLocaleString("default", { month: "short" }),
-      year: date.getFullYear(),
-      weekday: date.toLocaleDateString("en-US", { weekday: "long" }),
-      full: date.toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" }),
-    };
-  } catch {
-    return null;
-  }
-};
 
 function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -232,6 +214,20 @@ function getRelativeDayLabel(date: Date): string {
   return "";
 }
 
+const TIME_REGEX = /(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i;
+
+function parseTimeParts(timeValue?: string): { hours: number; minutes: number } | null {
+  if (!timeValue) return null;
+  const match = timeValue.match(TIME_REGEX);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const meridiem = match[3]?.toUpperCase();
+  if (meridiem === "PM" && hours < 12) hours += 12;
+  if (meridiem === "AM" && hours === 12) hours = 0;
+  return { hours, minutes };
+}
+
 function parseMeetingDate(dateValue?: string, timeValue?: string): Date | null {
   if (!dateValue) return null;
 
@@ -242,76 +238,41 @@ function parseMeetingDate(dateValue?: string, timeValue?: string): Date | null {
     const day = Number(indianDateMatch[1]);
     const month = Number(indianDateMatch[2]) - 1;
     const year = Number(indianDateMatch[3]);
-
-    let hours = 0;
-    let minutes = 0;
-
-    if (timeValue) {
-      const timeMatch = timeValue.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
-      if (timeMatch) {
-        hours = Number(timeMatch[1]);
-        minutes = Number(timeMatch[2]);
-        const meridiem = timeMatch[3]?.toUpperCase();
-        if (meridiem === "PM" && hours < 12) hours += 12;
-        if (meridiem === "AM" && hours === 12) hours = 0;
-      }
-    }
-
-    return new Date(year, month, day, hours, minutes);
+    const time = parseTimeParts(timeValue);
+    return new Date(year, month, day, time?.hours ?? 0, time?.minutes ?? 0);
   }
 
   const parsed = new Date(dateString);
   if (Number.isNaN(parsed.getTime())) return null;
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateString) && timeValue) {
-    const timeMatch = timeValue.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
-    if (timeMatch) {
-      let hours = Number(timeMatch[1]);
-      const minutes = Number(timeMatch[2]);
-      const meridiem = timeMatch[3]?.toUpperCase();
-      if (meridiem === "PM" && hours < 12) hours += 12;
-      if (meridiem === "AM" && hours === 12) hours = 0;
-      parsed.setHours(hours, minutes, 0, 0);
-    }
+    const time = parseTimeParts(timeValue);
+    if (time) parsed.setHours(time.hours, time.minutes, 0, 0);
   }
 
   return parsed;
 }
 
-function formatMeetingDate(dateValue?: string, timeValue?: string): string {
-  const date = parseMeetingDate(dateValue, timeValue);
-  if (!date) return "Date not available";
-  return date.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+/* PERF: reuse formatters instead of creating new Intl objects per row */
+const DATE_FMT = new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+const TIME_FMT = new Intl.DateTimeFormat("en-IN", { hour: "numeric", minute: "2-digit", hour12: true });
+const MONTH_SHORT_FMT = new Intl.DateTimeFormat("en-IN", { month: "short" });
+
+function formatMeetingDate(date: Date | null): string {
+  return date ? DATE_FMT.format(date) : "Date not available";
 }
 
 function formatMeetingTime(timeValue?: string): string {
   if (!timeValue) return "Time not available";
-
-  const match = timeValue.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
-  if (!match) return timeValue;
-
-  let hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const meridiem = match[3]?.toUpperCase();
-
-  if (!meridiem) {
-    const date = new Date();
-    date.setHours(hours, minutes, 0, 0);
-    return date.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true });
-  }
-
-  if (meridiem === "PM" && hours < 12) hours += 12;
-  if (meridiem === "AM" && hours === 12) hours = 0;
-
+  const time = parseTimeParts(timeValue);
+  if (!time) return timeValue;
   const date = new Date();
-  date.setHours(hours, minutes, 0, 0);
-  return date.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true });
+  date.setHours(time.hours, time.minutes, 0, 0);
+  return TIME_FMT.format(date);
 }
 
 function getPageWindow(current: number, total: number, size = 5): number[] {
-  if (total <= size) {
-    return Array.from({ length: total }, (_, i) => i + 1);
-  }
+  if (total <= size) return Array.from({ length: total }, (_, i) => i + 1);
   const start = Math.max(1, Math.min(current - Math.floor(size / 2), total - size + 1));
   const end = Math.min(total, start + size - 1);
   const pages: number[] = [];
@@ -319,11 +280,48 @@ function getPageWindow(current: number, total: number, size = 5): number[] {
   return pages;
 }
 
+function isCompleted(status: string) {
+  return status.includes("completed") || status.includes("done");
+}
+
+function isCancelled(status: string) {
+  return status.includes("cancelled") || status.includes("canceled");
+}
+
+/* ────────────────────────────────────────────────
+   Session cache (stale-while-revalidate)
+   Revisiting the dashboard paints instantly from cache,
+   then refreshes quietly in the background.
+──────────────────────────────────────────────── */
+
+function readCache(): DashboardCache | null {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DashboardCache;
+    return Array.isArray(parsed.meetings) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(data: Omit<DashboardCache, "savedAt">) {
+  try {
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ...data, savedAt: Date.now() }));
+  } catch {
+    /* quota exceeded or storage blocked — ignore */
+  }
+}
+
 /* ────────────────────────────────────────────────
    Meeting Activity data
 ──────────────────────────────────────────────── */
 
-function buildActivityData(meetings: Meeting[], range: ActivityRange): ActivityBucket[] {
+function buildActivityData(
+  meetings: Meeting[],
+  dateMap: Map<string, Date | null>,
+  range: ActivityRange
+): ActivityBucket[] {
   const buckets: ActivityBucket[] = [];
   const now = new Date();
 
@@ -357,64 +355,63 @@ function buildActivityData(meetings: Meeting[], range: ActivityRange): ActivityB
 
   const bucketIndex = new Map(buckets.map((bucket, index) => [bucket.key, index]));
 
-  meetings.forEach((meeting) => {
-    const date = parseMeetingDate(meeting.meeting_date, meeting.meeting_time);
-    if (!date) return;
+  for (const meeting of meetings) {
+    const date = dateMap.get(meeting.id);
+    if (!date) continue;
 
     const key = range === "week" ? date.toDateString() : `${date.getFullYear()}-${date.getMonth()}`;
     const index = bucketIndex.get(key);
-    if (index === undefined) return;
+    if (index === undefined) continue;
 
     const bucket = buckets[index];
     const status = getMeetingStatus(meeting);
 
-    if (status.includes("completed") || status.includes("done")) bucket.completed += 1;
-    else if (status.includes("cancelled") || status.includes("canceled")) bucket.cancelled += 1;
+    if (isCompleted(status)) bucket.completed += 1;
+    else if (isCancelled(status)) bucket.cancelled += 1;
     else bucket.scheduled += 1;
 
     bucket.total += 1;
-  });
+  }
 
   return buckets;
 }
 
 /* ────────────────────────────────────────────────
-   PocketBase fetch
+   Data fetching
+   PERF: officer counts only request 1 row with just the id
+   (PocketBase still returns totalItems), instead of downloading
+   up to 500 full officer records per collection.
 ──────────────────────────────────────────────── */
 
-async function fetchPocketBaseCollection<T>(
-  collectionName: string
-): Promise<PocketBaseResponse<T>> {
-  if (!PB_URL) {
-    throw new Error("NEXT_PUBLIC_POCKETBASE_URL is missing from .env.local");
-  }
+async function fetchDashboardData() {
+  const [meetingResult, iasResult, ipsResult] = await Promise.all([
+    pb.collection("meetings").getList<Meeting>(1, MEETINGS_FETCH_LIMIT, { requestKey: null }),
+    pb.collection("ias_officers").getList(1, 1, { fields: "id", requestKey: null }),
+    pb.collection("ips_officers").getList(1, 1, { fields: "id", requestKey: null }),
+  ]);
 
-  const url = `${PB_URL}/api/collections/${collectionName}/records?page=1&perPage=500`;
-
-  console.log(`[Dashboard] Fetching ${collectionName}:`, url);
-
-  const response = await fetch(url, { method: "GET", cache: "no-store" });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`${collectionName} API failed: ${response.status} ${errorText}`);
-  }
-
-  return (await response.json()) as PocketBaseResponse<T>;
+  return {
+    meetings: meetingResult.items || [],
+    iasCount: iasResult.totalItems || 0,
+    ipsCount: ipsResult.totalItems || 0,
+  };
 }
 
 /* ────────────────────────────────────────────────
-   Animated count-up — same behavior as the Meetings page
+   Animated count-up
 ──────────────────────────────────────────────── */
 
-function AnimatedNumber({ value, duration = 900 }: { value: number; duration?: number }) {
-  const [display, setDisplay] = useState(0);
+function AnimatedNumber({ value, duration = 700 }: { value: number; duration?: number }) {
+  const [display, setDisplay] = useState(value);
   const prevRef = useRef(0);
 
   useEffect(() => {
     const from = prevRef.current;
     const to = value;
-    if (from === to) return;
+    if (from === to) {
+      setDisplay(to);
+      return;
+    }
     let raf = 0;
     const start = performance.now();
     const step = (now: number) => {
@@ -500,11 +497,7 @@ function LoadingRows({ count = 4 }: { count?: number }) {
   return (
     <div className="space-y-3">
       {Array.from({ length: count }).map((_, index) => (
-        <div
-          key={index}
-          className="anim-fade-up flex items-center gap-4 rounded-2xl border border-slate-100 p-4"
-          style={{ animationDelay: `${index * 70}ms` }}
-        >
+        <div key={index} className="flex items-center gap-4 rounded-2xl border border-slate-100 p-4">
           <div className="skeleton hidden h-12 w-12 rounded-2xl sm:block" />
           <div className="flex-1 space-y-2">
             <div className="skeleton h-4 w-2/5 rounded-full" />
@@ -550,7 +543,7 @@ function EmptyMeetings({
 
   return (
     <div className="anim-fade-up flex flex-col items-center justify-center rounded-2xl border border-dashed border-violet-200 bg-violet-50/40 px-6 py-8 text-center">
-      <div className="anim-fade-in flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-sm">
         <CalendarDays className="h-6 w-6 text-violet-500" />
       </div>
       <p className="mt-3 text-sm font-semibold text-slate-700">No upcoming meetings</p>
@@ -573,22 +566,21 @@ function EmptyMeetings({
 
 function UpcomingMeetingRow({
   meeting,
+  meetingDate,
   onOpen,
   index = 0,
 }: {
   meeting: Meeting;
+  meetingDate: Date | null;
   onOpen: (meeting: Meeting) => void;
   index?: number;
 }) {
-  const meetingDate = parseMeetingDate(meeting.meeting_date, meeting.meeting_time);
   const statusStyle = getStatusStyle(getMeetingStatus(meeting));
-  const isToday = meetingDate
-    ? meetingDate.toDateString() === new Date().toDateString()
-    : false;
+  const isToday = meetingDate ? meetingDate.toDateString() === new Date().toDateString() : false;
   const relativeLabel = meetingDate ? getRelativeDayLabel(meetingDate) : "";
 
   return (
-    <li className="anim-row" style={{ animationDelay: `${Math.min(index * 50, 300)}ms` }}>
+    <li className="anim-row" style={{ animationDelay: `${Math.min(index * 40, 200)}ms` }}>
       <button
         type="button"
         onClick={() => onOpen(meeting)}
@@ -602,7 +594,7 @@ function UpcomingMeetingRow({
           }`}
         >
           <span className="text-[9px] font-bold uppercase tracking-wide">
-            {meetingDate ? meetingDate.toLocaleDateString("en-IN", { month: "short" }) : "---"}
+            {meetingDate ? MONTH_SHORT_FMT.format(meetingDate) : "---"}
           </span>
           <span className="text-lg font-bold leading-tight">
             {meetingDate ? meetingDate.getDate() : "--"}
@@ -629,7 +621,7 @@ function UpcomingMeetingRow({
           <div className="mt-1 flex flex-wrap gap-x-3.5 gap-y-0.5 text-xs text-slate-500">
             <span className="flex items-center gap-1">
               <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
-              {formatMeetingDate(meeting.meeting_date, meeting.meeting_time)}
+              {formatMeetingDate(meetingDate)}
             </span>
             <span className="flex items-center gap-1">
               <Clock3 className="h-3.5 w-3.5 text-slate-400" />
@@ -644,9 +636,7 @@ function UpcomingMeetingRow({
           </div>
         </div>
 
-        <span
-          className={`hidden shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold md:inline-flex ${statusStyle.badge}`}
-        >
+        <span className={`hidden shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold md:inline-flex ${statusStyle.badge}`}>
           {statusStyle.label}
         </span>
 
@@ -744,10 +734,8 @@ function TooltipRow({ label, value, dotClass }: { label: string; value: number; 
 function ActivityChart({ data, range }: { data: ActivityBucket[]; range: ActivityRange }) {
   const maxTotal = Math.max(...data.map((bucket) => bucket.total), 1);
   const totalInPeriod = data.reduce((sum, bucket) => sum + bucket.total, 0);
-  const todayKey =
-    range === "week"
-      ? new Date().toDateString()
-      : `${new Date().getFullYear()}-${new Date().getMonth()}`;
+  const now = new Date();
+  const todayKey = range === "week" ? now.toDateString() : `${now.getFullYear()}-${now.getMonth()}`;
 
   return (
     <div className="relative">
@@ -770,10 +758,7 @@ function ActivityChart({ data, range }: { data: ActivityBucket[]; range: Activit
           const barHeight = bucket.total > 0 ? Math.max((bucket.total / maxTotal) * 100, 8) : 0;
 
           return (
-            <div
-              key={bucket.key}
-              className="group relative flex h-full flex-1 cursor-default flex-col justify-end"
-            >
+            <div key={bucket.key} className="group relative flex h-full flex-1 cursor-default flex-col justify-end">
               <div
                 className="pointer-events-none absolute left-1/2 z-20 hidden w-36 -translate-x-1/2 rounded-2xl bg-slate-900/95 p-3 text-left shadow-xl group-hover:block sm:w-40"
                 style={{ bottom: `calc(${barHeight}% + 10px)` }}
@@ -795,22 +780,13 @@ function ActivityChart({ data, range }: { data: ActivityBucket[]; range: Activit
                 style={{ height: `${barHeight}%` }}
               >
                 {bucket.cancelled > 0 && (
-                  <div
-                    className="w-full bg-slate-300"
-                    style={{ height: `${(bucket.cancelled / bucket.total) * 100}%` }}
-                  />
+                  <div className="w-full bg-slate-300" style={{ height: `${(bucket.cancelled / bucket.total) * 100}%` }} />
                 )}
                 {bucket.completed > 0 && (
-                  <div
-                    className="w-full bg-emerald-500"
-                    style={{ height: `${(bucket.completed / bucket.total) * 100}%` }}
-                  />
+                  <div className="w-full bg-emerald-500" style={{ height: `${(bucket.completed / bucket.total) * 100}%` }} />
                 )}
                 {bucket.scheduled > 0 && (
-                  <div
-                    className="w-full bg-violet-500"
-                    style={{ height: `${(bucket.scheduled / bucket.total) * 100}%` }}
-                  />
+                  <div className="w-full bg-violet-500" style={{ height: `${(bucket.scheduled / bucket.total) * 100}%` }} />
                 )}
               </div>
             </div>
@@ -821,11 +797,7 @@ function ActivityChart({ data, range }: { data: ActivityBucket[]; range: Activit
       <div className="mt-2 flex gap-1.5 sm:gap-3">
         {data.map((bucket) => (
           <div key={bucket.key} className="flex-1 text-center">
-            <span
-              className={`text-xs ${
-                bucket.key === todayKey ? "font-bold text-violet-600" : "font-medium text-slate-500"
-              }`}
-            >
+            <span className={`text-xs ${bucket.key === todayKey ? "font-bold text-violet-600" : "font-medium text-slate-500"}`}>
               {bucket.shortLabel}
             </span>
           </div>
@@ -908,9 +880,7 @@ function StatusRow({
 
   return (
     <div className="flex items-center gap-3 rounded-2xl p-2 transition-colors hover:bg-slate-50">
-      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${iconClass}`}>
-        {icon}
-      </span>
+      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${iconClass}`}>{icon}</span>
       <p className="flex-1 truncate text-sm font-medium text-slate-600">{label}</p>
       {loading ? (
         <div className="skeleton h-5 w-8 rounded-full" />
@@ -928,19 +898,31 @@ function QuickActionButton({
   icon,
   label,
   onClick,
+  highlight = false,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
+  highlight?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={() => onClick()}
-      className="group relative z-10 flex w-full cursor-pointer select-none items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-xs font-semibold text-slate-600 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-200 hover:bg-violet-50/60 hover:text-violet-700 hover:shadow-sm active:scale-[0.98]"
+      className={`group relative z-10 flex w-full cursor-pointer select-none items-center justify-between rounded-2xl border px-4 py-3 text-left text-xs font-semibold transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm active:scale-[0.98] ${
+        highlight
+          ? "border-violet-200 bg-gradient-to-r from-violet-50 to-fuchsia-50 text-violet-700 hover:border-violet-300"
+          : "border-slate-200 bg-white text-slate-600 hover:border-violet-200 hover:bg-violet-50/60 hover:text-violet-700"
+      }`}
     >
       <span className="flex items-center gap-2.5">
-        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-50 text-slate-400 transition-all duration-300 group-hover:scale-110 group-hover:bg-white group-hover:text-violet-600">
+        <span
+          className={`flex h-7 w-7 items-center justify-center rounded-lg transition-all duration-300 group-hover:scale-110 ${
+            highlight
+              ? "bg-white text-violet-600 shadow-sm"
+              : "bg-slate-50 text-slate-400 group-hover:bg-white group-hover:text-violet-600"
+          }`}
+        >
           {icon}
         </span>
         {label}
@@ -961,8 +943,7 @@ export default function DashboardPage() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [iasCount, setIasCount] = useState(0);
   const [ipsCount, setIpsCount] = useState(0);
-  const [loadingMeetings, setLoadingMeetings] = useState(true);
-  const [loadingOfficers, setLoadingOfficers] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -984,48 +965,51 @@ export default function DashboardPage() {
   const [updateMeeting, setUpdateMeeting] = useState<Meeting | null>(null);
 
   /* ────────────────────────────────
-     Data loading (PocketBase)
+     Data loading
   ──────────────────────────────── */
 
-  const loadDashboardData = async (options?: { silent?: boolean }) => {
+  const loadDashboardData = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent === true;
 
     try {
       if (!silent) {
         setError("");
-        setLoadingMeetings(true);
-        setLoadingOfficers(true);
+        setLoading(true);
       }
 
-      console.log("[Dashboard] Starting PocketBase fetch...");
+      const data = await fetchDashboardData();
 
-      const [meetingResult, iasResult, ipsResult] = await Promise.all([
-        fetchPocketBaseCollection<Meeting>("meetings"),
-        fetchPocketBaseCollection<Record<string, unknown>>("ias_officers"),
-        fetchPocketBaseCollection<Record<string, unknown>>("ips_officers"),
-      ]);
-
-      setMeetings(meetingResult.items || []);
-      setIasCount(iasResult.totalItems || 0);
-      setIpsCount(ipsResult.totalItems || 0);
+      setMeetings(data.meetings);
+      setIasCount(data.iasCount);
+      setIpsCount(data.ipsCount);
       setError("");
-
-      console.log(
-        `[Dashboard] Loaded ${meetingResult.items?.length ?? 0} meetings, ` +
-          `IAS: ${iasResult.totalItems}, IPS: ${ipsResult.totalItems}`
-      );
+      writeCache(data);
     } catch (err) {
       console.error("[Dashboard] Fetch error:", err);
       setError(err instanceof Error ? err.message : "Unable to fetch dashboard data.");
     } finally {
-      setLoadingMeetings(false);
-      setLoadingOfficers(false);
+      setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    loadDashboardData();
   }, []);
+
+  /* Paint from cache immediately (if any), then refresh in the background */
+  useEffect(() => {
+    const cached = readCache();
+    if (cached) {
+      setMeetings(cached.meetings);
+      setIasCount(cached.iasCount);
+      setIpsCount(cached.ipsCount);
+      setLoading(false);
+      loadDashboardData({ silent: true });
+    } else {
+      loadDashboardData();
+    }
+  }, [loadDashboardData]);
+
+  /* PERF: warm up the routes users jump to from here */
+  useEffect(() => {
+    ["/meetings", "/calendar", "/officers", "/reports", "/recap"].forEach((path) => router.prefetch(path));
+  }, [router]);
 
   /* Greeting / date / logged-in user */
   useEffect(() => {
@@ -1036,8 +1020,7 @@ export default function DashboardPage() {
       now.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })
     );
 
-    const authModel: unknown = pb.authStore.model;
-    const record = authModel as { name?: string; email?: string } | null;
+    const record = pb.authStore.model as { name?: string; email?: string } | null;
     if (record?.name || record?.email) {
       const fallbackName = record.name || record.email?.split("@")[0] || "Admin";
       setUserName(fallbackName.charAt(0).toUpperCase() + fallbackName.slice(1));
@@ -1048,10 +1031,10 @@ export default function DashboardPage() {
      Create / Edit panel
   ──────────────────────────────── */
 
-  const openCreatePanel = () => {
+  const openCreatePanel = useCallback(() => {
     setEditingMeeting(null);
     setPanelOpen(true);
-  };
+  }, []);
 
   const openEditPanel = (meeting: Meeting) => {
     setEditingMeeting(meeting);
@@ -1072,15 +1055,17 @@ export default function DashboardPage() {
      Details off-canvas + delete + status
   ──────────────────────────────── */
 
-  const openMeetingDetails = (meeting: Meeting) => setSelectedMeeting(meeting);
+  const openMeetingDetails = useCallback((meeting: Meeting) => setSelectedMeeting(meeting), []);
+
+  /* today's directory records for the people in your meetings (contact details, posts, dates) */
+  const { people: livePeople, loading: livePeopleLoading } = useLivePeople(meetings);
+  const liveMeetings = useMemo(() => hydrate(meetings, livePeople), [meetings, livePeople]);
   const closeMeetingDetails = () => setSelectedMeeting(null);
 
-  /* Always re-fetch the full record before editing/updating — the row
-     data (from the list endpoint) can be stale or partial, which is
-     why Edit could appear to open with "new meeting" (blank) details. */
+  /* Re-fetch the full record before editing/updating — list data can be stale */
   const fetchFreshMeeting = async (id: string): Promise<Meeting | null> => {
     try {
-      return (await pb.collection("meetings").getOne(id)) as unknown as Meeting;
+      return (await pb.collection("meetings").getOne(id, { requestKey: null })) as unknown as Meeting;
     } catch {
       return null;
     }
@@ -1114,9 +1099,7 @@ export default function DashboardPage() {
     }
   };
 
-  const goTo = (path: string) => {
-    router.push(path);
-  };
+  const goTo = useCallback((path: string) => router.push(path), [router]);
 
   /* ESC closes the update panel (the details panel handles its own ESC) */
   useEffect(() => {
@@ -1128,60 +1111,62 @@ export default function DashboardPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [panelOpen, updateMeeting]);
 
-  /* Keyboard shortcut: pressing "N" opens the create meeting panel */
+  /* Keyboard shortcuts: "N" = new meeting, "R" = yearly recap */
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key !== "n" && e.key !== "N") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (panelOpen || selectedMeeting || updateMeeting) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
-      e.preventDefault();
-      openCreatePanel();
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
+
+      const key = e.key.toLowerCase();
+      if (key === "n") {
+        e.preventDefault();
+        openCreatePanel();
+      } else if (key === "r") {
+        e.preventDefault();
+        goTo("/recap");
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [panelOpen, selectedMeeting, updateMeeting]);
+  }, [panelOpen, selectedMeeting, updateMeeting, openCreatePanel, goTo]);
 
   /* ────────────────────────────────
      Derived data
+     PERF: parse every meeting date exactly once, then reuse
+     (previously parsed repeatedly inside filter, sort and chart).
   ──────────────────────────────── */
+
+  const meetingDates = useMemo(() => {
+    const map = new Map<string, Date | null>();
+    for (const m of meetings) map.set(m.id, parseMeetingDate(m.meeting_date, m.meeting_time));
+    return map;
+  }, [meetings]);
 
   const upcomingMeetings = useMemo(() => {
     const now = Date.now();
-
     return meetings
       .filter((meeting) => {
         const status = getMeetingStatus(meeting);
-        if (
-          status.includes("completed") ||
-          status.includes("cancelled") ||
-          status.includes("canceled")
-        ) {
-          return false;
-        }
-
-        const meetingDate = parseMeetingDate(meeting.meeting_date, meeting.meeting_time);
-        if (!meetingDate) return false;
-
-        return meetingDate.getTime() >= now;
+        if (isCompleted(status) || isCancelled(status)) return false;
+        const date = meetingDates.get(meeting.id);
+        return !!date && date.getTime() >= now;
       })
-      .sort((a, b) => {
-        const dateA =
-          parseMeetingDate(a.meeting_date, a.meeting_time)?.getTime() ?? Number.POSITIVE_INFINITY;
-        const dateB =
-          parseMeetingDate(b.meeting_date, b.meeting_time)?.getTime() ?? Number.POSITIVE_INFINITY;
-        return dateA - dateB;
-      });
-  }, [meetings]);
+      .sort(
+        (a, b) =>
+          (meetingDates.get(a.id)?.getTime() ?? Number.POSITIVE_INFINITY) -
+          (meetingDates.get(b.id)?.getTime() ?? Number.POSITIVE_INFINITY)
+      );
+  }, [meetings, meetingDates]);
 
   const filteredUpcomingMeetings = useMemo(() => {
     const searchValue = search.toLowerCase().trim();
-
     if (!searchValue) return upcomingMeetings;
 
-    return upcomingMeetings.filter((meeting) => {
-      const searchableText = [
+    return upcomingMeetings.filter((meeting) =>
+      [
         getMeetingTitle(meeting),
         meeting.officer_name || "",
         meeting.designation || "",
@@ -1189,17 +1174,12 @@ export default function DashboardPage() {
         meeting.officer_type || "",
       ]
         .join(" ")
-        .toLowerCase();
-
-      return searchableText.includes(searchValue);
-    });
+        .toLowerCase()
+        .includes(searchValue)
+    );
   }, [upcomingMeetings, search]);
 
-  const upcomingTotalPages = Math.max(
-    1,
-    Math.ceil(filteredUpcomingMeetings.length / UPCOMING_PAGE_SIZE)
-  );
-
+  const upcomingTotalPages = Math.max(1, Math.ceil(filteredUpcomingMeetings.length / UPCOMING_PAGE_SIZE));
   const safeUpcomingPage = Math.min(upcomingPage, upcomingTotalPages);
 
   const paginatedUpcomingMeetings = useMemo(() => {
@@ -1208,21 +1188,16 @@ export default function DashboardPage() {
   }, [filteredUpcomingMeetings, safeUpcomingPage]);
 
   const upcomingRangeStart =
-    filteredUpcomingMeetings.length === 0
-      ? 0
-      : (safeUpcomingPage - 1) * UPCOMING_PAGE_SIZE + 1;
-  const upcomingRangeEnd = Math.min(
-    safeUpcomingPage * UPCOMING_PAGE_SIZE,
-    filteredUpcomingMeetings.length
-  );
+    filteredUpcomingMeetings.length === 0 ? 0 : (safeUpcomingPage - 1) * UPCOMING_PAGE_SIZE + 1;
+  const upcomingRangeEnd = Math.min(safeUpcomingPage * UPCOMING_PAGE_SIZE, filteredUpcomingMeetings.length);
 
   useEffect(() => {
     setUpcomingPage(1);
   }, [search]);
 
   const activityData = useMemo(
-    () => buildActivityData(meetings, activityRange),
-    [meetings, activityRange]
+    () => buildActivityData(meetings, meetingDates, activityRange),
+    [meetings, meetingDates, activityRange]
   );
   const hasActivity = activityData.some((bucket) => bucket.total > 0);
 
@@ -1232,18 +1207,13 @@ export default function DashboardPage() {
     let rescheduled = 0;
     let cancelled = 0;
 
-    meetings.forEach((meeting) => {
+    for (const meeting of meetings) {
       const status = getMeetingStatus(meeting);
-      if (status.includes("completed") || status.includes("done")) completed += 1;
+      if (isCompleted(status)) completed += 1;
       else if (status.includes("rescheduled")) rescheduled += 1;
-      else if (
-        status.includes("cancelled") ||
-        status.includes("canceled") ||
-        status.includes("rejected")
-      )
-        cancelled += 1;
+      else if (isCancelled(status) || status.includes("rejected")) cancelled += 1;
       else scheduled += 1;
-    });
+    }
 
     const totalMeetings = meetings.length;
 
@@ -1257,24 +1227,29 @@ export default function DashboardPage() {
     };
   }, [meetings]);
 
+  const currentYear = new Date().getFullYear();
+
   /* ────────────────────────────────
      Render
   ──────────────────────────────── */
 
   return (
     <ProtectedRoute>
-      <div className="dash-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+      <div
+        className={`${inter.className} dash-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8`}
+      >
         <CustomStyles />
 
+        {/* PERF: lighter blur + GPU layers for the animated background */}
         <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
-          <div className="anim-blob absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
+          <div className="anim-blob absolute -left-32 -top-32 h-96 w-96 transform-gpu rounded-full bg-violet-300/40 blur-2xl" />
           <div
-            className="anim-blob absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl"
-            style={{ animationDelay: "-3s" }}
+            className="anim-blob absolute -right-32 top-1/4 h-96 w-96 transform-gpu rounded-full bg-sky-300/30 blur-2xl"
+            style={{ animationDelay: "-4s" }}
           />
           <div
-            className="anim-blob absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl"
-            style={{ animationDelay: "-6s" }}
+            className="anim-blob absolute -bottom-32 left-1/3 h-96 w-96 transform-gpu rounded-full bg-fuchsia-300/25 blur-2xl"
+            style={{ animationDelay: "-8s" }}
           />
         </div>
 
@@ -1289,10 +1264,7 @@ export default function DashboardPage() {
                 <h1 className="anim-fade-up truncate bg-gradient-to-r from-slate-900 via-violet-800 to-slate-900 bg-clip-text text-2xl font-extrabold leading-tight tracking-tight text-transparent sm:text-3xl lg:text-4xl">
                   {greeting}, {userName}
                 </h1>
-                <p
-                  className="anim-fade-up mt-1 truncate text-xs font-medium text-slate-400 sm:text-sm"
-                  style={{ animationDelay: "80ms" }}
-                >
+                <p className="anim-fade-up mt-1 truncate text-xs font-medium text-slate-400 sm:text-sm" style={{ animationDelay: "40ms" }}>
                   {todayLabel || "Meeting Management"}
                 </p>
               </div>
@@ -1331,6 +1303,22 @@ export default function DashboardPage() {
                 <Search className="h-4 w-4" />
               </button>
 
+              {/* NEW: Yearly Recap — always one click away */}
+              <button
+                type="button"
+                onClick={() => goTo("/recap")}
+                aria-label={`Open ${currentYear} yearly recap`}
+                title="Yearly Recap (R)"
+                className="group relative inline-flex h-11 cursor-pointer items-center gap-2 rounded-full border border-violet-200 bg-gradient-to-r from-violet-50 to-fuchsia-50 px-3.5 text-sm font-semibold text-violet-700 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-300 hover:shadow-md hover:shadow-violet-500/10 active:scale-95"
+              >
+                <Sparkles className="h-4 w-4 transition-transform duration-300 group-hover:rotate-12 group-hover:scale-110" />
+                <span className="hidden lg:inline">Recap {currentYear}</span>
+                <span className="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-fuchsia-400 opacity-60 motion-reduce:animate-none" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-fuchsia-500" />
+                </span>
+              </button>
+
               {/* Calendar */}
               <button
                 type="button"
@@ -1348,7 +1336,7 @@ export default function DashboardPage() {
                 className="group inline-flex h-11 cursor-pointer items-center gap-2 rounded-full bg-slate-900 px-5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
               >
                 <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
-                New Meeting
+                <span className="hidden sm:inline">New Meeting</span>
                 <kbd className="hidden rounded-md bg-white/15 px-1.5 py-0.5 text-[10px] font-bold sm:inline">N</kbd>
               </button>
             </div>
@@ -1364,6 +1352,7 @@ export default function DashboardPage() {
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search meetings, officers..."
+                  autoFocus
                   className="h-11 w-full rounded-full border border-slate-200 bg-slate-50/80 pl-11 pr-9 text-sm text-slate-900 placeholder-slate-400 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
                 />
                 {search && (
@@ -1408,42 +1397,39 @@ export default function DashboardPage() {
                 value={stats.totalMeetings}
                 sub={`${stats.scheduled} scheduled`}
                 accent="blue"
-                loading={loadingMeetings}
+                loading={loading}
                 onClick={() => goTo("/meetings")}
-                delay={120}
+                delay={0}
               />
-
               <StatCard
                 icon={<Briefcase className="h-5 w-5" />}
                 label="IAS Officers"
                 value={iasCount}
                 sub="Administrative service"
                 accent="violet"
-                loading={loadingOfficers}
+                loading={loading}
                 onClick={() => goTo("/officers?type=ias")}
-                delay={190}
+                delay={40}
               />
-
               <StatCard
                 icon={<ShieldCheck className="h-5 w-5" />}
                 label="IPS Officers"
                 value={ipsCount}
                 sub="Police service"
                 accent="rose"
-                loading={loadingOfficers}
+                loading={loading}
                 onClick={() => goTo("/officers?type=ips")}
-                delay={260}
+                delay={80}
               />
-
               <StatCard
                 icon={<CheckCircle2 className="h-5 w-5" />}
                 label="Completion Rate"
                 value={`${stats.completionRate}%`}
                 sub={`${stats.completed} completed`}
                 accent="emerald"
-                loading={loadingMeetings}
+                loading={loading}
                 onClick={() => goTo("/reports")}
-                delay={330}
+                delay={120}
               />
             </section>
 
@@ -1451,22 +1437,29 @@ export default function DashboardPage() {
             <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
               {/* Left column */}
               <div className="space-y-6 xl:col-span-2">
-                {/* NEW: On This Day — renders nothing when there are no memories */}
-                {!loadingMeetings && (
-                  <OnThisDayCard meetings={meetings} onOpenMeeting={openMeetingDetails} delay={180} />
+                {/* who else to meet on upcoming visits to other cities */}
+                <VisitPlannerCard meetings={meetings} loading={loading} delay={40} />
+
+                {!loading && (
+                  <ReconnectCard
+                    meetings={meetings}
+                    onOpenMeeting={openMeetingDetails}
+                    onPlanMeeting={() => openCreatePanel()}
+                    delay={60}
+                  />
                 )}
+
+                {!loading && <OnThisDayCard meetings={meetings} onOpenMeeting={openMeetingDetails} delay={80} />}
 
                 {/* Upcoming meetings */}
                 <section
                   className="anim-fade-up overflow-hidden rounded-3xl border border-violet-100 bg-white shadow-sm"
-                  style={{ animationDelay: "220ms" }}
+                  style={{ animationDelay: "100ms" }}
                 >
                   <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
                     <div>
                       <h2 className="text-base font-bold text-slate-900">Upcoming Meetings</h2>
-                      <p className="mt-0.5 text-xs text-slate-500">
-                        Next scheduled meetings across all officers
-                      </p>
+                      <p className="mt-0.5 text-xs text-slate-500">Next scheduled meetings across all officers</p>
                     </div>
                     <span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-bold tabular-nums text-violet-700">
                       {filteredUpcomingMeetings.length}
@@ -1474,7 +1467,7 @@ export default function DashboardPage() {
                   </div>
 
                   <div className="p-5">
-                    {loadingMeetings ? (
+                    {loading ? (
                       <LoadingRows count={4} />
                     ) : filteredUpcomingMeetings.length === 0 ? (
                       <EmptyMeetings
@@ -1488,6 +1481,7 @@ export default function DashboardPage() {
                           <UpcomingMeetingRow
                             key={meeting.id}
                             meeting={meeting}
+                            meetingDate={meetingDates.get(meeting.id) ?? null}
                             onOpen={openMeetingDetails}
                             index={index}
                           />
@@ -1496,7 +1490,7 @@ export default function DashboardPage() {
                     )}
                   </div>
 
-                  {!loadingMeetings && filteredUpcomingMeetings.length > 0 && (
+                  {!loading && filteredUpcomingMeetings.length > 0 && (
                     <UpcomingPagination
                       currentPage={safeUpcomingPage}
                       totalPages={upcomingTotalPages}
@@ -1511,7 +1505,7 @@ export default function DashboardPage() {
                 {/* Activity chart */}
                 <section
                   className="anim-fade-up rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
-                  style={{ animationDelay: "300ms" }}
+                  style={{ animationDelay: "140ms" }}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
@@ -1527,9 +1521,7 @@ export default function DashboardPage() {
                           type="button"
                           onClick={() => setActivityRange(range)}
                           className={`cursor-pointer rounded-full px-3.5 py-1.5 text-xs font-semibold capitalize transition-all duration-200 ${
-                            activityRange === range
-                              ? "bg-white text-slate-900 shadow-sm"
-                              : "text-slate-500 hover:text-slate-700"
+                            activityRange === range ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
                           }`}
                         >
                           {range}
@@ -1539,7 +1531,7 @@ export default function DashboardPage() {
                   </div>
 
                   <div className="mt-5">
-                    {loadingMeetings ? (
+                    {loading ? (
                       <ChartSkeleton />
                     ) : !hasActivity ? (
                       <ActivityEmpty range={activityRange} />
@@ -1548,7 +1540,7 @@ export default function DashboardPage() {
                     )}
                   </div>
 
-                  {!loadingMeetings && hasActivity && (
+                  {!loading && hasActivity && (
                     <>
                       <div className="mt-5 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-4">
                         <LegendDot label="Scheduled" dotClass="bg-violet-500" />
@@ -1569,13 +1561,22 @@ export default function DashboardPage() {
 
               {/* Right column */}
               <div className="space-y-6">
-                {/* NEW: Yearly Recap */}
-                <RecapTeaserCard meetings={meetings} loading={loadingMeetings} delay={200} />
+                {/* Yearly recap — top of the column so it's visible without scrolling */}
+                <RecapTeaserCard meetings={liveMeetings} loading={loading} delay={60} />
+
+                {/* Birthdays, service anniversaries and posting changes */}
+                <PeopleUpdatesCard
+                  meetings={meetings}
+                  people={livePeople}
+                  loading={loading || livePeopleLoading}
+                  onOpenMeeting={openMeetingDetails}
+                  delay={80}
+                />
 
                 {/* Status breakdown */}
                 <section
                   className="anim-fade-up rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
-                  style={{ animationDelay: "260ms" }}
+                  style={{ animationDelay: "100ms" }}
                 >
                   <h2 className="text-base font-bold text-slate-900">Status Breakdown</h2>
                   <p className="mt-0.5 text-xs text-slate-500">All meetings by current status</p>
@@ -1587,7 +1588,7 @@ export default function DashboardPage() {
                       label="Scheduled"
                       value={stats.scheduled}
                       total={stats.totalMeetings}
-                      loading={loadingMeetings}
+                      loading={loading}
                     />
                     <StatusRow
                       icon={<CheckCircle2 className="h-4 w-4 text-emerald-600" />}
@@ -1595,7 +1596,7 @@ export default function DashboardPage() {
                       label="Completed"
                       value={stats.completed}
                       total={stats.totalMeetings}
-                      loading={loadingMeetings}
+                      loading={loading}
                     />
                     <StatusRow
                       icon={<RefreshCw className="h-4 w-4 text-amber-600" />}
@@ -1603,7 +1604,7 @@ export default function DashboardPage() {
                       label="Rescheduled"
                       value={stats.rescheduled}
                       total={stats.totalMeetings}
-                      loading={loadingMeetings}
+                      loading={loading}
                     />
                     <StatusRow
                       icon={<XCircle className="h-4 w-4 text-rose-600" />}
@@ -1611,7 +1612,7 @@ export default function DashboardPage() {
                       label="Cancelled"
                       value={stats.cancelled}
                       total={stats.totalMeetings}
-                      loading={loadingMeetings}
+                      loading={loading}
                     />
                   </div>
 
@@ -1625,36 +1626,20 @@ export default function DashboardPage() {
                 {/* Quick actions */}
                 <section
                   className="anim-fade-up relative z-10 rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
-                  style={{ animationDelay: "340ms" }}
+                  style={{ animationDelay: "140ms" }}
                 >
                   <h2 className="text-base font-bold text-slate-900">Quick Actions</h2>
                   <div className="mt-4 space-y-2.5">
                     <QuickActionButton
-                      icon={<Plus className="h-4 w-4" />}
-                      label="New Meeting"
-                      onClick={openCreatePanel}
-                    />
-                    <QuickActionButton
-                      icon={<Users className="h-4 w-4" />}
-                      label="Officers Directory"
-                      onClick={() => goTo("/officers")}
-                    />
-                    <QuickActionButton
-                      icon={<CalendarDays className="h-4 w-4" />}
-                      label="View Calendar"
-                      onClick={() => goTo("/calendar")}
-                    />
-                    <QuickActionButton
-                      icon={<FileText className="h-4 w-4" />}
-                      label="View Reports"
-                      onClick={() => goTo("/reports")}
-                    />
-                    {/* NEW: Yearly Recap */}
-                    <QuickActionButton
                       icon={<Sparkles className="h-4 w-4" />}
-                      label="Yearly Recap"
+                      label={`Yearly Recap ${currentYear}`}
                       onClick={() => goTo("/recap")}
+                      highlight
                     />
+                    <QuickActionButton icon={<Plus className="h-4 w-4" />} label="New Meeting" onClick={openCreatePanel} />
+                    <QuickActionButton icon={<Users className="h-4 w-4" />} label="Officers Directory" onClick={() => goTo("/officers")} />
+                    <QuickActionButton icon={<CalendarDays className="h-4 w-4" />} label="View Calendar" onClick={() => goTo("/calendar")} />
+                    <QuickActionButton icon={<FileText className="h-4 w-4" />} label="View Reports" onClick={() => goTo("/reports")} />
                   </div>
                 </section>
               </div>
@@ -1663,28 +1648,27 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Meeting details off-canvas — shared with Meetings & Calendar ── */}
+      {/* ── Meeting details off-canvas ── */}
       {selectedMeeting && (
         <MeetingDetailsPanel
           meeting={selectedMeeting}
           onClose={closeMeetingDetails}
           onEdit={openEditFromDetails}
           onUpdate={handleOpenUpdate}
-          onDeleted={() => { setSelectedMeeting(null); loadDashboardData({ silent: true }); }}
-          onMeetingChange={(updated) => {
+          onDeleted={() => {
+            setSelectedMeeting(null);
+            loadDashboardData({ silent: true });
+          }}
+          onMeetingChange={(updated: Meeting) => {
             setSelectedMeeting(updated);
             setMeetings((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
           }}
         />
       )}
 
-      {/* ── Update meeting panel — shared with the Meetings page ── */}
+      {/* ── Update meeting panel ── */}
       {updateMeeting && (
-        <UpdateMeetingPanel
-          meeting={updateMeeting}
-          onClose={closeUpdatePanel}
-          onSaved={handleUpdateSaved}
-        />
+        <UpdateMeetingPanel meeting={updateMeeting} onClose={closeUpdatePanel} onSaved={handleUpdateSaved} />
       )}
 
       {/* ── Create / Edit panel ── */}

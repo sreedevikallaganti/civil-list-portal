@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import ActivityLog, { type ActivityLogHandle, type ActivityStats } from '@/components/reports/ActivityLog';
+import TimeReport from '@/components/reports/TimeReport';
 import {
   ACTION_KEYS, COLUMN_LABELS, DETAILS_KEYS, FIELD_CLS, FILE_KEYS, HIDDEN_KEYS,
   REPORT_DEFAULT_VISIBLE, REPORT_PREFERRED, STATUS_KEYS, TONES, USER_KEYS,
@@ -355,7 +356,7 @@ export default function ReportsPage() {
   const [meetings, setMeetings] = useState<RecordItem[]>([]);
   const [reports, setReports] = useState<RecordItem[]>([]);
 
-  const [tab, setTab] = useState<'reports' | 'activity'>('reports');
+  const [tab, setTab] = useState<'reports' | 'activity' | 'time'>('reports');
 
   const [rf, setRf] = useState(DEFAULT_RF);
   const [rPage, setRPage] = useState(1);
@@ -661,6 +662,7 @@ export default function ReportsPage() {
           <div className="inline-flex rounded-full bg-slate-100 p-1">
             <TabButton active={tab === 'reports'} onClick={() => setTab('reports')} icon={FileText} label="Reports" count={reports.length} />
             <TabButton active={tab === 'activity'} onClick={() => setTab('activity')} icon={ActivityIcon} label="Activity" count={activityStats.count} />
+            <TabButton active={tab === 'time'} onClick={() => setTab('time')} icon={Clock} label="Time" count={meetings.length} />
           </div>
 
           {/* Reports tab */}
@@ -728,6 +730,9 @@ export default function ReportsPage() {
           {tab === 'activity' && (
             <ActivityLog ref={activityRef} onStats={handleActivityStats} title="Activity Log" />
           )}
+
+          {/* Time tab — hours by department + monthly cancellation / reschedule rates */}
+          {tab === 'time' && <TimeReport meetings={meetings} />}
         </div>
       </div>
 

@@ -9,6 +9,8 @@ import PhotoLightbox from "@/components/memories/PhotoLightbox";
 import MemoryStyles from "@/components/memories/MemoryStyles";
 
 const MAX_PHOTOS = 10;
+const MISSING_FIELD_MSG =
+  'Photos can’t be saved yet — the "meetings" collection needs a File field named "photos" (ask the PocketBase admin).';
 const ACCEPT = ["image/jpeg", "image/png", "image/webp"];
 
 type Props<T extends MemoryMeeting> = {
@@ -42,6 +44,8 @@ export default function MeetingPhotos<T extends MemoryMeeting>({ meeting, onChan
 
   const photos = current.photos ?? [];
   const room = MAX_PHOTOS - photos.length;
+  /* PocketBase only returns fields that exist — no `photos` key means the field hasn't been added yet */
+  const fieldMissing = !("photos" in current);
 
   function saved(rec: T) {
     setCurrent(rec);
@@ -63,17 +67,28 @@ export default function MeetingPhotos<T extends MemoryMeeting>({ meeting, onChan
       const compressed = await Promise.all(chosen.map((f) => compressImage(f)));
       const data = new FormData();
       compressed.forEach((f) => data.append("photos+", f)); // "+" = append to existing photos
-      saved(await pb.collection("meetings").update<T>(current.id, data));
+      const rec = await pb.collection("meetings").update<T>(current.id, data);
+      if (!("photos" in rec)) throw new Error(MISSING_FIELD_MSG);
+      saved(rec);
     } catch (err) {
       console.error("[MeetingPhotos] upload failed", err);
-      setError("Upload failed. Please try again.");
+      const msg = err instanceof Error && err.message === MISSING_FIELD_MSG ? MISSING_FIELD_MSG
+        : (err as { response?: { message?: string } })?.response?.message || "Upload failed. Please try again.";
+      setError(msg);
     } finally {
       setUploading(0);
     }
   }
 
+  /* two-tap delete: first tap arms the button, second tap (within 3 s) deletes */
+  const [armed, setArmed] = useState<string | null>(null);
   async function removePhoto(name: string) {
-    if (!confirm("Delete this photo?")) return;
+    if (armed !== name) {
+      setArmed(name);
+      setTimeout(() => setArmed((a) => (a === name ? null : a)), 3000);
+      return;
+    }
+    setArmed(null);
     setRemoving(name);
     setError("");
     try {
@@ -134,11 +149,17 @@ export default function MeetingPhotos<T extends MemoryMeeting>({ meeting, onChan
                 <button
                   type="button"
                   onClick={() => removePhoto(name)}
-                  aria-label="Delete photo"
+                  aria-label={armed === name ? "Tap again to delete" : "Delete photo"}
+                  title={armed === name ? "Tap again to delete" : "Delete photo"}
                   disabled={removing === name}
-                  className="absolute right-1.5 top-1.5 flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-slate-900/70 text-white opacity-100 transition hover:bg-rose-600 sm:opacity-0 sm:group-hover:opacity-100"
+                  className={`absolute right-1.5 top-1.5 flex h-7 cursor-pointer items-center justify-center gap-1 rounded-full text-white transition ${
+                    armed === name
+                      ? "bg-rose-600 px-2.5 opacity-100"
+                      : "w-7 bg-slate-900/70 opacity-100 hover:bg-rose-600 sm:opacity-0 sm:group-hover:opacity-100"
+                  }`}
                 >
                   {removing === name ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                  {armed === name && <span className="text-[10px] font-bold">Delete?</span>}
                 </button>
               )}
             </li>
@@ -151,7 +172,11 @@ export default function MeetingPhotos<T extends MemoryMeeting>({ meeting, onChan
         </ul>
       )}
 
-      {!readOnly && photos.length === 0 && (
+      {fieldMissing && !readOnly && (
+        <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-medium text-amber-800">{MISSING_FIELD_MSG}</p>
+      )}
+
+      {!fieldMissing && !readOnly && photos.length === 0 && (
         <div
           role="button"
           tabIndex={0}

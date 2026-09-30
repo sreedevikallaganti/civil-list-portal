@@ -16,10 +16,13 @@ import {
   CalendarDays,
   Briefcase,
   UserCog,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { NotificationBell } from '@/components/notifications/NotificationCenter';
 
-export default function SideBar() {
+/* open / onClose drive the slide-in drawer below the lg breakpoint; on desktop it's always visible */
+export default function SideBar({ open = false, onClose }: { open?: boolean; onClose?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
@@ -34,6 +37,7 @@ const menuItems = [
   // { href: '/other-contacts', label: 'Other Contacts', icon: Phone },
   { href: '/calendar', label: 'Calendar', icon: CalendarDays },
   { href: '/reports', label: 'Reports', icon: FileText },
+  { href: '/recap', label: 'Yearly Recap', icon: Sparkles },
   // { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -70,7 +74,11 @@ const menuItems = [
           fixed / h-screen / z-30, above page content but below
           the off-canvas panels (z-40/z-50). Width unchanged (w-64)
           so your main-content offset keeps working. ── */
-    <aside className="fixed left-0 top-0 z-30 flex h-screen w-64 flex-col border-r border-violet-100/80 bg-white/95 shadow-[1px_0_24px_-12px_rgba(139,92,246,0.25)] backdrop-blur-md">
+    <aside
+      className={`fixed left-0 top-0 z-[60] flex h-screen w-64 flex-col border-r border-violet-100/80 bg-white/95 shadow-[1px_0_24px_-12px_rgba(139,92,246,0.25)] backdrop-blur-md transition-transform duration-300 lg:z-30 lg:translate-x-0 ${
+        open ? 'translate-x-0' : '-translate-x-full'
+      }`}
+    >
 
       {/* Logo */}
       <div className="border-b border-slate-100 p-6">
@@ -78,12 +86,14 @@ const menuItems = [
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-md shadow-slate-900/20">
             <CalendarDays className="h-5 w-5" />
           </span>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <h1 className="bg-gradient-to-r from-violet-600 to-indigo-600 bg-clip-text text-xl font-extrabold tracking-tight text-transparent">
               Civillist
             </h1>
             <p className="text-[11px] font-medium text-slate-400">Meeting Management</p>
           </div>
+          {/* desktop only — on phones the bell lives in the top bar */}
+          <NotificationBell className="hidden lg:flex" />
         </div>
       </div>
 
@@ -102,6 +112,7 @@ const menuItems = [
                 key={item.href}
                 href={item.href}
                 aria-current={isActive ? 'page' : undefined}
+                onClick={onClose}
                 className={`group flex items-center gap-3 rounded-full px-4 py-2.5 transition-all duration-200 ${
                   isActive
                     ? 'bg-slate-900 font-semibold text-white shadow-lg shadow-slate-900/20'

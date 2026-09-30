@@ -46,3 +46,5 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+# Google OAuth refresh token (written by /api/google/callback)
+.google-token.json

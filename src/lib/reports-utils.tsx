@@ -7,6 +7,7 @@ import {
   ChevronUp, Minus, Search, TrendingDown, TrendingUp, X,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
+import { showToast } from '@/components/Toaster';
 
 /* ── Types ── */
 export type RecordItem = Record<string, any> & { id: string };
@@ -187,7 +188,7 @@ export function downloadDataset(format: ExportFormat, title: string, rows: Recor
     body = rows.map(r => headers.map(h => String(r[h] ?? '—')));
   }
   const w = window.open('', '_blank', 'width=880,height=980');
-  if (!w) { window.alert('Allow pop-ups once so the PDF preview can open, then choose "Save as PDF".'); return; }
+  if (!w) { showToast('Allow pop-ups for this site so the PDF preview can open, then choose "Save as PDF".', 'error'); return; }
   w.document.write(buildPdfHTML(title, headers, body, headers.length > 5));
   w.document.close();
 }
@@ -202,6 +203,28 @@ export async function fetchAllRecords(collection: string, sort = '-created'): Pr
     const rest = await Promise.all(
       Array.from({ length: totalPages - 1 }, (_, i) =>
         pb.collection(collection).getList(i + 2, PER, { sort }).then(res => res.items))
+    );
+    rest.forEach(items => all.push(...items));
+  }
+  return all as RecordItem[];
+}
+
+/** PocketBase datetime string for "N days ago" (UTC), for `created >= "…"` filters */
+export function daysAgoStamp(days: number) {
+  return new Date(Date.now() - days * 86_400_000).toISOString().replace('T', ' ');
+}
+
+/* ── Fetch only recent records (newest first), capped — for fast-growing logs ── */
+export async function fetchRecentRecords(collection: string, days: number, cap = 2000): Promise<RecordItem[]> {
+  const PER = 200;
+  const filter = `created >= "${daysAgoStamp(days)}"`;
+  const first = await pb.collection(collection).getList(1, PER, { sort: '-created', filter });
+  const all: any[] = [...first.items];
+  const pages = Math.min(first.totalPages ?? 1, Math.ceil(cap / PER));
+  if (pages > 1) {
+    const rest = await Promise.all(
+      Array.from({ length: pages - 1 }, (_, i) =>
+        pb.collection(collection).getList(i + 2, PER, { sort: '-created', filter }).then(res => res.items))
     );
     rest.forEach(items => all.push(...items));
   }
@@ -269,7 +292,7 @@ export function Toast({ toast }: { toast: { kind: 'ok' | 'err'; msg: string } | 
   );
 }
 
-export function EmptyState({ icon: Icon, title, hint, action }: { icon: LucideIcon; title: string; hint: string; action?: ReactNode }) {
+export function EmptyState({ icon: Icon, title, hint, action }: { icon: LucideIcon; title: string; hint: ReactNode; action?: ReactNode }) {
   return (
     <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
       <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-50">

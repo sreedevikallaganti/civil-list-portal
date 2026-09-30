@@ -116,6 +116,11 @@ interface ShowToastFn {
 }
 
 export const showToast: ShowToastFn = (message, title, type = 'success', options = {}) => {
+  // showToast(msg, 'error') — the type was passed where the title goes; treat it as the type
+  if (title === 'error' || title === 'success') {
+    type = title;
+    title = undefined;
+  }
   emit({
     message,
     title,
@@ -280,7 +285,7 @@ export function Toaster() {
                   {/* ---- rich meeting card ---- */}
                   {t.meta && (
                     <div className="mt-2.5 flex items-center gap-3 rounded-xl bg-slate-50 ring-1 ring-slate-100 p-2.5">
-                      <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${GRADIENTS[t.meta.officerType] || GRADIENTS.Other} text-white text-sm font-bold flex items-center justify-center shrink-0`}>
+                      <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${GRADIENTS[t.meta.officerType ?? 'Other'] || GRADIENTS.Other} text-white text-sm font-bold flex items-center justify-center shrink-0`}>
                         {(t.meta.officerName || '?').charAt(0).toUpperCase()}
                       </div>
                       <div className="min-w-0 flex-1">

@@ -1,7 +1,8 @@
 /**
  * Shared helpers for "On This Day", Yearly Recap and meeting photos.
- * Written for the existing `meetings` collection (title / officer_name / officer_type /
- * meeting_date / meeting_time / status / location …) — no schema changes except `photos`.
+ * Written for the existing `meetings` collection (agenda / officer_name / officer_type /
+ * meeting_date / meeting_time / status / location / documents …).
+ * Optional new fields: `photos`, `outcome`, `city`.
  */
 import pb from "@/lib/pocketbase";
 
@@ -26,6 +27,10 @@ export type MemoryMeeting = {
   meeting_place?: string;
 
   photos?: string[];
+  /** existing attachments field — image files in it count as photos too */
+  documents?: string[] | string;
+  outcome?: string;
+  city?: string;
 
   collectionId?: string;
   collectionName?: string;
@@ -36,7 +41,7 @@ export type MemoryMeeting = {
 /* ── Fields ─────────────────────────────────── */
 
 export function meetingTitle(m: MemoryMeeting): string {
-  return m.title || m.meeting_title || m.subject || m.agenda || "Untitled Meeting";
+  return m.agenda || m.title || m.meeting_title || m.subject || "General Discussion";
 }
 
 export function meetingPlace(m: MemoryMeeting): string {
@@ -114,16 +119,49 @@ export function formatTime(value?: string): string {
 
 /* ── Photos ──────────────────────────────────── */
 
-const PB_URL = (process.env.NEXT_PUBLIC_POCKETBASE_URL || "").replace(/\/+$/, "");
+/** Base URL the PocketBase client uses — "/pb" in the browser (your Next.js proxy). */
+function pbBase(): string {
+  const client = pb as unknown as { baseURL?: string; baseUrl?: string };
+  const base = client.baseURL ?? client.baseUrl ?? process.env.NEXT_PUBLIC_POCKETBASE_URL ?? "";
+  return base.replace(/\/+$/, "");
+}
 
 /**
  * URL of a meeting photo. thumb: "400x400" (grid) or "1200x0" (full view).
  * Built by hand so it works with any version of the PocketBase JS SDK.
+ * (Files without those thumb sizes are simply served at full size.)
  */
 export function photoUrl(m: MemoryMeeting, filename: string, thumb?: "400x400" | "1200x0"): string {
   const collection = m.collectionId || m.collectionName || "meetings";
-  const url = `${PB_URL}/api/files/${collection}/${m.id}/${encodeURIComponent(filename)}`;
+  const url = `${pbBase()}/api/files/${collection}/${m.id}/${encodeURIComponent(filename)}`;
   return thumb ? `${url}?thumb=${thumb}` : url;
+}
+
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif)$/i;
+
+function asList(v: string[] | string | undefined): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  try {
+    const parsed = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return v ? [v] : [];
+  }
+}
+
+/** Only the files in the `photos` field. */
+export function photoFiles(m: MemoryMeeting): string[] {
+  return asList(m.photos);
+}
+
+/**
+ * Every picture of a meeting: the `photos` field plus any images that were
+ * attached through "Documents" (jpg / png / webp), so old uploads count too.
+ */
+export function meetingImages(m: MemoryMeeting): string[] {
+  const docs = asList(m.documents).filter((n) => IMAGE_EXT.test(n));
+  return [...photoFiles(m), ...docs];
 }
 
 /** Logged-in user's display name (works with old and new SDK versions). */

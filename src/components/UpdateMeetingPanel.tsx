@@ -29,6 +29,8 @@ import {
   WeekStrip, TimeSlotPicker, clampInt, PRESET_DURATIONS, formatDuration,
 } from '@/components/CreateMeetingPanel';
 import { showToast } from '@/components/Toaster';
+import { completedTooEarly } from '@/lib/meetingRules';
+import MeetingPhotos from '@/components/memories/MeetingPhotos';
 
 /* ----------------------------- Scoped CSS ----------------------------- */
 /* Same animations the Meetings page uses, under panel-only class names so
@@ -434,6 +436,9 @@ export default function UpdateMeetingPanel({ meeting, onClose, onSaved }: { meet
       }
     }
 
+    const early = completedTooEarly(meeting, STATUS_STYLES[status]?.label || status);
+    if (early) { setError(early); return; }
+
     setSaving(true);
     setError('');
     try {
@@ -639,6 +644,12 @@ export default function UpdateMeetingPanel({ meeting, onClose, onSaved }: { meet
             <p className="mt-1 text-[11px] text-slate-400">
               Only today or a future date can be chosen. Included in the Google Calendar sync when syncing is enabled.
             </p>
+          </div>
+
+          {/* Photos — moments from the meeting; saved as soon as they're added */}
+          <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
+            <MeetingPhotos meeting={meeting} readOnly={saving} />
+            <p className="mt-2 text-[11px] text-slate-400">Photos are saved as soon as you add them — no need to press Save.</p>
           </div>
 
           {/* Documents */}

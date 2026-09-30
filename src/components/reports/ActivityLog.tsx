@@ -7,12 +7,15 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import {
   Activity, CheckCircle2, ChevronDown, ChevronUp, Download, FileJson, FileText,
-  History, List, Pencil, Plus, RefreshCw, Trash2, Zap,
+  Eraser, History, List, Pencil, Plus, RefreshCw, Trash2, Zap,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
+import { useAuth } from '@/contexts/AuthContext';
+import { canManageIntegrations } from '@/lib/roles';
+import { showToast } from '@/components/Toaster';
 import {
   ACTION_KEYS, DETAILS_KEYS, HIDDEN_KEYS, STATUS_KEYS, USER_KEYS,
-  cx, downloadDataset, fetchAllRecords, fmtDateTime, humanize, Pill, EmptyState,
+  cx, daysAgoStamp, downloadDataset, fetchRecentRecords, fmtDateTime, humanize, Pill, EmptyState,
   FilterSelect, Pagination, SearchInput, sortRecords, statusBucket, statusTone, timeAgo,
   type ColumnDef, type RecordItem, type SortState,
 } from '@/lib/reports-utils';
@@ -44,6 +47,9 @@ interface ActivityLogProps {
 
 const PRIMARY_COLLECTION = 'activity_logs';
 const FALLBACK_COLLECTION = 'update_logs';
+/* only the last 90 days are loaded — the log has thousands of rows and keeps growing */
+const RECENT_DAYS = 90;
+const CLEANUP_OPTIONS = [90, 180, 365];
 type ViewMode = 'timeline' | 'table';
 
 /* ── Visual language per action / status ── */
@@ -110,11 +116,11 @@ const ActivityLog = forwardRef<ActivityLogHandle, ActivityLogProps>(function Act
     let items: RecordItem[] = [];
     let missing = false;
     try {
-      items = await fetchAllRecords(PRIMARY_COLLECTION, '-created');
+      items = await fetchRecentRecords(PRIMARY_COLLECTION, RECENT_DAYS);
       colRef.current = PRIMARY_COLLECTION;
     } catch {
       try {
-        items = await fetchAllRecords(FALLBACK_COLLECTION, '-created');
+        items = await fetchRecentRecords(FALLBACK_COLLECTION, RECENT_DAYS);
         colRef.current = FALLBACK_COLLECTION;
       } catch { missing = true; }
     }
@@ -125,6 +131,45 @@ const ActivityLog = forwardRef<ActivityLogHandle, ActivityLogProps>(function Act
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  /* ── Admin clean-up: delete entries older than N days (count first, then confirm) ── */
+  const { user } = useAuth();
+  const isAdmin = canManageIntegrations(user);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupDays, setCleanupDays] = useState(180);
+  const [cleanupCount, setCleanupCount] = useState<number | null>(null);
+  const [cleanupProgress, setCleanupProgress] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!cleanupOpen) return;
+    setCleanupCount(null);
+    pb.collection(colRef.current)
+      .getList(1, 1, { filter: `created < "${daysAgoStamp(cleanupDays)}"`, requestKey: null })
+      .then((r) => setCleanupCount(r.totalItems))
+      .catch(() => setCleanupCount(0));
+  }, [cleanupOpen, cleanupDays]);
+
+  async function runCleanup() {
+    const filter = `created < "${daysAgoStamp(cleanupDays)}"`;
+    let removed = 0;
+    setCleanupProgress(0);
+    try {
+      for (;;) {
+        const batch = await pb.collection(colRef.current).getList(1, 100, { filter, requestKey: null });
+        if (!batch.items.length) break;
+        await Promise.all(batch.items.map((r) => pb.collection(colRef.current).delete(r.id, { requestKey: null })));
+        removed += batch.items.length;
+        setCleanupProgress(removed);
+      }
+      showToast(`Removed ${removed.toLocaleString('en-IN')} log entries older than ${cleanupDays} days`, 'success');
+    } catch (e: any) {
+      showToast(`Clean-up stopped after ${removed} entries: ${e?.message || 'error'}`, 'error');
+    } finally {
+      setCleanupProgress(null);
+      setCleanupOpen(false);
+      load(true);
+    }
+  }
 
   /* ── Report stats up to the parent (memoized callback there) ── */
   useEffect(() => {
@@ -317,6 +362,40 @@ const ActivityLog = forwardRef<ActivityLogHandle, ActivityLogProps>(function Act
             className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:text-slate-800">
             <RefreshCw className={cx('h-4 w-4', refreshing && 'animate-spin')} />
           </button>
+          {isAdmin && !noCollection && (
+            <div className="relative">
+              <button onClick={() => setCleanupOpen((o) => !o)} title="Delete old log entries"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:text-rose-600">
+                <Eraser className="h-4 w-4" />
+              </button>
+              {cleanupOpen && (
+                <div className="absolute right-0 z-20 mt-2 w-72 rounded-xl border border-slate-200 bg-white p-3 shadow-lg">
+                  <p className="text-sm font-semibold text-slate-800">Clean up old entries</p>
+                  <p className="mt-0.5 text-xs text-slate-500">The page shows the last {RECENT_DAYS} days. Older entries only take up space.</p>
+                  <div className="mt-3 flex gap-1.5">
+                    {CLEANUP_OPTIONS.map((d) => (
+                      <button key={d} onClick={() => setCleanupDays(d)} disabled={cleanupProgress !== null}
+                        className={cx('flex-1 rounded-lg px-2 py-1.5 text-xs font-semibold',
+                          cleanupDays === d ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200')}>
+                        &gt; {d} days
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={runCleanup}
+                    disabled={!cleanupCount || cleanupProgress !== null}
+                    className="mt-3 w-full rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {cleanupProgress !== null
+                      ? `Deleting… ${cleanupProgress.toLocaleString('en-IN')} / ${(cleanupCount ?? 0).toLocaleString('en-IN')}`
+                      : cleanupCount === null ? 'Counting…'
+                      : cleanupCount === 0 ? 'Nothing that old'
+                      : `Delete ${cleanupCount.toLocaleString('en-IN')} entries permanently`}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <div className="relative">
             <button onClick={() => setExportOpen(o => !o)} title="Export log"
               className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:text-slate-800">

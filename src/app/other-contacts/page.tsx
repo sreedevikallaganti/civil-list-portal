@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
+import { showToast } from '@/components/Toaster';
 import { 
   Search, Plus, User, Phone, Edit2, Trash2, X, Briefcase, 
   Building2, Mail, Loader2, Database, Users, TrendingUp,
@@ -47,16 +48,11 @@ export default function OtherContactsPage() {
     try {
       setLoading(true);
       
-      let response;
-      
-      if (selectedCategory === 'all') {
-        response = await pb.collection(COLLECTION_NAME).getList(page, perPage, { sort: '-created' });
-      } else {
-        response = await pb.collection(COLLECTION_NAME).getList(page, perPage, { 
-          filter: `category = "${selectedCategory}"`,
-          sort: '-created'
-        });
-      }
+      // other_contacts has no `created` field — sorting by it returns 400 and the list never refreshes
+      const response = await pb.collection(COLLECTION_NAME).getList(page, perPage, {
+        sort: 'name',
+        ...(selectedCategory !== 'all' && { filter: `category = "${selectedCategory}"` }),
+      });
       
       const data = Array.isArray(response.items) ? response.items : [];
       
@@ -102,15 +98,24 @@ export default function OtherContactsPage() {
     setSelectedContact(null);
   };
 
+  /* two-click delete: the first click asks, a second click within 4 s deletes */
+  const armedDeleteRef = useRef<{ id: string; at: number } | null>(null);
   const handleDelete = async (contact: any) => {
-    if (!confirm(`Are you sure you want to delete ${contact.name}?`)) return;
+    const armed = armedDeleteRef.current;
+    if (!armed || armed.id !== contact.id || Date.now() - armed.at > 4000) {
+      armedDeleteRef.current = { id: contact.id, at: Date.now() };
+      showToast(`Click delete again to remove ${contact.name}`, 'error');
+      return;
+    }
+    armedDeleteRef.current = null;
     try {
       await pb.collection(COLLECTION_NAME).delete(contact.id);
       loadContacts(currentPage);
       if (selectedContact?.id === contact.id) setSelectedContact(null);
+      showToast(`${contact.name} deleted`, 'success');
     } catch (error: any) {
       console.error('Delete error:', error);
-      alert('Failed to delete contact');
+      showToast('Failed to delete contact', 'error');
     }
   };
 

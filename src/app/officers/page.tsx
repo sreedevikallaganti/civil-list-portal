@@ -1201,7 +1201,7 @@ export default function OfficersPage() {
       {/* ------------------------------ Panel ------------------------------ */}
 <CreateOfficerPanel
   isOpen={isPanelOpen}
-  officerType={panelOfficerType}
+  officerType={panelOfficerType ?? undefined}
   editOfficer={editingOfficer}
   onClose={() => { setIsPanelOpen(false); setEditingOfficer(null); }}
   onSuccess={() => { setIsPanelOpen(false); setEditingOfficer(null); loadData(currentPage); refreshCounts(); }}

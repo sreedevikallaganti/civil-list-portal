@@ -6,6 +6,7 @@ import { computeMemories } from "@/lib/memories/onThisDay";
 import {
   formatDayLong,
   formatTime,
+  meetingImages,
   meetingPlace,
   meetingTitle,
   photoUrl,
@@ -52,7 +53,7 @@ export default function OnThisDayCard<T extends MemoryMeeting>({ meetings, onOpe
 
   const group = memories.groups[Math.min(active, memories.groups.length - 1)];
   const photos = useMemo(
-    () => (group?.meetings ?? []).flatMap(({ meeting, day }) => (meeting.photos ?? []).map((name) => ({ meeting, day, name }))),
+    () => (group?.meetings ?? []).flatMap(({ meeting, day }) => meetingImages(meeting).map((name) => ({ meeting, day, name }))),
     [group]
   );
 
@@ -60,7 +61,7 @@ export default function OnThisDayCard<T extends MemoryMeeting>({ meetings, onOpe
 
   const lead = group.meetings[0];
   const rest = group.meetings.slice(1);
-  const cover = lead.meeting.photos?.[0];
+  const cover = meetingImages(lead.meeting)[0];
   const subtitle =
     memories.mode === "today"
       ? `${yearsText(group.yearsAgo)} today · ${formatDayLong(lead.day)}`

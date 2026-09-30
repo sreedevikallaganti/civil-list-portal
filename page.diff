@@ -45,3 +45,32 @@
                    </div>
                  </section>
                </div>
+
+
+--- src/app/page.tsx (your current file)
++++ src/app/page.tsx (with Reconnect)
+@@ -37,6 +37,7 @@
+ import ProtectedRoute from "@/components/auth/ProtectedRoute";
+ import OnThisDayCard from "@/components/memories/OnThisDayCard"; // NEW: On This Day
+ import RecapTeaserCard from "@/components/memories/RecapTeaserCard"; // NEW: Yearly Recap
++import ReconnectCard from "@/components/memories/ReconnectCard"; // NEW: Reconnect (trip suggestions)
+ import { Sparkles } from "lucide-react"; // NEW: icon for the Yearly Recap quick action
+ import { useEffect, useMemo, useRef, useState } from "react";
+ import type { ReactNode } from "react";
+@@ -1451,6 +1452,16 @@
+             <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+               {/* Left column */}
+               <div className="space-y-6 xl:col-span-2">
++                {/* NEW: Reconnect — upcoming trips + people met in that city before */}
++                {!loadingMeetings && (
++                  <ReconnectCard
++                    meetings={meetings}
++                    onOpenMeeting={openMeetingDetails}
++                    onPlanMeeting={() => openCreatePanel()}
++                    delay={160}
++                  />
++                )}
++
+                 {/* NEW: On This Day — renders nothing when there are no memories */}
+                 {!loadingMeetings && (
+                   <OnThisDayCard meetings={meetings} onOpenMeeting={openMeetingDetails} delay={180} />
