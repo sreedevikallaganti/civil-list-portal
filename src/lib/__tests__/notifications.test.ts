@@ -39,6 +39,19 @@ describe('upcomingTrips / suggestions', () => {
     expect(names).toEqual(['Person b']); // "a" is already booked on this visit
   });
 
+  it('keeps a visit listed until the day after its last meeting, as "ongoing" from today', () => {
+    const delhi = [
+      mtg('p1', { meeting_date: '2026-03-10', city: 'New Delhi', status: 'Completed' }),
+      mtg('v1', { meeting_date: '2026-09-28', city: 'New Delhi', status: 'Completed', officer_id: 'z' }),
+    ];
+    // 29 Sep (NOW): the day after the last meeting → still listed, the MD is there
+    const [trip] = upcomingTrips(delhi, { now: NOW });
+    expect(trip).toMatchObject({ from: '2026-09-28', ongoing: true, planDate: '2026-09-29' });
+    expect(metBeforeFor(trip, delhi).map((p) => p.name)).toEqual(['Person p1']);
+    // 30 Sep: two days after → gone
+    expect(upcomingTrips(delhi, { now: new Date(2026, 8, 30, 9) })).toHaveLength(0);
+  });
+
   it('builds a pre-filled scheduling link', () => {
     const [trip] = upcomingTrips(data, { now: NOW });
     expect(scheduleHref(trip, { meetingId: 'b' })).toBe('/meetings?date=2026-10-05&city=New+Delhi&schedule=b');

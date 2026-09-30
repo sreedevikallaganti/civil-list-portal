@@ -68,9 +68,12 @@ export function buildNotifications(meetings: any[], people: Map<string, LivePers
     const metBefore = metBeforeFor(trip, meetings);
     const daysAway = Math.round((Date.parse(`${trip.from}T00:00:00`) - Date.parse(`${today}T00:00:00`)) / 86_400_000);
     out.push({
-      id: `trip:${trip.key}:${metBefore.length}`, kind: 'trip', trip, urgent: daysAway <= 7 && metBefore.length > 0,
+      id: `trip:${trip.key}:${metBefore.length}:${trip.ongoing ? 'now' : 'soon'}`, kind: 'trip', trip,
+      urgent: (trip.ongoing || daysAway <= 7) && metBefore.length > 0,
       at: Date.parse(`${trip.from}T00:00:00`),
-      title: `Visit to ${trip.label} · ${tripDates(trip)}`,
+      title: trip.ongoing
+        ? `You’re in ${trip.label} — who else to meet?`
+        : `Visit to ${trip.label} · ${tripDates(trip)}`,
       body: metBefore.length
         ? `${trip.meetings.length} meeting${trip.meetings.length > 1 ? 's' : ''} booked. You’ve met ${metBefore.length} ${metBefore.length > 1 ? 'people' : 'person'} there before — meet them again?`
         : `${trip.meetings.length} meeting${trip.meetings.length > 1 ? 's' : ''} booked. See officers based in ${trip.label}.`,

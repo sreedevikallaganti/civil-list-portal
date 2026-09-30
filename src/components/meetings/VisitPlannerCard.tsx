@@ -36,6 +36,11 @@ function TripBlock({ trip, meetings, highlight }: { trip: Trip; meetings: any[];
       <div className="flex flex-wrap items-center gap-2">
         <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-white text-sky-600"><MapPin className="h-4 w-4" /></span>
         <p className="text-sm font-bold text-slate-900">{trip.label}</p>
+        {trip.ongoing && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2.5 py-0.5 text-[11px] font-bold text-white">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" /> You’re here now
+          </span>
+        )}
         <span className="rounded-full bg-white px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 ring-1 ring-inset ring-slate-200">{tripDates(trip)}</span>
         <span className="text-[11px] text-slate-400">
           {trip.meetings.length} booked: {trip.meetings.map((m) => m.officer_name || m.agenda).filter(Boolean).slice(0, 3).join(', ')}
@@ -120,7 +125,9 @@ export default function VisitPlannerCard({ meetings, loading, delay = 0 }: { mee
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-bold text-slate-900">Upcoming visits</h2>
-          <p className="mt-0.5 text-xs text-slate-500">People worth meeting while you’re there</p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            People worth meeting while you’re there · a visit stays here until the day after its last meeting
+          </p>
         </div>
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-sky-50 text-sky-600"><Plane className="h-4 w-4" /></span>
       </div>

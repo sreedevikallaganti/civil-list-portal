@@ -17,7 +17,13 @@ export type Trip = {
   from: string;       // YYYY-MM-DD
   to: string;
   meetings: any[];    // booked meetings on this visit
+  ongoing: boolean;   // the visit has started (the MD is there now)
+  planDate: string;   // date to pre-fill when scheduling: first day, or today once the visit is under way
 };
+
+/* A visit stays listed this many days after its last booked meeting, so the MD can
+   still see who else to meet while in the city (e.g. the morning after). */
+export const STAY_AFTER_DAYS = 1;
 
 const pad = (n: number) => String(n).padStart(2, '0');
 export const isoDay = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -26,13 +32,17 @@ const daysBetween = (a: string, b: string) =>
   Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
 const isOff = (m: any) => /cancel|reject/i.test(String(m?.status || '')) || m?.deleted;
 
-/** Visits outside the home city starting today … `withinDays` ahead, soonest first. */
+/** Visits outside the home city that are under way or start within `withinDays`;
+    the one the MD is on right now first, then soonest first. A visit stays listed
+    until STAY_AFTER_DAYS after its last meeting. */
 export function upcomingTrips(meetings: any[], { withinDays = 45, now = new Date() } = {}): Trip[] {
   const today = isoDay(now);
   const byCity = new Map<string, any[]>();
   for (const m of meetings) {
     const d = dayOf(m);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || d < today || daysBetween(today, d) > withinDays || isOff(m)) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || isOff(m)) continue;
+    // keep the last few days too, so a visit that has started stays together
+    if (daysBetween(d, today) > STAY_AFTER_DAYS + VISIT_WINDOW_DAYS || daysBetween(today, d) > withinDays) continue;
     const city = meetingCityKey(m);
     if (!city || isHomeCity(city)) continue;
     (byCity.get(city) || byCity.set(city, []).get(city)!).push(m);
@@ -48,12 +58,21 @@ export function upcomingTrips(meetings: any[], { withinDays = 45, now = new Date
         cur.to = d;
         cur.meetings.push(m);
       } else {
-        cur = { key: `${city}|${d}`, city, label: cityLabel(city, String(m.city || '').split(',')[0]), from: d, to: d, meetings: [m] };
+        cur = {
+          key: `${city}|${d}`, city, label: cityLabel(city, String(m.city || '').split(',')[0]),
+          from: d, to: d, meetings: [m], ongoing: false, planDate: d,
+        };
         trips.push(cur);
       }
     }
   }
-  return trips.sort((a, b) => a.from.localeCompare(b.from));
+  return trips
+    .filter((t) => daysBetween(t.to, today) <= STAY_AFTER_DAYS) // ended more than STAY_AFTER_DAYS ago → gone
+    .map((t) => {
+      const ongoing = t.from <= today;
+      return { ...t, ongoing, planDate: ongoing ? today : t.from };
+    })
+    .sort((a, b) => Number(b.ongoing) - Number(a.ongoing) || a.from.localeCompare(b.from));
 }
 
 export type TripSuggestions = {
@@ -65,7 +84,7 @@ export type TripSuggestions = {
 export function metBeforeFor(trip: Trip, meetings: any[]): RevisitPerson[] {
   return findPeopleToRevisit(meetings, {
     city: trip.city,
-    date: trip.from,
+    date: trip.planDate,
     exclude: trip.meetings.map((m) => personKey(m)),
   });
 }
@@ -90,7 +109,7 @@ export function tripDates(t: Trip) {
 
 /** Link that opens the New Meeting form on the Meetings page, pre-filled for this visit. */
 export function scheduleHref(trip: Trip, who: { meetingId?: string; directory?: DirectoryPerson }) {
-  const q = new URLSearchParams({ date: trip.from, city: trip.label });
+  const q = new URLSearchParams({ date: trip.planDate, city: trip.label });
   if (who.meetingId) q.set('schedule', who.meetingId);
   if (who.directory) q.set('person', `${who.directory.kind}:${who.directory.id}`);
   return `/meetings?${q}`;
