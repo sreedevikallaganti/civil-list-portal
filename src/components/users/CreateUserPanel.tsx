@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { createUser, type PBUser } from "./user-api";
+import { cleanName, nameError } from "@/lib/validation";
+import { DEPARTMENTS, canonicalDepartment, departmentError } from "@/lib/departments";
 
 interface Props {
   onSaved: (user: PBUser) => void;
@@ -43,12 +45,13 @@ export default function CreateUserPanel({ onSaved, onClose }: Props) {
   }, [handleClose]);
 
   function setField(key: keyof typeof EMPTY_FORM, value: string) {
-    setForm((f) => ({ ...f, [key]: value }));
+    setForm((f) => ({ ...f, [key]: key === "name" ? cleanName(value) : value })); // names: letters only
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim()) { setError("Name is required."); return; }
+    const nameProblem = nameError(form.name);
+    if (nameProblem) { setError(nameProblem); return; }
     if (!/^\S+@\S+\.\S+$/.test(form.email.trim())) {
       setError("Please enter a valid email address.");
       return;
@@ -61,6 +64,8 @@ export default function CreateUserPanel({ onSaved, onClose }: Props) {
       setError("Passwords do not match.");
       return;
     }
+    const deptProblem = departmentError(form.department);
+    if (deptProblem) { setError(deptProblem); return; }
 
     setSaving(true);
     setError(null);
@@ -70,7 +75,7 @@ export default function CreateUserPanel({ onSaved, onClose }: Props) {
         email: form.email.trim(),
         password: form.password,
         passwordConfirm: form.passwordConfirm,
-        department: form.department.trim(),
+        department: canonicalDepartment(form.department),
         permissions: form.permissions.trim(),
       });
       onSaved(created);
@@ -90,7 +95,7 @@ export default function CreateUserPanel({ onSaved, onClose }: Props) {
       />
 
       <aside
-        className={`absolute right-0 top-0 flex h-full w-full max-w-md flex-col bg-white shadow-2xl transition-transform duration-300 ease-out ${
+        className={`absolute right-0 top-0 flex h-full w-full sm:max-w-xl lg:max-w-2xl flex-col bg-white shadow-2xl transition-transform duration-300 ease-out ${
           show ? "translate-x-0" : "translate-x-full"
         }`}
       >
@@ -118,7 +123,7 @@ export default function CreateUserPanel({ onSaved, onClose }: Props) {
                 { key: "email", label: "Email (login)", required: true, placeholder: "e.g. jane@example.com", type: "email" },
                 { key: "password", label: "Password", required: true, placeholder: "Min. 8 characters", type: "password" },
                 { key: "passwordConfirm", label: "Confirm password", required: true, placeholder: "Repeat password", type: "password" },
-                { key: "department", label: "Department", placeholder: "e.g. Civil", type: "text" },
+                { key: "department", label: "Department", placeholder: "Choose a department", type: "select" },
                 { key: "permissions", label: "Permissions", placeholder: "e.g. admin, viewer", type: "text" },
               ] as const
             ).map((f) => (
@@ -126,15 +131,28 @@ export default function CreateUserPanel({ onSaved, onClose }: Props) {
                 <label htmlFor={`usr-${f.key}`} className="mb-1 block text-sm font-medium text-gray-700">
                   {f.label}{'required' in f && f.required &&<span className="text-red-500"> *</span>}
                 </label>
-                <input
-                  id={`usr-${f.key}`}
-                  type={f.type}
-                  value={form[f.key]}
-                  onChange={(e) => setField(f.key, e.target.value)}
-                  placeholder={f.placeholder}
-                  autoComplete={f.key.startsWith("password") ? "new-password" : "off"}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200"
-                />
+                {f.type === "select" ? (
+                  /* departments come from a fixed list (lib/departments) — no free text */
+                  <select
+                    id={`usr-${f.key}`}
+                    value={form[f.key]}
+                    onChange={(e) => setField(f.key, e.target.value)}
+                    className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200"
+                  >
+                    <option value="">{f.placeholder}</option>
+                    {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    id={`usr-${f.key}`}
+                    type={f.type}
+                    value={form[f.key]}
+                    onChange={(e) => setField(f.key, e.target.value)}
+                    placeholder={f.placeholder}
+                    autoComplete={f.key.startsWith("password") ? "new-password" : "off"}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200"
+                  />
+                )}
               </div>
             ))}
             {error && (

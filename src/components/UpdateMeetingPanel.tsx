@@ -25,10 +25,12 @@ import {
   Upload, FileText, Trash2, Loader2, CheckCircle2,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
+import { logActivity, meetingLabel } from '@/lib/activity';
 import {
   WeekStrip, TimeSlotPicker, clampInt, PRESET_DURATIONS, formatDuration,
 } from '@/components/CreateMeetingPanel';
 import { showToast } from '@/components/Toaster';
+import { syncStatusChange } from '@/lib/meetingStatusSync';
 import { completedTooEarly } from '@/lib/meetingRules';
 import MeetingPhotos from '@/components/memories/MeetingPhotos';
 
@@ -49,7 +51,7 @@ const PANEL_CSS = `
 .ump-scroll::-webkit-scrollbar-track { background: transparent; }
 .ump-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 999px; }
 .ump-scroll::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
-.ump-progress { background: linear-gradient(90deg,#a78bfa 25%,#7c3aed 40%,#a78bfa 55%); background-size: 200% 100%; animation: umpShimmer 1.2s linear infinite; }
+.ump-progress { background: linear-gradient(90deg,var(--color-violet-400) 25%,var(--color-violet-600) 40%,var(--color-violet-400) 55%); background-size: 200% 100%; animation: umpShimmer 1.2s linear infinite; }
 `;
 
 /* ----------------------------- Status Styling ----------------------------- */
@@ -264,12 +266,13 @@ function FollowUpCalendar({
    UpdateMeetingPanel — MANUAL ONLY, zero automations.
    Pass `__forceStatus: 'rescheduled'` on the meeting object to open it
    pre-selected on Rescheduled (used by quick status / keyboard shortcuts).
+   `__proposedDate` / `__proposedTime` pre-fill the new slot (calendar drag-and-drop).
 ================================================================================= */
 
 export default function UpdateMeetingPanel({ meeting, onClose, onSaved }: { meeting: any; onClose: () => void; onSaved: () => void }) {
   const [status, setStatus] = useState<string>(() => String(meeting?.__forceStatus || meeting?.status || 'scheduled').toLowerCase());
-  const [newDate, setNewDate] = useState<string>(() => String(meeting?.meeting_date || '').slice(0, 10) || '');
-  const [newTime, setNewTime] = useState<string>(() => (String(meeting?.meeting_time || '').match(/\d{1,2}:\d{2}/)?.[0] || ''));
+  const [newDate, setNewDate] = useState<string>(() => String(meeting?.__proposedDate || meeting?.meeting_date || '').slice(0, 10) || '');
+  const [newTime, setNewTime] = useState<string>(() => (String(meeting?.__proposedTime || meeting?.meeting_time || '').match(/\d{1,2}:\d{2}/)?.[0] || ''));
   const [newDuration, setNewDuration] = useState<string>(() => (meeting?.duration != null ? String(meeting.duration) : ''));
   const [isCustomDuration, setIsCustomDuration] = useState(() => {
     const n = Number(meeting?.duration);
@@ -392,11 +395,9 @@ export default function UpdateMeetingPanel({ meeting, onClose, onSaved }: { meet
     return '';
   };
 
-  const docsDirty =
-    pendingDocs.length > 0 ||
-    existingDocs.join('||') !== initialDocsRef.current.join('||');
-
   async function syncDocuments(recordId: string) {
+    // read the ref here (on save), not during render
+    const docsDirty = pendingDocs.length > 0 || existingDocs.join('||') !== initialDocsRef.current.join('||');
     if (!docsDirty) return;
     const fd = new FormData();
     if (!existingDocs.length && !pendingDocs.length) {
@@ -455,8 +456,22 @@ export default function UpdateMeetingPanel({ meeting, onClose, onSaved }: { meet
         payload.duration = Number(newDuration) || newDuration;
       }
       await pb.collection('meetings').update(meeting.id, payload);
+      logActivity(
+        status === 'rescheduled' || status === 'cancelled' || status === 'completed' ? status : 'status changed',
+        'meeting',
+        `${meetingLabel({ ...meeting, ...payload })} → ${statusLabel}`,
+        meeting.id,
+      );
 
       appendStatusHistory(meeting.id, meeting.status_history, statusLabel).catch(() => {});
+
+      /* keep everything in step (lib/meetingStatusSync): rescheduled → move the Zoom meeting and the
+         Google Calendar event, then email the new time; cancelled → remove them and email; completed → thank-you */
+      if (status === 'rescheduled') {
+        void syncStatusChange(meeting, { status: 'rescheduled', date: newDate, time: newTime, duration: Number(newDuration) || 30 }, showToast);
+      } else if (status === 'cancelled' || status === 'completed') {
+        void syncStatusChange(meeting, { status }, showToast);
+      }
 
       await syncDocuments(meeting.id);
 
@@ -465,7 +480,7 @@ export default function UpdateMeetingPanel({ meeting, onClose, onSaved }: { meet
         const savedField = await saveFollowUpNote(meeting.id, trimmedNote);
         if (!savedField) {
           showToast(
-            'Status saved, but the note wasn’t stored — your "meetings" collection needs a text field named follow_up_notes (add one in PocketBase; followup_notes / follow_up / followup also work). See the browser console for the field names actually on this record.',
+            'The status is saved, but the note couldn’t be stored. Please ask your administrator.',
             'error'
           );
         }

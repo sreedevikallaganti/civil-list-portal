@@ -7,8 +7,14 @@
    v2: action items removed (no more @/lib/meetingActions).
 ================================================================ */
 
-import { useEffect, useMemo } from 'react';
-import { X, User, CalendarDays, CalendarClock, History, Plus, ChevronRight, Phone, Mail } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { X, User, CalendarDays, CalendarClock, History, Plus, ChevronRight, Phone, Mail, Loader2 } from 'lucide-react';
+import Link from 'next/link';
+import pb from '@/lib/pocketbase';
+import { meetingParticipants, samePerson, type Participant } from '@/lib/participants';
+import { OFFICER_COLLECTION, pbQuote, serviceOf, toDirectoryOfficer } from '@/lib/officerDirectory';
+import { nameKey, searchWord } from '@/lib/officerMerge';
+import { OfficerDetailsGrid, OfficerOccasions } from '@/components/officers/OfficerProfile';
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const DOT: Record<string, string> = {
@@ -26,15 +32,59 @@ function startOf(m: any): Date | null {
 const fmt = (d: Date) => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 const fmtTime = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
-export function isSameParticipant(m: any, person: { id?: string; name?: string }) {
-  if (person.id && m.officer_id && m.officer_id === person.id) return true;
-  const a = String(m.officer_name || '').trim().toLowerCase();
-  const b = String(person.name || '').trim().toLowerCase();
-  return !!a && a === b;
+/** this person in the meeting — as the main participant or one of the others (lib/participants) */
+function findIn(m: any, person: Partial<Participant>, among = meetingParticipants(m)) {
+  const key = nameKey(person.name);
+  const service = serviceOf(person.type);
+  return among.find((p) =>
+    samePerson(p, person) ||
+    // a meeting saved without the directory id (or before the directory was reloaded) still matches by name —
+    // spelt either way ("A.A. Sindhu" = "Aa Sindhu"), but not someone of that name in another service
+    (!!key && nameKey(p.name) === key && !(service && serviceOf(p.type) && serviceOf(p.type) !== service)));
+}
+
+export function isSameParticipant(m: any, person: Partial<Participant>) {
+  return !!findIn(m, person);
+}
+
+/**
+ * The person's record in the directory — the same one the Officers page shows. Officers: by the id the meeting saved,
+ * or (saved before the directory was reloaded) by name when exactly one officer of that service has it.
+ * Others: their contact / employee record by id.
+ */
+function useDirectoryRecord(person: Participant) {
+  const [record, setRecord] = useState<Record<string, any> | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    const service = serviceOf(person.type);
+    (async () => {
+      let found: Record<string, any> | null = null;
+      if (service) {
+        const col = OFFICER_COLLECTION[service];
+        if (person.id) found = await pb.collection(col).getOne(person.id, { requestKey: null }).catch(() => null);
+        const word = searchWord(person.name);
+        if (!found && word) {
+          const res = await pb.collection(col).getList(1, 50, { filter: `name ~ "${pbQuote(word)}"`, requestKey: null }).catch(() => null);
+          const same = (res?.items || []).filter((r) => nameKey(r.name) === nameKey(person.name));
+          if (same.length === 1) found = same[0];
+        }
+        if (found) found = toDirectoryOfficer(found, service);
+      } else if (person.id) {
+        for (const col of ['other_contacts', 'employees']) {
+          found = await pb.collection(col).getOne(person.id, { requestKey: null }).catch(() => null);
+          if (found) break;
+        }
+      }
+      if (alive) { setRecord(found); setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [person.id, person.name, person.type]);
+  return { record, loading };
 }
 
 export default function ParticipantHistory({ person, meetings, onClose, onOpenMeeting, onScheduleWith }: {
-  person: { id?: string; name: string };
+  person: Participant;
   meetings: any[];
   onClose: () => void;
   onOpenMeeting: (m: any) => void;
@@ -45,6 +95,8 @@ export default function ParticipantHistory({ person, meetings, onClose, onOpenMe
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
   }, [onClose]);
+  const { record, loading: recordLoading } = useDirectoryRecord(person);
+  const service = serviceOf(person.type);
 
   const now = new Date();
   const theirs = useMemo(() => meetings
@@ -58,14 +110,22 @@ export default function ParticipantHistory({ person, meetings, onClose, onOpenMe
     .sort((a, b) => a.at!.getTime() - b.at!.getTime());
   const completed = theirs.filter((x) => x.status === 'completed').length;
   const latest = theirs[0]?.m;
-  const contact = latest ? { phone: latest.contact_number, email: latest.email, designation: latest.designation } : null;
+  /* phone is only kept for the main participant; for the others, their saved e-mail / designation */
+  const asMain = theirs.find((x) => {
+    const main = meetingParticipants(x.m)[0];
+    return !!main && !!findIn(x.m, person, [main]);
+  })?.m;
+  const entry = latest ? findIn(latest, person) : undefined;
+  const contact = asMain
+    ? { phone: asMain.contact_number, email: asMain.email, designation: asMain.designation }
+    : entry ? { phone: '', email: entry.email, designation: entry.designation } : null;
 
   const initials = person.name.split(' ').map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
 
   return (
     <div className="fixed inset-0 z-[55]">
       <div className="anim-overlay absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={onClose} />
-      <aside className="anim-panel nice-scroll absolute right-0 top-0 flex h-full w-full flex-col overflow-y-auto bg-white shadow-2xl sm:max-w-lg">
+      <aside className="anim-panel nice-scroll absolute right-0 top-0 flex h-full w-full flex-col overflow-y-auto bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">
         <div className="h-1.5 w-full bg-gradient-to-r from-violet-500 via-indigo-500 to-sky-500" />
 
         {/* header */}
@@ -92,6 +152,12 @@ export default function ParticipantHistory({ person, meetings, onClose, onOpenMe
                 <Plus className="h-3.5 w-3.5" /> Schedule another meeting
               </button>
             )}
+            {service && record && (
+              <Link href={`/officers?open=${encodeURIComponent(`${service}:${record.id}`)}`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                <User className="h-3.5 w-3.5" /> Officer record
+              </Link>
+            )}
             {contact?.phone && (
               <a href={`tel:${String(contact.phone).replace(/\s+/g, '')}`}
                 className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
@@ -107,7 +173,10 @@ export default function ParticipantHistory({ person, meetings, onClose, onOpenMe
           </div>
         </div>
 
-        <div className="space-y-4 px-5 py-5">
+        <div className="space-y-4 bg-slate-50/60 px-5 py-5">
+          {/* the same profile as in the Officers directory */}
+          {service && record && <OfficerOccasions officer={record} />}
+
           {/* stats */}
           <div className="grid grid-cols-3 gap-2">
             <Stat label="Meetings" value={String(theirs.length)} sub={`${completed} completed`} />
@@ -144,6 +213,19 @@ export default function ParticipantHistory({ person, meetings, onClose, onOpenMe
               </ol>
             )}
           </Section>
+
+          {/* every detail of their record */}
+          {record ? (
+            <OfficerDetailsGrid officer={record} />
+          ) : recordLoading ? (
+            <p className="flex items-center gap-2 text-xs text-slate-400"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading their details…</p>
+          ) : (
+            <p className="rounded-2xl border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
+              {service
+                ? 'This person isn’t linked to a record in the Officers directory, so only the details saved with the meetings are shown.'
+                : 'No directory record for this person — only the details saved with the meetings are shown.'}
+            </p>
+          )}
         </div>
       </aside>
     </div>

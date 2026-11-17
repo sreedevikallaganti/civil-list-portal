@@ -1,0 +1,62 @@
+### Civillist API — click "Send Request" above each block (REST Client extension).
+### Pages like /officers or / return only an HTML shell; the DATA comes from PocketBase
+### through the app's /pb proxy:  /pb/api/collections/<collection>/records
+### Collections: meetings, ias_officers, ips_officers, other_contacts, employees, users
+
+@host = http://localhost:3000
+
+### 1. Is the app working?
+GET {{host}}/api/health
+
+### 2. Log in — run this first; the token is reused below as {{token}}
+# @name login
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "you@example.com",
+  "password": "your-password"
+}
+
+###
+@token = {{login.response.body.token}}
+
+### 3. Who am I?
+GET {{host}}/api/auth/me
+Authorization: {{token}}
+
+### 4. IAS officers (what /officers?type=ias shows) — first 50, A–Z
+GET {{host}}/pb/api/collections/ias_officers/records?perPage=50&sort=name
+Authorization: {{token}}
+
+### 5. IPS officers
+GET {{host}}/pb/api/collections/ips_officers/records?perPage=50&sort=name
+Authorization: {{token}}
+
+### 6. Other contacts
+GET {{host}}/pb/api/collections/other_contacts/records?perPage=50
+Authorization: {{token}}
+
+### 7. Search officers by name (PocketBase filter: ~ means "contains")
+GET {{host}}/pb/api/collections/ias_officers/records?perPage=20&filter=(name~'kumar')
+Authorization: {{token}}
+
+### 8. Meetings (what the Meetings page / dashboard show) — newest date first
+GET {{host}}/pb/api/collections/meetings/records?perPage=50&sort=-meeting_date
+Authorization: {{token}}
+
+### 9. Upcoming meetings only (on or after a date)
+GET {{host}}/pb/api/collections/meetings/records?perPage=50&sort=meeting_date&filter=(meeting_date>='2026-10-05')
+Authorization: {{token}}
+
+### 10. One meeting by id (replace the id)
+GET {{host}}/pb/api/collections/meetings/records/REPLACE_WITH_ID
+Authorization: {{token}}
+
+### 11. Employees
+GET {{host}}/pb/api/collections/employees/records?perPage=50
+Authorization: {{token}}
+
+### 12. Log out
+POST {{host}}/api/auth/logout
+Authorization: {{token}}

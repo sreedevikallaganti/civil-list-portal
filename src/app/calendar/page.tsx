@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Calendar as CalendarIcon, Clock, MapPin, Plus,
   ChevronLeft, ChevronRight, X, Edit3, Trash2,
@@ -8,8 +8,11 @@ import {
   ChevronRight as ChevronRightIcon, AlertCircle,
   Briefcase, Lightbulb, TrendingUp, GraduationCap,
   Presentation, ClipboardList, FolderKanban, MoreVertical, CalendarCheck, User, Loader2,
-  Sunrise, CalendarDays, CalendarRange, CalendarClock, History, Filter, RotateCcw
+  Sunrise, CalendarDays, CalendarRange, CalendarClock, History, Filter, RotateCcw,
+  Columns3, Search, Download, Check, AlertTriangle, Keyboard, Flame, CheckCircle2, GripVertical
 } from 'lucide-react';
+import WeekView from '@/components/calendar/WeekView';
+import { downloadIcs, findConflicts, isMovable, isoDate, startOfWeek } from '@/components/calendar/calendarTools';
 import pb from '@/lib/pocketbase';
 import CreateMeetingPanel from '@/components/CreateMeetingPanel';
 import UpdateMeetingPanel from '@/components/UpdateMeetingPanel';
@@ -18,8 +21,25 @@ import ProtectedRoute from '@/components/auth/ProtectedRoute';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { showToast } from '@/components/Toaster';
+import { serviceOf } from '@/lib/officerDirectory';
 
-type ViewMode = 'year' | 'month' | 'day' | 'agenda';
+type ViewMode = 'year' | 'month' | 'week' | 'day' | 'agenda';
+type TypeFilter = 'all' | 'IAS' | 'IPS' | 'IFS' | 'IRS' | 'Other';
+
+const VIEW_KEY = 'civillist:calendar-view';
+const STATUS_FILTERS = ['Scheduled', 'Rescheduled', 'Completed', 'Cancelled'] as const;
+
+/* IAS / IPS / IFS / IRS from officer_type, everything else (contacts, internal) is "Other" */
+const officerKind = (m: any): TypeFilter => serviceOf(m?.officer_type) ?? 'Other';
+
+/* "Completed" / "completed" / "Done" → the label used by STATUS_FILTERS */
+const statusLabel = (m: any) => {
+  const s = String(m?.status || 'Scheduled').toLowerCase();
+  if (/complete|done/.test(s)) return 'Completed';
+  if (/cancel|reject/.test(s)) return 'Cancelled';
+  if (/reschedul/.test(s)) return 'Rescheduled';
+  return 'Scheduled';
+};
 type OffCanvasMode = 'view' | 'day' | null;
 
 const MEETING_TYPE_ICONS: Record<string, React.ReactNode> = {
@@ -109,7 +129,26 @@ export default function CalendarPage() {
   const { logout } = useAuth();
 
   const [currentDate, setCurrentDate] = useState(new Date());
-  const [viewMode, setViewMode] = useState<ViewMode>('month');
+  /* last-used view is remembered per browser */
+  const [viewMode, setViewModeState] = useState<ViewMode>(() => {
+    try {
+      const v = typeof window !== 'undefined' ? localStorage.getItem(VIEW_KEY) : null;
+      return v === 'year' || v === 'month' || v === 'week' || v === 'day' || v === 'agenda' ? v : 'month';
+    } catch {
+      return 'month';
+    }
+  });
+  const setViewMode = (v: ViewMode) => {
+    setViewModeState(v);
+    try { localStorage.setItem(VIEW_KEY, v); } catch {}
+  };
+
+  /* search + filters — applied to every view */
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string[]>([]); // empty = all
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
   const [meetings, setMeetings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -122,7 +161,6 @@ export default function CalendarPage() {
   const [panelDate, setPanelDate] = useState<string>('');
   const [updateMeeting, setUpdateMeeting] = useState<any>(null);
 
-  const [agendaFilter, setAgendaFilter] = useState<string>('all');
   const [sectionPages, setSectionPages] = useState<Record<string, number>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
@@ -131,25 +169,33 @@ export default function CalendarPage() {
   const AGENDA_PAGE_SIZE = 5;
   const UPCOMING_PAGE_SIZE = 4;
 
-  const AGENDA_FILTERS = [
-    { value: 'all', label: 'All' },
-    { value: 'Scheduled', label: 'Scheduled' },
-    { value: 'Completed', label: 'Completed' },
-    { value: 'Cancelled', label: 'Cancelled' },
-    { value: 'Rescheduled', label: 'Rescheduled' },
+  const VIEW_TABS: { value: ViewMode; label: string; icon: any; key: string }[] = [
+    { value: 'day', label: 'Day', icon: CalendarClock, key: 'D' },
+    { value: 'week', label: 'Week', icon: Columns3, key: 'W' },
+    { value: 'month', label: 'Month', icon: CalendarIcon, key: 'M' },
+    { value: 'year', label: 'Year', icon: CalendarRange, key: 'Y' },
+    { value: 'agenda', label: 'Agenda', icon: CalendarDays, key: 'A' },
   ];
 
-  const VIEW_TABS: { value: ViewMode; label: string; icon: any }[] = [
-    { value: 'month', label: 'Month', icon: CalendarIcon },
-    { value: 'year', label: 'Year', icon: CalendarRange },
-    { value: 'day', label: 'Day', icon: CalendarClock },
-    { value: 'agenda', label: 'Agenda', icon: CalendarDays },
-  ];
+  /* meetings after search + filters — every view renders from this */
+  const shown = useMemo(() => {
+    const words = search.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    return meetings.filter((m) => {
+      if (statusFilter.length && !statusFilter.includes(statusLabel(m))) return false;
+      if (typeFilter !== 'all' && officerKind(m) !== typeFilter) return false;
+      if (!words.length) return true;
+      const text = [m.agenda, m.title, m.officer_name, m.designation, m.department, m.location, m.city, m.meeting_type]
+        .filter(Boolean).join(' ').toLowerCase();
+      return words.every((w) => text.includes(w));
+    });
+  }, [meetings, search, statusFilter, typeFilter]);
 
-  const applyAgendaFilter = (value: string) => {
-    setAgendaFilter(value);
-    setSectionPages({});
-  };
+  const filtersActive = !!search.trim() || statusFilter.length > 0 || typeFilter !== 'all';
+  const clearFilters = () => { setSearch(''); setStatusFilter([]); setTypeFilter('all'); };
+  const toggleStatus = (s: string) =>
+    setStatusFilter((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+
+  const conflicts = useMemo(() => findConflicts(meetings), [meetings]);
 
   const setSectionPage = (id: string, p: number) =>
     setSectionPages(prev => ({ ...prev, [id]: p }));
@@ -157,7 +203,7 @@ export default function CalendarPage() {
   const toggleSection = (id: string) =>
     setCollapsed(prev => ({ ...prev, [id]: !prev[id] }));
 
-  useEffect(() => { setSectionPages({}); }, [meetings, currentDate]);
+  useEffect(() => { setSectionPages({}); }, [shown, currentDate]);
 
   useEffect(() => { setShowAllUpcoming(false); }, [meetings]);
 
@@ -169,14 +215,18 @@ export default function CalendarPage() {
     }
   }, [offCanvasMode, panelOpen]);
 
+  /* Esc closes the day panel */
   useEffect(() => {
+    if (offCanvasMode !== 'day') return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (offCanvasMode === 'day') closeOffCanvas();
+      setOffCanvasMode(null);
+      setSelectedMeeting(null);
+      setSelectedDate(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  });
+  }, [offCanvasMode]);
 
   async function loadData() {
     try {
@@ -198,12 +248,11 @@ export default function CalendarPage() {
         return;
       }
 
-      if (err?.status === 400) {
-        setError('Server rejected the request (400). See browser console + PocketBase terminal for the exact cause — usually a broken API rule or an invalid sort/filter field.');
-      } else if (err?.status === 403) {
-        setError('You do not have permission to view meetings. Check the collection API rules.');
+      // the full error is logged above; 400 is usually a broken API rule or sort/filter field in PocketBase
+      if (err?.status === 403) {
+        setError('You don’t have permission to view meetings. Please ask your administrator.');
       } else {
-        setError(err?.message || 'Failed to load meetings');
+        setError('Couldn’t load the meetings — please try again.');
       }
     } finally {
       setLoading(false);
@@ -283,15 +332,24 @@ export default function CalendarPage() {
     const d = new Date(currentDate);
     const amount = dir === 'next' ? 1 : -1;
     if (viewMode === 'year') d.setFullYear(d.getFullYear() + amount);
-    else if (viewMode === 'month' || viewMode === 'agenda') d.setMonth(d.getMonth() + amount);
+    else if (viewMode === 'month' || viewMode === 'agenda') d.setMonth(d.getMonth() + amount, 1);
+    else if (viewMode === 'week') d.setDate(d.getDate() + amount * 7);
     else if (viewMode === 'day') d.setDate(d.getDate() + amount);
     setCurrentDate(d);
   };
 
   const goToToday = () => setCurrentDate(new Date());
 
+  const weekStart = startOfWeek(currentDate);
+
   const getHeaderLabel = () => {
     if (viewMode === 'year') return String(currentDate.getFullYear());
+    if (viewMode === 'week') {
+      const end = new Date(weekStart);
+      end.setDate(end.getDate() + 6);
+      const sameMonth = end.getMonth() === weekStart.getMonth();
+      return `${weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', sameMonth ? { day: 'numeric', year: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' })}`;
+    }
     if (viewMode === 'day') return currentDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
     return currentDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   };
@@ -348,6 +406,76 @@ export default function CalendarPage() {
     setUpdateMeeting(fresh || meeting);
   };
 
+  /* Drag-and-drop reschedule: opens the Update panel on "Rescheduled" with the new slot
+     pre-filled, so the usual checks (past dates, clashes) still apply before saving. */
+  const requestMove = async (meeting: any, date: string, time?: string) => {
+    if (!isMovable(meeting)) {
+      showToast('Completed or cancelled meetings can’t be moved.', 'error');
+      return;
+    }
+    if (date < isoDate(new Date())) {
+      showToast("Can't move a meeting to a past date — pick today or a future date.", 'error');
+      return;
+    }
+    const sameDay = getMeetingDateStr(meeting) === date;
+    const sameTime = !time || String(getMeetingTime(meeting)).slice(0, 5) === time;
+    if (sameDay && sameTime) return;
+    const fresh = await fetchFreshMeeting(meeting.id);
+    setUpdateMeeting({
+      ...(fresh || meeting),
+      __forceStatus: 'rescheduled',
+      __proposedDate: date,
+      __proposedTime: time || getMeetingTime(fresh || meeting),
+    });
+  };
+
+  const [dragMeetingId, setDragMeetingId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  const exportVisible = () => {
+    let from = '', to = '', label = '';
+    if (viewMode === 'day') { from = to = isoDate(currentDate); label = from; }
+    else if (viewMode === 'week') {
+      const end = new Date(weekStart); end.setDate(end.getDate() + 6);
+      from = isoDate(weekStart); to = isoDate(end); label = `week-${from}`;
+    } else if (viewMode === 'year') {
+      from = `${currentDate.getFullYear()}-01-01`; to = `${currentDate.getFullYear()}-12-31`; label = String(currentDate.getFullYear());
+    } else {
+      const y = currentDate.getFullYear(), mo = currentDate.getMonth();
+      from = isoDate(new Date(y, mo, 1)); to = isoDate(new Date(y, mo + 1, 0)); label = from.slice(0, 7);
+    }
+    const inRange = shown.filter((m) => { const d = getMeetingDateStr(m); return d >= from && d <= to; });
+    const n = downloadIcs(inRange, `meetings-${label}.ics`);
+    showToast(n ? `Exported ${n} meeting${n > 1 ? 's' : ''} — open the file to add them to Outlook / Google Calendar.` : 'No meetings to export in this period.', n ? 'success' : 'error');
+  };
+
+  /* Keyboard: ←/→ navigate · T today · D/W/M/Y/A views · N new · / search · ? help */
+  const onShortcut = (e: KeyboardEvent) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (offCanvasMode || panelOpen || updateMeeting) return;
+    const el = e.target as HTMLElement | null;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) {
+      if (e.key === 'Escape') (el as HTMLInputElement).blur();
+      return;
+    }
+    const k = e.key;
+    const views: Record<string, ViewMode> = { d: 'day', w: 'week', m: 'month', y: 'year', a: 'agenda' };
+    if (k === 'ArrowLeft') navigate('prev');
+    else if (k === 'ArrowRight') navigate('next');
+    else if (k.toLowerCase() === 't') goToToday();
+    else if (k.toLowerCase() === 'n') openCreate();
+    else if (k === '/') searchRef.current?.focus();
+    else if (k === '?') setShowShortcuts((v) => !v);
+    else if (views[k.toLowerCase()]) setViewMode(views[k.toLowerCase()]);
+    else return;
+    e.preventDefault();
+  };
+  // re-subscribed every render so the handler always sees the current view / date
+  useEffect(() => {
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
+  });
+
   const closePanel = () => {
     setPanelOpen(false);
     setEditingMeeting(null);
@@ -393,7 +521,7 @@ export default function CalendarPage() {
       const d = new Date(today);
       d.setDate(d.getDate() + i);
       const dateStr = formatDateForInput(d);
-      meetings
+      shown
         .filter(m => getMeetingDateStr(m) === dateStr)
         .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)))
         .forEach(m => items.push({
@@ -531,7 +659,7 @@ export default function CalendarPage() {
     today.setHours(0, 0, 0, 0);
     const todayStr = formatDateForInput(today);
 
-    const todayMeetings = meetings
+    const todayMeetings = shown
       .filter(m => getMeetingDateStr(m) === todayStr)
       .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)))
       .slice(0, 3);
@@ -556,7 +684,7 @@ export default function CalendarPage() {
 
                 const cellDate = new Date(year, month, day);
                 const dateStr = formatDateForInput(cellDate);
-                const dayMeetings = meetings
+                const dayMeetings = shown
                   .filter(m => getMeetingDateStr(m) === dateStr)
                   .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
                 const isToday = cellDate.toDateString() === new Date().toDateString();
@@ -565,11 +693,25 @@ export default function CalendarPage() {
                   <div
                     key={index}
                     onClick={() => openDayDetails(cellDate)}
+                    onDragOver={(e) => {
+                      if (!dragMeetingId) return;
+                      e.preventDefault();
+                      if (dropTarget !== dateStr) setDropTarget(dateStr);
+                    }}
+                    onDragLeave={() => setDropTarget((t) => (t === dateStr ? null : t))}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const m = meetings.find((x) => x.id === dragMeetingId);
+                      setDropTarget(null);
+                      setDragMeetingId(null);
+                      if (m) requestMove(m, dateStr);
+                    }}
                     className={`group relative min-h-[140px] cursor-pointer border-b border-r border-slate-100 p-2.5 transition-all duration-200 hover:bg-violet-50/30 ${
-                      isToday ? 'bg-violet-50/50' : 'bg-white'
+                      dropTarget === dateStr ? '!bg-violet-100/70' : isToday ? 'bg-violet-50/50' : 'bg-white'
                     }`}
                   >
                     {isToday && <span className="pointer-events-none absolute inset-0 ring-2 ring-inset ring-violet-500/40" />}
+                    {dropTarget === dateStr && <span className="pointer-events-none absolute inset-1 rounded-xl border-2 border-dashed border-violet-400" />}
 
                     <div className="mb-2 flex items-center justify-between">
                       <span className={`flex h-8 w-8 items-center justify-center rounded-xl text-sm font-bold transition-all duration-200 ${
@@ -593,11 +735,24 @@ export default function CalendarPage() {
                           <button
                             key={m.id || i}
                             type="button"
+                            draggable={isMovable(m)}
+                            onDragStart={(e) => {
+                              e.stopPropagation();
+                              e.dataTransfer.setData('text/plain', m.id);
+                              e.dataTransfer.effectAllowed = 'move';
+                              setDragMeetingId(m.id);
+                            }}
+                            onDragEnd={() => { setDragMeetingId(null); setDropTarget(null); }}
                             onClick={(e) => { e.stopPropagation(); openMeeting(m); }}
-                            className={`w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-2 text-left transition-all duration-200 hover:translate-x-1 hover:shadow-md hover:shadow-slate-200/70 ${color.light} ${color.border}`}
+                            title={`${getMeetingTitle(m)}${conflicts.has(m.id) ? ' · overlaps another meeting' : ''}${isMovable(m) ? '\nDrag to another day to reschedule' : ''}`}
+                            className={`group/chip w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-2 text-left transition-all duration-200 hover:translate-x-1 hover:shadow-md hover:shadow-slate-200/70 ${color.light} ${color.border} ${
+                              isMovable(m) ? 'cursor-grab active:cursor-grabbing' : ''
+                            } ${dragMeetingId === m.id ? 'opacity-40' : ''}`}
                           >
                             <div className={`flex items-center gap-1.5 ${color.text}`}>
-                              <span className="shrink-0">{getMeetingIcon(getMeetingType(m))}</span>
+                              <span className="shrink-0">
+                                {conflicts.has(m.id) ? <AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> : getMeetingIcon(getMeetingType(m))}
+                              </span>
                               <span className="truncate text-[11px] font-semibold">{getMeetingTitle(m)}</span>
                             </div>
                             <p className="mt-1 pl-5 text-[10px] font-medium text-slate-500 tabular-nums">
@@ -678,7 +833,7 @@ export default function CalendarPage() {
                   if (!day) return <span key={index} className="h-7" />;
                   const d = new Date(year, month, day);
                   const dStr = formatDateForInput(d);
-                  const hasMeeting = meetings.some(m => getMeetingDateStr(m) === dStr);
+                  const hasMeeting = shown.some(m => getMeetingDateStr(m) === dStr);
                   const isToday = d.toDateString() === new Date().toDateString();
                   return (
                     <button type="button" key={index} onClick={() => { setCurrentDate(d); setViewMode('day'); }} className={`relative mx-auto h-7 w-7 rounded-full text-[10px] font-semibold transition-all duration-200 active:scale-90 ${isToday ? 'bg-slate-900 font-bold text-white shadow-md' : 'text-slate-600 hover:bg-violet-50 hover:text-violet-600'}`}>
@@ -690,23 +845,61 @@ export default function CalendarPage() {
               </div>
             </div>
 
-            {/* Calendars legend */}
-            <div className={`${CARD} ${CARD_HOVER} cal-fade-up p-4`} style={{ animationDelay: '240ms' }}>
-              <h3 className="mb-3 text-sm font-bold text-slate-900">Calendars</h3>
-              <div className="space-y-2">
-                {[
-                  ['All Meetings', 'bg-gradient-to-r from-violet-500 to-indigo-500'],
-                  ['General', 'bg-gradient-to-r from-violet-400 to-purple-500'],
-                  ['Official', 'bg-gradient-to-r from-emerald-400 to-teal-500'],
-                  ['Personal', 'bg-gradient-to-r from-amber-400 to-orange-400'],
-                ].map(([label, dot]) => (
-                  <div key={label} className="-mx-2 flex cursor-default items-center gap-2.5 rounded-lg px-2 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50">
-                    <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} />
-                    <span className="truncate">{label}</span>
+            {/* Month insights */}
+            {(() => {
+              const prefix = `${year}-${String(month + 1).padStart(2, '0')}`;
+              const inMonth = shown.filter((m) => getMeetingDateStr(m).startsWith(prefix));
+              const done = inMonth.filter((m) => statusLabel(m) === 'Completed').length;
+              const perDay = new Map<string, number>();
+              inMonth.forEach((m) => perDay.set(getMeetingDateStr(m), (perDay.get(getMeetingDateStr(m)) ?? 0) + 1));
+              const busiest = [...perDay.entries()].sort((a, b) => b[1] - a[1])[0];
+              const clashes = inMonth.filter((m) => conflicts.has(m.id)).length;
+              let freeDays = 0;
+              for (let d = Math.max(1, today.getFullYear() === year && today.getMonth() === month ? today.getDate() : 1); d <= daysInMonth; d++) {
+                const cd = new Date(year, month, d);
+                if (cd < today || cd.getDay() === 0 || cd.getDay() === 6) continue;
+                if (!perDay.has(formatDateForInput(cd))) freeDays++;
+              }
+              const busiestDate = busiest ? new Date(`${busiest[0]}T00:00:00`) : null;
+              return (
+                <div className={`${CARD} ${CARD_HOVER} cal-fade-up p-4`} style={{ animationDelay: '240ms' }}>
+                  <h3 className="text-sm font-bold text-slate-900">This month</h3>
+                  <p className="mt-0.5 text-[11px] text-slate-400">{currentDate.toLocaleDateString('en-US', { month: 'long' })}{filtersActive ? ' · filtered' : ''}</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <div className="rounded-2xl bg-violet-50/70 px-3 py-2.5">
+                      <p className="text-lg font-extrabold leading-none text-slate-900 tabular-nums">{inMonth.length}</p>
+                      <p className="mt-1 text-[10px] font-medium text-slate-500">Meetings</p>
+                    </div>
+                    <div className="rounded-2xl bg-emerald-50/70 px-3 py-2.5">
+                      <p className="text-lg font-extrabold leading-none text-slate-900 tabular-nums">{done}</p>
+                      <p className="mt-1 text-[10px] font-medium text-slate-500">Completed</p>
+                    </div>
                   </div>
-                ))}
-              </div>
-            </div>
+                  <ul className="mt-3 space-y-1">
+                    <li>
+                      <button type="button" disabled={!busiestDate} onClick={() => busiestDate && openDayDetails(busiestDate)}
+                        className="-mx-2 flex w-[calc(100%+1rem)] items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs text-slate-600 transition-colors enabled:hover:bg-slate-50">
+                        <Flame className="h-3.5 w-3.5 shrink-0 text-orange-500" />
+                        <span className="flex-1">Busiest day</span>
+                        <span className="font-semibold text-slate-800">
+                          {busiestDate ? `${busiestDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · ${busiest![1]}` : '—'}
+                        </span>
+                      </button>
+                    </li>
+                    <li className="-mx-2 flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-xs text-slate-600">
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                      <span className="flex-1">Free weekdays left</span>
+                      <span className="font-semibold text-slate-800">{freeDays}</span>
+                    </li>
+                    <li className="-mx-2 flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-xs text-slate-600">
+                      <AlertTriangle className={`h-3.5 w-3.5 shrink-0 ${clashes ? 'text-amber-500' : 'text-slate-300'}`} />
+                      <span className="flex-1">Overlapping meetings</span>
+                      <span className={`font-semibold ${clashes ? 'text-amber-600' : 'text-slate-800'}`}>{clashes}</span>
+                    </li>
+                  </ul>
+                </div>
+              );
+            })()}
           </aside>
         </div>
 
@@ -721,7 +914,7 @@ export default function CalendarPage() {
     const today = new Date();
     const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const dayLetters = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-    const meetingDates = new Set(meetings.map(m => getMeetingDateStr(m)).filter(Boolean));
+    const meetingDates = new Set(shown.map(m => getMeetingDateStr(m)).filter(Boolean));
 
     return (
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -736,7 +929,7 @@ export default function CalendarPage() {
 
           const isCurrentMonth = year === today.getFullYear() && mi === today.getMonth();
           const monthPrefix = `${year}-${String(mi + 1).padStart(2, '0')}`;
-          const monthCount = meetings.filter(m => getMeetingDateStr(m).startsWith(monthPrefix)).length;
+          const monthCount = shown.filter(m => getMeetingDateStr(m).startsWith(monthPrefix)).length;
 
           return (
             <div key={mi} className={`${CARD} ${CARD_HOVER} cal-fade-up p-4`} style={{ animationDelay: `${mi * 40}ms` }}>
@@ -791,7 +984,7 @@ export default function CalendarPage() {
   /* ─── Day View ─── */
   const renderDayView = () => {
     const dateStr = formatDateForInput(currentDate);
-    const dayMeetings = meetings.filter(m => getMeetingDateStr(m) === dateStr).sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
+    const dayMeetings = shown.filter(m => getMeetingDateStr(m) === dateStr).sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
     const hours = Array.from({ length: 12 }, (_, i) => i + 8);
     const isTodayView = currentDate.toDateString() === new Date().toDateString();
     const nowHour = new Date().getHours();
@@ -888,11 +1081,9 @@ export default function CalendarPage() {
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const filtered = meetings.filter(m => {
+    const filtered = shown.filter(m => {
       const d = getMeetingDateStr(m);
-      if (!d.startsWith(monthPrefix)) return false;
-      if (agendaFilter === 'all') return true;
-      return (m.status || 'Scheduled') === agendaFilter;
+      return d.startsWith(monthPrefix);
     });
 
     const byDate = new Map<string, any[]>();
@@ -905,27 +1096,6 @@ export default function CalendarPage() {
 
     return (
       <div className="space-y-4">
-        {/* Filter pills */}
-        <div className={`${CARD} flex flex-wrap items-center gap-2 p-3.5`}>
-          <span className="mr-1 inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-            <Filter className="h-3.5 w-3.5" /> Status
-          </span>
-          {AGENDA_FILTERS.map(f => (
-            <button
-              key={f.value}
-              type="button"
-              onClick={() => applyAgendaFilter(f.value)}
-              className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-all ${
-                agendaFilter === f.value
-                  ? 'bg-slate-900 text-white shadow-sm'
-                  : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
-              }`}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
         {sortedDates.length === 0 ? (
           <div className={`${CARD} flex flex-col items-center justify-center py-16 text-center`}>
             <div className="relative">
@@ -1058,14 +1228,14 @@ export default function CalendarPage() {
   if (loading && meetings.length === 0) {
     return (
       <ProtectedRoute>
-        <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+        <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
           <style>{ANIM_CSS}</style>
           <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
             <div className="cal-float absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
             <div className="cal-float absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" style={{ animationDelay: '-6s' }} />
           </div>
 
-          <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+          <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
             <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5 sm:px-6">
               <div className="flex items-center gap-3">
                 <div className="cal-skeleton h-9 w-9 !rounded-xl" />
@@ -1077,7 +1247,7 @@ export default function CalendarPage() {
               <div className="cal-skeleton h-10 w-36 !rounded-full" />
             </div>
 
-            <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+            <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
               <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
                 {[...Array(4)].map((_, i) => (
                   <div key={i} className="cal-skeleton h-[130px] !rounded-3xl" style={{ animationDelay: `${i * 80}ms` }} />
@@ -1095,7 +1265,7 @@ export default function CalendarPage() {
   /* ─── Main View ─── */
   return (
     <ProtectedRoute>
-      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
         <style>{ANIM_CSS}</style>
 
         <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
@@ -1104,10 +1274,10 @@ export default function CalendarPage() {
           <div className="cal-float absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" style={{ animationDelay: '-12s' }} />
         </div>
 
-        <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+        <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
 
           {/* ── App bar ── */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
+          <div className="relative z-30 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
             <div className="flex min-w-0 items-center gap-3">
               <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
                 <CalendarIcon className="h-4 w-4" />
@@ -1126,9 +1296,39 @@ export default function CalendarPage() {
             </div>
 
             <div className="flex items-center gap-2">
+                <button type="button" onClick={exportVisible} title="Download the meetings in this view as an .ics file (Outlook, Google Calendar, Apple Calendar)"
+                  className="inline-flex h-10 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600 transition-all hover:-translate-y-0.5 hover:border-violet-200 hover:text-violet-700 active:scale-95">
+                  <Download className="h-3.5 w-3.5" /> Export
+                </button>
+                <div className="relative">
+                  <button type="button" onClick={() => setShowShortcuts((v) => !v)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)"
+                    className={`flex h-10 w-10 items-center justify-center rounded-full border transition-all ${showShortcuts ? 'border-violet-200 bg-violet-50 text-violet-600' : 'border-slate-200 bg-white text-slate-500 hover:text-violet-600'}`}>
+                    <Keyboard className="h-4 w-4" />
+                  </button>
+                  {showShortcuts && (
+                    <div className="cal-scale-in absolute right-0 top-12 z-30 w-64 rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200">
+                      <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">Keyboard shortcuts</p>
+                      {[
+                        ['← / →', 'Previous / next'],
+                        ['T', 'Jump to today'],
+                        ['D W M Y A', 'Day · Week · Month · Year · Agenda'],
+                        ['N', 'New meeting'],
+                        ['/', 'Search'],
+                        ['?', 'Show / hide this'],
+                      ].map(([k, label]) => (
+                        <div key={k} className="flex items-center justify-between gap-3 py-1 text-xs">
+                          <span className="text-slate-600">{label}</span>
+                          <kbd className="shrink-0 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{k}</kbd>
+                        </div>
+                      ))}
+                      <p className="mt-2 border-t border-slate-100 pt-2 text-[11px] leading-relaxed text-slate-400">Tip: drag a meeting to another day (or time, in Week view) to reschedule it.</p>
+                    </div>
+                  )}
+                </div>
               <button
                 type="button"
                 onClick={openCreate}
+                data-tooltip="Schedule a new meeting  ·  shortcut N"
                 className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
               >
                 <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
@@ -1138,7 +1338,7 @@ export default function CalendarPage() {
           </div>
 
           {/* ── Content ── */}
-          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+          <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
 
             {/* Error banner */}
             {error && (
@@ -1177,6 +1377,7 @@ export default function CalendarPage() {
                     type="button"
                     onClick={() => navigate('prev')}
                     aria-label="Previous"
+                    data-tooltip={`Previous ${viewMode === "agenda" ? "month" : viewMode}  ·  shortcut ←`}
                     className="flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-violet-50 hover:text-violet-600 active:scale-90"
                   >
                     <ChevronLeft className="h-4 w-4" />
@@ -1184,6 +1385,7 @@ export default function CalendarPage() {
                   <button
                     type="button"
                     onClick={goToToday}
+                    data-tooltip="Jump to today  ·  shortcut T"
                     className="rounded-full px-3.5 py-1.5 text-xs font-bold text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-600 active:scale-95"
                   >
                     Today
@@ -1192,6 +1394,7 @@ export default function CalendarPage() {
                     type="button"
                     onClick={() => navigate('next')}
                     aria-label="Next"
+                    data-tooltip={`Next ${viewMode === "agenda" ? "month" : viewMode}  ·  shortcut →`}
                     className="flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-violet-50 hover:text-violet-600 active:scale-90"
                   >
                     <ChevronRight className="h-4 w-4" />
@@ -1209,6 +1412,7 @@ export default function CalendarPage() {
                         type="button"
                         onClick={() => setViewMode(tab.value)}
                         aria-pressed={active}
+                        data-tooltip={`${tab.label} view  ·  shortcut ${tab.key}`}
                         className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold transition-all duration-200 ${
                           active
                             ? 'bg-slate-900 text-white shadow-sm'
@@ -1224,7 +1428,87 @@ export default function CalendarPage() {
               </div>
             </div>
 
+            {/* Search · filters · export */}
+            <div className={`${CARD} cal-fade-up flex flex-wrap items-center gap-2.5 p-3`} style={{ animationDelay: '30ms' }}>
+              <div className="relative min-w-[200px] flex-1 sm:max-w-xs">
+                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  ref={searchRef}
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search meetings, officers, places…"
+                  aria-label="Search meetings"
+                  className="h-10 w-full rounded-full border border-slate-200 bg-slate-50/80 pl-10 pr-9 text-sm text-slate-900 placeholder-slate-400 transition-all hover:border-slate-300 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                />
+                {search ? (
+                  <button type="button" onClick={() => setSearch('')} aria-label="Clear search"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-full p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                ) : (
+                  <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-1.5 text-[10px] font-semibold text-slate-400">/</kbd>
+                )}
+              </div>
+
+              {/* status chips (multi-select) */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Filter className="h-3.5 w-3.5 text-slate-400" />
+                {STATUS_FILTERS.map((s) => {
+                  const on = statusFilter.includes(s);
+                  return (
+                    <button key={s} type="button" onClick={() => toggleStatus(s)} aria-pressed={on}
+                      data-tooltip={on ? `Showing ${s} meetings — click to remove this filter` : `Show only ${s} meetings (pick several to combine)`}
+                      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ring-1 ring-inset transition-all active:scale-95 ${
+                        on ? `${STATUS_COLORS[s]} shadow-sm` : 'bg-white text-slate-400 ring-slate-200 hover:text-slate-600 hover:ring-slate-300'
+                      }`}>
+                      {on ? <Check className="h-3 w-3" strokeWidth={3} /> : <span className={`h-1.5 w-1.5 rounded-full opacity-50 ${STATUS_DOTS[s]}`} />}
+                      {s}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* officer type */}
+              <div className="flex items-center rounded-full bg-slate-100 p-1">
+                {(['all', 'IAS', 'IPS', 'IFS', 'IRS', 'Other'] as TypeFilter[]).map((t) => (
+                  <button key={t} type="button" onClick={() => setTypeFilter(t)} aria-pressed={typeFilter === t}
+                    data-tooltip={t === 'all' ? 'Meetings with everyone' : t === 'Other' ? 'Meetings with contacts and employees' : `Meetings with ${t} officers`}
+                    className={`rounded-full px-3 py-1 text-xs font-semibold transition-all ${typeFilter === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                    {t === 'all' ? 'All' : t}
+                  </button>
+                ))}
+              </div>
+
+              {filtersActive && (
+                <button type="button" onClick={clearFilters}
+                  className="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs font-semibold text-violet-600 hover:bg-violet-50">
+                  <RotateCcw className="h-3.5 w-3.5" /> Reset · {shown.length} of {meetings.length}
+                </button>
+              )}
+
+            </div>
+
             {/* View content */}
+            {viewMode === 'week' && (
+              <section className={`${CARD} overflow-hidden cal-fade-up`} style={{ animationDelay: '60ms' }}>
+                <WeekView
+                  weekStart={weekStart}
+                  meetings={shown}
+                  conflicts={conflicts}
+                  getTitle={getMeetingTitle}
+                  getColor={getMeetingVisualColor}
+                  onOpen={openMeeting}
+                  onCreate={openCreateForDate}
+                  onMove={requestMove}
+                />
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-slate-100 bg-slate-50/60 px-5 py-2.5 text-[11px] text-slate-400">
+                  <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-4 bg-rose-500" /> Now</span>
+                  <span className="inline-flex items-center gap-1.5"><AlertTriangle className="h-3 w-3 text-amber-500" /> Overlaps another meeting</span>
+                  <span className="inline-flex items-center gap-1.5"><GripVertical className="h-3 w-3" /> Drag to reschedule · click an empty slot to add</span>
+                </div>
+              </section>
+            )}
             {viewMode === 'month' && renderMonthView()}
             {viewMode === 'year' && renderYearView()}
             {viewMode === 'day' && renderDayView()}
@@ -1250,7 +1534,7 @@ export default function CalendarPage() {
         {/* ── Off-canvas: day details ── */}
         {offCanvasMode === 'day' && selectedDate && (() => {
           const dateStr = formatDateForInput(selectedDate);
-          const dayMeetings = meetings
+          const dayMeetings = shown
             .filter(m => getMeetingDateStr(m) === dateStr)
             .sort((a, b) => getMeetingTime(a).localeCompare(getMeetingTime(b)));
           const isPastSelectedDate = isPastDate(selectedDate);
@@ -1271,6 +1555,7 @@ export default function CalendarPage() {
                       <button
                         type="button"
                         onClick={closeOffCanvas}
+                        aria-label="Close" data-tooltip="Close  ·  Esc"
                         className="-mr-2 -mt-1 rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
                       >
                         <X className="h-5 w-5" />

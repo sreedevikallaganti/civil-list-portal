@@ -9,8 +9,9 @@ import PhotoLightbox from "@/components/memories/PhotoLightbox";
 import MemoryStyles from "@/components/memories/MemoryStyles";
 
 const MAX_PHOTOS = 10;
-const MISSING_FIELD_MSG =
-  'Photos can’t be saved yet — the "meetings" collection needs a File field named "photos" (ask the PocketBase admin).';
+const MISSING_FIELD_MSG = 'Photos can’t be saved yet. Please ask your administrator.';
+/* for the developer (console) */
+const MISSING_FIELD_HINT = '[photos] the "meetings" collection needs a File field named "photos" (PocketBase)';
 const ACCEPT = ["image/jpeg", "image/png", "image/webp"];
 
 type Props<T extends MemoryMeeting> = {
@@ -68,7 +69,7 @@ export default function MeetingPhotos<T extends MemoryMeeting>({ meeting, onChan
       const data = new FormData();
       compressed.forEach((f) => data.append("photos+", f)); // "+" = append to existing photos
       const rec = await pb.collection("meetings").update<T>(current.id, data);
-      if (!("photos" in rec)) throw new Error(MISSING_FIELD_MSG);
+      if (!("photos" in rec)) { console.warn(MISSING_FIELD_HINT); throw new Error(MISSING_FIELD_MSG); }
       saved(rec);
     } catch (err) {
       console.error("[MeetingPhotos] upload failed", err);

@@ -10,11 +10,12 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import pb from '@/lib/pocketbase';
+import { OFFICER_COLLECTION, positionOf, serviceOf, type OfficerService } from '@/lib/officerDirectory';
 
 export type LivePerson = {
   id: string;
   name: string;
-  type: 'IAS' | 'IPS' | 'Other';
+  type: OfficerService | 'Other';
   designation: string;
   email: string;
   phone: string;
@@ -25,8 +26,10 @@ export type LivePerson = {
 type AnyMeeting = Record<string, any>;
 
 const SOURCES: Record<LivePerson['type'], string[]> = {
-  IAS: ['ias_officers'],
-  IPS: ['ips_officers'],
+  IAS: [OFFICER_COLLECTION.IAS],
+  IPS: [OFFICER_COLLECTION.IPS],
+  IFS: [OFFICER_COLLECTION.IFS],
+  IRS: [OFFICER_COLLECTION.IRS],
   Other: ['other_contacts', 'employees'],
 };
 
@@ -35,8 +38,7 @@ const day10 = (v: unknown) => {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 };
 const typeOf = (m: AnyMeeting): LivePerson['type'] => {
-  const t = String(m.officer_type || '').toUpperCase();
-  return t.includes('IAS') ? 'IAS' : t.includes('IPS') ? 'IPS' : 'Other';
+  return serviceOf(m.officer_type) ?? 'Other';
 };
 
 async function fetchByIds(collection: string, ids: string[], type: LivePerson['type']): Promise<LivePerson[]> {
@@ -50,7 +52,7 @@ async function fetchByIds(collection: string, ids: string[], type: LivePerson['t
           id: o.id,
           name: o.name || '',
           type,
-          designation: o.current_position || o.designation || o.rank || '',
+          designation: type === 'Other' ? o.current_position || o.designation || o.rank || '' : positionOf(o),
           email: o.email || '',
           phone: o.contact_number || o.mobile_no || o.phone || '',
           dob: day10(o.date_of_birth),
@@ -66,7 +68,7 @@ async function fetchByIds(collection: string, ids: string[], type: LivePerson['t
 
 /** Today's directory records for everyone referenced by these meetings (keyed by officer_id). */
 export async function loadLivePeople(meetings: AnyMeeting[]): Promise<Map<string, LivePerson>> {
-  const wanted: Record<LivePerson['type'], Set<string>> = { IAS: new Set(), IPS: new Set(), Other: new Set() };
+  const wanted: Record<LivePerson['type'], Set<string>> = { IAS: new Set(), IPS: new Set(), IFS: new Set(), IRS: new Set(), Other: new Set() };
   for (const m of meetings) if (m.officer_id) wanted[typeOf(m)].add(String(m.officer_id));
 
   const lists = await Promise.all(

@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from 'react';
 import { ClientResponseError } from 'pocketbase';
+import { logActivity } from '@/lib/activity';
 import {
   AUTH_COLLECTION,
   getCurrentUser,
@@ -18,6 +19,9 @@ import {
   pb,
   type PortalUser,
 } from '@/lib/pocketbase';
+
+/** PocketBase's built-in owner accounts (dashboard superusers). */
+const SUPERUSERS = '_superusers';
 
 /* ================================================================== */
 /*  Types                                                              */
@@ -63,7 +67,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // A token exists (persisted by the SDK in localStorage).
         // Validate it against PocketBase — catches expired/revoked tokens.
         try {
-          await pb.collection(AUTH_COLLECTION).authRefresh();
+          // refresh against the collection the session came from ("users" or PocketBase "_superusers")
+          const from = (pb.authStore.record as { collectionName?: string } | null)?.collectionName;
+          await pb.collection(from === SUPERUSERS ? SUPERUSERS : AUTH_COLLECTION).authRefresh();
           if (mounted) setUser(getCurrentUser());
         } catch (error) {
           if (error instanceof ClientResponseError && error.status === 0) {
@@ -101,14 +107,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /* ---------------------------------------------------------------- */
-  /* 3. Login — authenticates your two EXISTING users, creates none    */
+  /* 3. Login — ONE sign-in for everyone                               */
+  /*    Tries the app's "users" collection (Admin, Super Admin, Editor, */
+  /*    Viewer — set by the role field). If the email/password isn't    */
+  /*    there, tries PocketBase's own "_superusers" (database owners).  */
   /* ---------------------------------------------------------------- */
   const login = useCallback(
     async (email: string, password: string): Promise<LoginResult> => {
+      const id = email.trim().toLowerCase();
       try {
-        await pb
-          .collection(AUTH_COLLECTION)
-          .authWithPassword(email.trim().toLowerCase(), password);
+        try {
+          await pb.collection(AUTH_COLLECTION).authWithPassword(id, password);
+        } catch (first) {
+          // 400 = wrong email/password for "users" → it may be a PocketBase superuser
+          if (!(first instanceof ClientResponseError) || first.status !== 400) throw first;
+          try {
+            await pb.collection(SUPERUSERS).authWithPassword(id, password);
+          } catch {
+            throw first; // neither matched → one plain "invalid email or password"
+          }
+        }
 
         const authUser = getCurrentUser();
 
@@ -133,6 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         setUser(authUser);
+        logActivity('login', 'auth', `${authUser.name || authUser.email || 'User'} signed in`, authUser.id);
         return { ok: true, user: authUser };
       } catch (error) {
         pb.authStore.clear();
@@ -146,7 +165,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   /* 4. Logout                                                         */
   /* ---------------------------------------------------------------- */
   const logout = useCallback(() => {
-    // Removes token + record from the auth store and localStorage.
+    // record the sign-out while the session is still valid, then remove token + record
+    const who = pb.authStore.record as { id?: string; name?: string; email?: string } | null;
+    if (pb.authStore.isValid) logActivity('logout', 'auth', `${who?.name || who?.email || 'User'} signed out`, who?.id || '');
     pb.authStore.clear();
     setUser(null);
   }, []);

@@ -215,9 +215,10 @@ export function daysAgoStamp(days: number) {
 }
 
 /* ── Fetch only recent records (newest first), capped — for fast-growing logs ── */
+/** Newest records first, created in the last `days` days (`days <= 0` = any age), at most `cap`. */
 export async function fetchRecentRecords(collection: string, days: number, cap = 2000): Promise<RecordItem[]> {
-  const PER = 200;
-  const filter = `created >= "${daysAgoStamp(days)}"`;
+  const PER = Math.min(200, cap);
+  const filter = days > 0 ? `created >= "${daysAgoStamp(days)}"` : '';
   const first = await pb.collection(collection).getList(1, PER, { sort: '-created', filter });
   const all: any[] = [...first.items];
   const pages = Math.min(first.totalPages ?? 1, Math.ceil(cap / PER));

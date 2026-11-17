@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// ⚠ Superseded by scripts/multi-tenant-pocketbase.mjs (organisation-scoped rules). Don't run this
+//   after that one: its viewer check (`permissions !~ "viewer"`) also blocks users whose
+//   permissions field is empty.
 // scripts/lock-pocketbase.mjs — applies the access rules + timestamp fields from
 // pb_migrations/1790700000_timestamps_and_roles.js through the PocketBase API,
 // for when you can use the dashboard but can't copy files onto the server.
@@ -13,9 +16,10 @@ import fs from 'node:fs';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 
-const STAMPED = ['meetings', 'other_contacts', 'ias_officers', 'ips_officers', 'employees', 'deleted_records'];
+const DIRECTORY = ['ias_directory', 'ips_directory', 'ifs_directory', 'irs_directory']; // the officers directory (shared by all organisations)
+const STAMPED = ['meetings', 'other_contacts', ...DIRECTORY, 'employees', 'deleted_records'];
 const LOCKED = [
-  'meetings', 'other_contacts', 'ias_officers', 'ips_officers', 'employees', 'users',
+  'meetings', 'other_contacts', ...DIRECTORY, 'employees', 'users',
   'deleted_records', 'activity_logs', 'update_logs', 'meeting_actions',
 ];
 const SIGNED_IN = '@request.auth.id != ""';
@@ -40,7 +44,7 @@ function pbUrl() {
     const m = env.match(/^\s*(?:POCKETBASE_URL|NEXT_PUBLIC_POCKETBASE_URL)\s*=\s*(\S+)/m);
     if (m) return m[1].replace(/["']/g, '').replace(/\/+$/, '');
   } catch { /* no .env.local */ }
-  return 'http://172.30.0.200:8091';
+  throw new Error('PocketBase address not found — set POCKETBASE_URL in .env.local (or in the environment).');
 }
 
 async function api(base, path, { token, method = 'GET', body } = {}) {

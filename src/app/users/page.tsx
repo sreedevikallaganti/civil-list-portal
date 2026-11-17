@@ -4,10 +4,11 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Search, ChevronLeft, ChevronRight, User, Users, Building2, Shield,
   X, Mail, Phone, Plus, Database, Loader2, ArrowRight, ArrowUpRight,
-  Pencil, Trash2, RefreshCw, CheckCircle2, AlertCircle, KeyRound,
+  Pencil, Trash2, RefreshCw, CheckCircle2, AlertCircle, AlertTriangle, KeyRound,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import CreateUserPanel from '@/components/users/CreateUserPanel';
+import { DEPARTMENTS, canonicalDepartment, departmentError } from '@/lib/departments';
 
 /* --------------------------- Department Color Configuration --------------------------- */
 
@@ -117,6 +118,9 @@ function getDeptConfig(dept?: string) {
 const ARCHIVE_COLLECTION = 'deleted_records';
 
 const PER_PAGE_OPTIONS = [10, 25, 50];
+
+/* Hover tooltip on the Pending KPI card and every Pending badge */
+const PENDING_HINT = 'Pending users can be verified through PocketBase only.';
 
 function getPaginationRange(current: number, total: number): (number | 'dots')[] {
   if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
@@ -257,6 +261,10 @@ export default function UsersPage() {
   const [pendingCount, setPendingCount] = useState(0);
   const [deptCount, setDeptCount] = useState(0);
 
+  /* Departments KPI card — slide-down breakdown of users per department */
+  const [deptBreakdown, setDeptBreakdown] = useState<{ name: string; count: number }[]>([]);
+  const [deptPanelOpen, setDeptPanelOpen] = useState(false);
+
   /* Pagination state */
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -367,6 +375,13 @@ export default function UsersPage() {
       setAllDepartments(
         ['All', ...Array.from(new Set(all.map((u: any) => u.department).filter(Boolean) as string[])).sort()]
       );
+      /* keyed by the raw stored value so picking one matches the department filter exactly */
+      const perDept = new Map<string, number>();
+      all.forEach((u: any) => { if (u.department) perDept.set(u.department, (perDept.get(u.department) || 0) + 1); });
+      setDeptBreakdown(
+        Array.from(perDept, ([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+      );
     } catch { /* non-critical */ }
   }
 
@@ -380,6 +395,19 @@ export default function UsersPage() {
     /* Smooth-scroll down to the table so clicking a KPI card jumps
        straight to the filtered results instead of leaving the user to
        scroll down past the header/KPI cards manually. */
+    requestAnimationFrame(() => {
+      tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  };
+
+  /* Picking a department from the Departments card's breakdown */
+  const handleDeptPick = (name: string) => {
+    setDepartment(name);
+    setStatusFilter('all');
+    setCurrentPage(1);
+    setSearchQuery('');
+    setDebouncedSearch('');
+    setDeptPanelOpen(false);
     requestAnimationFrame(() => {
       tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
@@ -401,6 +429,8 @@ export default function UsersPage() {
   const handleSave = async () => {
     if (saving || !editingUser) return;
     if (!form.name.trim()) { setFormError('Name is required.'); return; }
+    const deptProblem = departmentError(form.department);
+    if (deptProblem) { setFormError(deptProblem); return; }
     if (newPassword && newPassword !== confirmPassword) {
       setFormError('New password and confirmation do not match.');
       return;
@@ -412,7 +442,7 @@ export default function UsersPage() {
       const payload: Record<string, any> = {
         name: form.name,
         email: form.email,
-        department: form.department,
+        department: canonicalDepartment(form.department),
         permissions: form.permissions,
         emailVisibility: true,
       };
@@ -433,8 +463,11 @@ export default function UsersPage() {
       const status = err?.status;
       let message = err?.message || 'Failed to save this user. Please try again.';
       if (status === 401) message = 'Your session has expired — please sign in again.';
-      else if (status === 403) message = 'Permission denied — check the Update rule on the "users" collection (PocketBase Admin → Collection → API Rules).';
-      else if (status === 400 && newPassword) message = 'PocketBase rejected the update — the new password may be too short or invalid.';
+      else if (status === 403) {
+        console.warn('[save] permission denied — check the Update rule on the "users" collection (PocketBase Admin → Collection → API Rules)');
+        message = 'You don’t have permission to do this. Please ask your administrator.';
+      }
+      else if (status === 400 && newPassword) message = 'The new password wasn’t accepted — it may be too short. Please try a longer one.';
       setFormError(message);
     } finally {
       setSaving(false);
@@ -487,7 +520,9 @@ export default function UsersPage() {
 
       if (status === 401) message = 'Your session has expired — please sign in again.';
       else if (status === 403) {
-        message = `Permission denied — check the ${failedStep === 'archive' ? 'Create' : 'Delete'} rule on the "${targetCollection}" collection (PocketBase Admin → Collection → API Rules).`;
+        // for the developer: the ${failedStep === 'archive' ? 'Create' : 'Delete'} API rule on this collection rejected it
+        console.warn(`[delete] permission denied — check the ${failedStep === 'archive' ? 'Create' : 'Delete'} rule on the "${targetCollection}" collection (PocketBase Admin → Collection → API Rules)`);
+        message = 'You don’t have permission to do this. Please ask your administrator.';
       } else if (status === 404) message = 'This user was not found — they may have already been deleted.';
 
       setDeleteError(message);
@@ -526,21 +561,21 @@ export default function UsersPage() {
       accent: 'from-amber-400 to-orange-500', count: pendingCount, clickable: true },
     { key: 'depts' as const, label: 'Departments', caption: 'Distinct teams', icon: Building2,
       card: 'from-sky-100 to-blue-100', iconTint: 'text-sky-600',
-      accent: 'from-sky-400 to-blue-500', count: deptCount, clickable: false },
+      accent: 'from-sky-400 to-blue-500', count: deptCount, clickable: true },
   ];
 
   /* ------------------------------ Skeleton View ----------------------------- */
 
   if (loading && users.length === 0) {
     return (
-      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
         <AnimationStyles />
         <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
           <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
           <div className="absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" />
         </div>
 
-        <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+        <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5 sm:px-6">
             <div className="flex items-center gap-3">
               <div className="usr-skeleton h-9 w-9 !rounded-xl" />
@@ -552,7 +587,7 @@ export default function UsersPage() {
             <div className="usr-skeleton h-10 w-40 !rounded-full" />
           </div>
 
-          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+          <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:gap-5">
               {[...Array(4)].map((_, i) => (
                 <div key={i} className="usr-skeleton h-[196px] !rounded-3xl" />
@@ -589,7 +624,7 @@ export default function UsersPage() {
   /* -------------------------------- Main View ------------------------------- */
 
   return (
-    <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+    <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
       <AnimationStyles />
 
       {/* --------------------- Decorative ambient background --------------------- */}
@@ -599,7 +634,7 @@ export default function UsersPage() {
         <div className="usr-blob-c absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" />
       </div>
 
-      <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+      <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
 
         {/* ------------------------------- App bar ------------------------------ */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
@@ -632,7 +667,7 @@ export default function UsersPage() {
         </div>
 
         {/* ------------------------------- Content ------------------------------ */}
-        <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+        <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
 
           {/* ------------------------------ Page Header ----------------------------- */}
           <header className="usr-fade-up flex flex-wrap items-end justify-between gap-4">
@@ -654,7 +689,7 @@ export default function UsersPage() {
           <section className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:gap-5">
             {statCards.map((stat, i) => {
               const Icon = stat.icon;
-              const active = stat.clickable && statusFilter === stat.key;
+              const active = stat.key === 'depts' ? deptPanelOpen : statusFilter === stat.key;
               const pct = totalCount > 0 ? Math.round((stat.count / totalCount) * 100) : 0;
 
               const inner = (
@@ -680,7 +715,12 @@ export default function UsersPage() {
                       {pct}%
                     </span>
                   </div>
-                  <p className="relative mt-1.5 text-xs font-medium text-slate-500/80">{stat.caption}</p>
+                  <p className="relative mt-1.5 flex items-center gap-1 text-xs font-medium text-slate-500/80">
+                    {stat.caption}
+                    {stat.key === 'depts' && (
+                      <ChevronRight className={`h-3 w-3 transition-transform duration-300 ${deptPanelOpen ? '-rotate-90' : 'rotate-90'}`} />
+                    )}
+                  </p>
 
                   {/* Animated share-of-total progress */}
                   <div className="relative mt-3.5 h-1.5 overflow-hidden rounded-full bg-white/60">
@@ -697,7 +737,16 @@ export default function UsersPage() {
               } ${stat.clickable ? 'cursor-pointer' : 'cursor-default'}`;
 
               return stat.clickable ? (
-                <button key={stat.key} onClick={() => handleCardClick(stat.key as 'all' | 'verified' | 'pending')} style={{ animationDelay: `${90 + i * 90}ms` }} className={cls}>
+                <button
+                  key={stat.key}
+                  onClick={() => stat.key === 'depts'
+                    ? setDeptPanelOpen((o) => !o)
+                    : handleCardClick(stat.key)}
+                  aria-expanded={stat.key === 'depts' ? deptPanelOpen : undefined}
+                  title={stat.key === 'pending' ? PENDING_HINT : undefined}
+                  style={{ animationDelay: `${90 + i * 90}ms` }}
+                  className={cls}
+                >
                   {inner}
                 </button>
               ) : (
@@ -707,6 +756,74 @@ export default function UsersPage() {
               );
             })}
           </section>
+
+          {/* ---------------- Departments breakdown (slides down from the KPI card) ---------------- */}
+          <div
+            className={`grid transition-all duration-500 ease-[cubic-bezier(.22,1,.36,1)] ${
+              deptPanelOpen ? 'grid-rows-[1fr] opacity-100' : '-mt-6 grid-rows-[0fr] opacity-0'
+            }`}
+            aria-hidden={!deptPanelOpen}
+          >
+            <div className="overflow-hidden">
+              <section className="rounded-3xl bg-white p-4 shadow-sm ring-1 ring-sky-100 lg:p-5">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-sky-50 text-sky-600">
+                      <Building2 className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Users by department</p>
+                      <p className="text-[11px] text-slate-400">Pick a department to filter the list below</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setDeptPanelOpen(false)}
+                    tabIndex={deptPanelOpen ? 0 : -1}
+                    title="Close"
+                    className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+
+                {deptBreakdown.length === 0 ? (
+                  <p className="rounded-2xl bg-slate-50 px-4 py-6 text-center text-xs text-slate-400">
+                    No users have a department yet.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {deptBreakdown.map((d) => {
+                      const cfg = getDeptConfig(d.name);
+                      const share = totalCount > 0 ? Math.round((d.count / totalCount) * 100) : 0;
+                      const selected = department === d.name;
+                      return (
+                        <button
+                          key={d.name}
+                          onClick={() => handleDeptPick(d.name)}
+                          tabIndex={deptPanelOpen ? 0 : -1}
+                          className={`group flex items-center gap-3 rounded-2xl px-3.5 py-2.5 text-left ring-1 ring-inset transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm ${
+                            selected ? 'bg-sky-50 ring-sky-300' : 'bg-slate-50/70 ring-slate-100 hover:bg-white'
+                          }`}
+                        >
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${cfg.dot}`} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-semibold text-slate-800">{d.name}</p>
+                            <div className="mt-1 h-1 overflow-hidden rounded-full bg-slate-200/70">
+                              <div className={`h-full rounded-full bg-gradient-to-r ${cfg.accent}`} style={{ width: `${share}%` }} />
+                            </div>
+                          </div>
+                          <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[11px] font-bold tabular-nums text-slate-600 ring-1 ring-inset ring-slate-200">
+                            {d.count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+
 
           {/* ------------------------------- Search Bar ----------------------------- */}
           <section className="usr-fade-up rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-100 lg:p-5" style={{ animationDelay: '420ms' }}>
@@ -781,7 +898,9 @@ export default function UsersPage() {
               </div>
 
               {/* Column headers */}
-              <div className="hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/70 px-6 py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
+              {/* header stays put; the rows scroll under it */}
+              <div className="nice-scroll max-h-[70vh] overflow-y-auto">
+              <div className="sticky top-0 z-10 hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/95 px-6 backdrop-blur py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
                 <div className="col-span-3">User</div>
                 <div className="col-span-2">Department</div>
                 <div className="col-span-2">Permissions</div>
@@ -848,10 +967,19 @@ export default function UsersPage() {
                             </div>
 
                             <div className="col-span-2 flex items-center">
-                              <span className={`inline-flex items-center gap-1.5 truncate rounded-full px-2.5 py-1 text-[11px] font-semibold ${cfg.badge}`} title={usr.department}>
-                                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${cfg.dot}`} />
-                                {usr.department || '—'}
-                              </span>
+                              {usr.department && !canonicalDepartment(usr.department) ? (
+                                /* made-up department from before the fixed list — flag it so an admin fixes it */
+                                <span className="inline-flex items-center gap-1.5 truncate rounded-full bg-rose-50 px-2.5 py-1 text-[11px] font-semibold text-rose-700 ring-1 ring-inset ring-rose-600/20"
+                                  title={`"${usr.department}" isn't a valid department — edit this user to choose one`}>
+                                  <AlertTriangle className="h-3 w-3 shrink-0" />
+                                  {usr.department}
+                                </span>
+                              ) : (
+                                <span className={`inline-flex items-center gap-1.5 truncate rounded-full px-2.5 py-1 text-[11px] font-semibold ${cfg.badge}`} title={usr.department}>
+                                  <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${cfg.dot}`} />
+                                  {canonicalDepartment(usr.department) || '—'}
+                                </span>
+                              )}
                             </div>
 
                             <div className="col-span-2 truncate text-sm text-slate-600" title={usr.permissions}>
@@ -865,7 +993,7 @@ export default function UsersPage() {
                                   Verified
                                 </span>
                               ) : (
-                                <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                                <span title={PENDING_HINT} className="inline-flex cursor-help items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-600/20">
                                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
                                   Pending
                                 </span>
@@ -906,7 +1034,7 @@ export default function UsersPage() {
                                       <span className="h-1 w-1 rounded-full bg-emerald-500" />Verified
                                     </span>
                                   ) : (
-                                    <span className="inline-flex flex-shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                    <span title={PENDING_HINT} className="inline-flex flex-shrink-0 cursor-help items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
                                       <span className="h-1 w-1 rounded-full bg-amber-500" />Pending
                                     </span>
                                   )}
@@ -941,6 +1069,7 @@ export default function UsersPage() {
                     })}
                   </div>
                 )}
+              </div>
               </div>
 
               {/* Pagination */}
@@ -1046,7 +1175,7 @@ export default function UsersPage() {
                             <CheckCircle2 className="h-3 w-3" /> Verified
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-600/20">
+                          <span title={PENDING_HINT} className="inline-flex cursor-help items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-600/20">
                             <AlertCircle className="h-3 w-3" /> Pending
                           </span>
                         )}
@@ -1141,11 +1270,25 @@ export default function UsersPage() {
               {([
                 ['name', 'Full Name *', 'text', 'e.g. Tejaswi Rao'],
                 ['email', 'Email', 'email', 'name@company.com'],
-                ['department', 'Department', 'text', 'e.g. Civil'],
+                ['department', 'Department', 'select', 'Choose a department'],
                 ['permissions', 'Permissions', 'text', 'e.g. admin / editor / viewer'],
               ] as const).map(([field, label, type, placeholder]) => (
                 <div key={field}>
                   <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</label>
+                  {type === 'select' ? (
+                    /* fixed list (lib/departments); an old made-up value is shown so it can be replaced */
+                    <select
+                      value={canonicalDepartment(form.department) || form.department || ''}
+                      onChange={(e) => setForm((f) => ({ ...f, department: e.target.value }))}
+                      className="w-full cursor-pointer rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2.5 text-sm text-slate-900 transition-all focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                    >
+                      <option value="">{placeholder}</option>
+                      {form.department && !canonicalDepartment(form.department) && (
+                        <option value={form.department}>⚠ {form.department} — not a valid department, choose another</option>
+                      )}
+                      {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                  ) : (
                   <input
                     type={type}
                     value={form[field] || ''}
@@ -1153,6 +1296,7 @@ export default function UsersPage() {
                     placeholder={placeholder}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 transition-all focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
                   />
+                  )}
                 </div>
               ))}
 
@@ -1227,7 +1371,7 @@ export default function UsersPage() {
               <div className="min-w-0">
                 <h3 className="text-base font-bold text-slate-900">Move to trash?</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  <span className="font-semibold text-slate-700">"{deleteTarget.name || 'Unnamed'}"</span> will be removed from this list and archived, so it can be recovered later if needed. They will no longer be able to sign in.
+                  <span className="font-semibold text-slate-700">&ldquo;{deleteTarget.name || 'Unnamed'}&rdquo;</span> will be removed from this list and archived, so it can be recovered later if needed. They will no longer be able to sign in.
                 </p>
               </div>
             </div>

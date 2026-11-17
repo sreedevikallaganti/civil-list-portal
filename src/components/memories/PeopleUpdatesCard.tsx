@@ -3,6 +3,7 @@
 // Dashboard card: birthdays / service anniversaries coming up, and people whose
 // posting changed since you last met — for everyone you have meetings with.
 
+import Link from "next/link";
 import { Cake, Award, ArrowRightLeft, Users } from "lucide-react";
 import type { LivePerson, Occasion, PostingChange } from "@/lib/liveDirectory";
 import { occasions as findOccasions, postingChanges } from "@/lib/liveDirectory";
@@ -40,6 +41,9 @@ export default function PeopleUpdatesCard({ meetings, people, loading, delay = 0
         </div>
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-violet-50 text-violet-600"><Users className="h-4 w-4" /></span>
       </div>
+      <Link href="/occasions" className="mt-2 inline-flex text-xs font-semibold text-violet-600 hover:underline">
+        All occasions — birthdays, retirements, special days →
+      </Link>
 
       {loading ? (
         <div className="mt-4 space-y-2">{[0, 1].map((i) => <div key={i} className="mem-skeleton h-12 rounded-2xl" />)}</div>

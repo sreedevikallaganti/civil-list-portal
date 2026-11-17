@@ -1,7 +1,10 @@
-import pb from "@/lib/pocketbase"; // ★ NEW — gives us the logged-in user's token
+import pb, { getPocketBaseURL } from "@/lib/pocketbase"; // ★ NEW — gives us the logged-in user's token
+import { orgIdOf, scopeFetch } from "@/lib/tenancy";
+import { apiJSON } from "@/lib/apiClient";
 
-export const PB_BASE_URL =
-  process.env.NEXT_PUBLIC_PB_URL ?? "http://172.30.0.200:8091";
+/* Same address as the rest of the app: "/pb" (the Next.js proxy) in the browser,
+   POCKETBASE_URL from .env.local on the server — nothing hard-coded. */
+export const PB_BASE_URL = getPocketBaseURL();
 
 export interface Employee {
   collectionId: string;
@@ -49,7 +52,7 @@ export async function fetchEmployees(
   signal?: AbortSignal
 ): Promise<EmployeesResponse> {
   // ★ FIX: was missing "/records" — that wrong endpoint was causing the 401
-  const url = `${PB_BASE_URL}/api/collections/employees/records?page=${page}&perPage=${perPage}`;
+  const url = scopeFetch(`${PB_BASE_URL}/api/collections/employees/records?page=${page}&perPage=${perPage}`, pb.authStore.record as any);
   const res = await fetch(url, {
     signal,
     cache: "no-store",
@@ -69,7 +72,7 @@ export async function createEmployee(
       "Content-Type": "application/json",
       ...authHeaders(), // ★ FIX: create would also 401 without the token
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, org: orgIdOf(pb.authStore.record as any) || undefined }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
@@ -90,4 +93,51 @@ export function formatPBDate(value?: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+/* ───────────── Employees directory: HRMS + employees added in the app ───────────── */
+
+/** One row of the directory. `source: 'hrms'` rows are read-only (maintained in the HRMS). */
+export type DirectoryEmployee = {
+  id: string;
+  source: 'hrms' | 'app';
+  name: string;
+  designation: string;
+  department: string;
+  contact_number: string;
+  email: string;
+  photo_url: string;
+  emp_id?: number;
+  branch?: string;
+  date_of_joining?: string;
+  role?: string;
+  created?: string;
+  updated?: string;
+  [k: string]: any;
+};
+
+/**
+ * Everyone in the directory: the HRMS list (/api/employees/hrms) plus employees added in this app.
+ * An app employee whose email is also in the HRMS is left out (the HRMS copy wins).
+ * Either source failing still returns the other one.
+ */
+export async function loadDirectoryEmployees({ fresh = false } = {}): Promise<{ employees: DirectoryEmployee[]; hrmsError: string }> {
+  const [hrms, app] = await Promise.allSettled([
+    apiJSON<{ employees: any[] }>('/api/employees/hrms', { fresh }, { timeoutMs: 45_000 }),
+    pb.collection('employees').getFullList({ sort: 'name', requestKey: null }),
+  ]);
+
+  const fromHrms: DirectoryEmployee[] = hrms.status === 'fulfilled'
+    ? hrms.value.employees.map((e) => ({ ...e, id: `hrms-${e.emp_id}`, source: 'hrms' as const, photo_url: '' }))
+    : [];
+  const hrmsEmails = new Set(fromHrms.map((e) => e.email).filter(Boolean));
+  const fromApp: DirectoryEmployee[] = app.status === 'fulfilled'
+    ? app.value
+      .filter((e: any) => !e.email || !hrmsEmails.has(String(e.email).toLowerCase()))
+      .map((e: any) => ({ ...e, source: 'app' as const }))
+    : [];
+
+  return {
+    employees: [...fromHrms, ...fromApp].sort((a, b) => a.name.localeCompare(b.name)),
+    hrmsError: hrms.status === 'rejected' ? (hrms.reason?.message || 'HRMS unavailable') : '',
+  };
 }

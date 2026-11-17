@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { personKey } from '@/lib/revisit';
 import { useLivePeople } from '@/lib/liveDirectory';
+import { videoLabel } from '@/lib/videoCall';
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const iso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -85,7 +86,7 @@ export default function DayBriefPanel({ meetings, onClose, onOpenMeeting }: {
     <div className="fixed inset-0 z-50 flex justify-end">
       <style dangerouslySetInnerHTML={{ __html: PRINT_CSS }} />
       <div className="anim-overlay no-print absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
-      <div id="day-brief" className="anim-panel relative flex h-full w-full flex-col bg-[#f7f6fd] shadow-2xl sm:max-w-2xl">
+      <div id="day-brief" className="anim-panel relative flex h-full w-full flex-col bg-[#f7f6fd] shadow-2xl sm:max-w-xl lg:max-w-2xl">
         {/* header */}
         <div className="bg-gradient-to-br from-slate-900 to-violet-900 px-6 pb-5 pt-6 text-white">
           <div className="flex items-start justify-between gap-3">
@@ -184,7 +185,7 @@ export default function DayBriefPanel({ meetings, onClose, onOpenMeeting }: {
 
                       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                         {m.location && <span className="flex items-center gap-1"><MapPin className="h-3.5 w-3.5" /> {m.location}</span>}
-                        {m.meet_link && <a href={m.meet_link} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-violet-600 hover:underline"><Video className="h-3.5 w-3.5" /> Google Meet</a>}
+                        {m.meet_link && <a href={m.meet_link} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-violet-600 hover:underline"><Video className="h-3.5 w-3.5" /> {videoLabel(m.meet_link)}</a>}
                         {(liveOf(m)?.phone || m.contact_number) && <span className="flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> {liveOf(m)?.phone || m.contact_number}</span>}
                         {(liveOf(m)?.email || m.email) && <span className="flex items-center gap-1"><Mail className="h-3.5 w-3.5" /> {liveOf(m)?.email || m.email}</span>}
                       </div>

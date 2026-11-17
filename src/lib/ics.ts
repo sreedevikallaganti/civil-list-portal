@@ -38,16 +38,18 @@ export function buildIcs(opts: {
   organizer: { email: string; name?: string };
   attendees: string[];
   sequence?: number;
+  method?: 'REQUEST' | 'CANCEL'; // CANCEL removes the event from the recipient's calendar
 }) {
+  const cancel = opts.method === 'CANCEL';
   const end = new Date(opts.start.getTime() + Math.max(1, opts.durationMin) * 60_000);
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
     'PRODID:-//Civillist//Meetings//EN',
     'CALSCALE:GREGORIAN',
-    'METHOD:REQUEST',
+    cancel ? 'METHOD:CANCEL' : 'METHOD:REQUEST',
     'BEGIN:VEVENT',
-    `UID:${opts.uid}@civillist`,
+    `UID:${opts.uid.includes('@') ? opts.uid : `${opts.uid}@civillist`}`, // a Google event's own UID keeps RSVPs in sync
     `SEQUENCE:${opts.sequence ?? 0}`,
     `DTSTAMP:${stamp(new Date())}`,
     `DTSTART:${stamp(opts.start)}`,
@@ -58,12 +60,8 @@ export function buildIcs(opts: {
     opts.url ? `URL:${opts.url}` : '',
     `ORGANIZER;CN=${text(opts.organizer.name || opts.organizer.email)}:mailto:${opts.organizer.email}`,
     ...opts.attendees.map((a) => `ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:${a}`),
-    'STATUS:CONFIRMED',
-    'BEGIN:VALARM',
-    'ACTION:DISPLAY',
-    'DESCRIPTION:Meeting reminder',
-    'TRIGGER:-PT30M',
-    'END:VALARM',
+    cancel ? 'STATUS:CANCELLED' : 'STATUS:CONFIRMED',
+    ...(cancel ? [] : ['BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Meeting reminder', 'TRIGGER:-PT30M', 'END:VALARM']),
     'END:VEVENT',
     'END:VCALENDAR',
   ].filter(Boolean);

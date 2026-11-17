@@ -58,7 +58,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   X, Calendar, CalendarDays, Clock, Timer, MapPin, Check, Search,
-  ChevronLeft, ChevronRight, Loader2, Users, Mail, Phone, User,
+  ChevronLeft, ChevronRight, ChevronDown, Loader2, Users, Mail, Phone, User,
   Sparkles, ArrowLeft, ArrowRight, AlertCircle, Building2, Flag,
   Video, Globe, Plus, Zap, Activity, Feather, Edit2, Upload, Trash2,
   FileText,
@@ -71,8 +71,29 @@ import {
   type BusyBlock, type SlotSuggestion,
 } from '@/lib/busySlots';
 import ConflictCard, { ParticipantNotice } from '@/components/ConflictCard';
+import TravelTimeNotice from '@/components/meetings/TravelTimeNotice';
+import { useGoogleEnabled } from '@/contexts/OrgContext';
+import { useSenders } from '@/lib/useSenders';
+import SendAsPicker, { useSendAs } from '@/components/SendAsPicker';
+import { useZoomEnabled } from '@/lib/useZoom';
+import { removeZoomMeeting } from '@/lib/apiClient';
+import { loadDirectoryEmployees } from '@/components/employees/employee-api';
+import { associateSummary } from '@/lib/associates';
+import { listAssociates, listFields } from '@/lib/associatesApi';
+import AssociateDetails from '@/components/associates/AssociateDetails';
+import { showShareMeeting } from '@/components/meetings/ShareMeetingHost';
+import type { ManualShare } from '@/lib/meetingShare';
+import { videoLabel, videoPlatform, type VideoPlatform } from '@/lib/videoCall';
 import { CITIES, cityKey, cityLabel, findCity } from '@/lib/cities';
 import { findPeopleToRevisit, personKey } from '@/lib/revisit';
+import { AGENDA_MAX, cleanName, nameError, phoneError, textError } from '@/lib/validation';
+import PhoneInput from '@/components/PhoneInput';
+import { logActivity, meetingLabel } from '@/lib/activity';
+import { parseParticipants, PARTICIPANTS_FIELD_HINT, PARTICIPANTS_FIELD_MISSING, type Participant } from '@/lib/participants';
+import BatchmatesCard from '@/components/meetings/BatchmatesCard';
+import CreateOfficerPanel from '@/components/CreateOfficerPanel';
+import type { BatchOfficer } from '@/lib/batchmates';
+import { OFFICER_COLLECTION, OFFICER_SERVICES, officerSearchFilter, serviceOf, toDirectoryOfficer, type OfficerService } from '@/lib/officerDirectory';
 
 /* ------------------------------- CSS ------------------------------- */
 
@@ -88,7 +109,7 @@ const CUSTOM_CSS = `
 .c-panel   { animation:cPanel  .32s cubic-bezier(.22,1,.36,1) both }
 .c-overlay { animation:cFadeIn .2s ease both }
 .c-sk { background:linear-gradient(90deg,#f1effc 25%,#e5e1f5 40%,#f1effc 55%); background-size:200% 100%; animation:cShimmer 1.5s linear infinite }
-.c-progress { background:linear-gradient(90deg,#a78bfa 25%,#7c3aed 40%,#a78bfa 55%); background-size:200% 100%; animation:cShimmer 1.2s linear infinite }
+.c-progress { background:linear-gradient(90deg,var(--color-violet-400) 25%,var(--color-violet-600) 40%,var(--color-violet-400) 55%); background-size:200% 100%; animation:cShimmer 1.2s linear infinite }
 .nice-scroll::-webkit-scrollbar{width:8px}
 .nice-scroll::-webkit-scrollbar-thumb{background:#e5e1f5;border-radius:999px}
 `;
@@ -115,9 +136,13 @@ interface CreateMeetingPanelProps {
 
 interface Officer {
   id: string; name: string; designation?: string;
-  type: 'IAS' | 'IPS' | 'Other';
+  type: OfficerService | 'Other';
   cadre?: string; state?: string; contact_number?: string; email?: string;
   department?: string; current_position?: string; batch_year?: string;
+  /* from the Associates list (lib/associates) — saved as participant type "Associate" */
+  kind?: 'Associate';
+  /* every filled-in detail of an associate, for "view details" */
+  details?: { label: string; value: string }[];
 }
 
 /* --------------------------- Constants --------------------------- */
@@ -125,6 +150,8 @@ interface Officer {
 const OFFICER_BADGE: Record<string, { chip: string; avatar: string }> = {
   IAS:   { chip: 'bg-sky-50 text-sky-700 border-sky-200',     avatar: 'bg-sky-100 text-sky-700' },
   IPS:   { chip: 'bg-violet-50 text-violet-700 border-violet-200', avatar: 'bg-violet-100 text-violet-700' },
+  IFS:   { chip: 'bg-emerald-50 text-emerald-700 border-emerald-200', avatar: 'bg-emerald-100 text-emerald-700' },
+  IRS:   { chip: 'bg-rose-50 text-rose-700 border-rose-200', avatar: 'bg-rose-100 text-rose-700' },
   Other: { chip: 'bg-slate-100 text-slate-600 border-slate-200',  avatar: 'bg-slate-200 text-slate-600' },
 };
 
@@ -132,6 +159,24 @@ const PRIORITIES = [
   { value: 'Low',    icon: Feather,  bg: 'bg-emerald-50 border-emerald-300', text: 'text-emerald-700', dot: 'bg-emerald-500' },
   { value: 'Medium', icon: Activity, bg: 'bg-amber-50 border-amber-300',     text: 'text-amber-700',   dot: 'bg-amber-500' },
   { value: 'High',   icon: Zap,      bg: 'bg-rose-50 border-rose-300',       text: 'text-rose-700',    dot: 'bg-rose-500' },
+];
+
+/* filter chips of the "Add more participants" list (external meetings) */
+type ExtraFilter = 'All' | OfficerService | 'Other' | 'Associates' | 'Employees';
+const EXTRA_FILTERS: ExtraFilter[] = ['All', ...OFFICER_SERVICES, 'Other', 'Associates', 'Employees'];
+
+/* associates (directors and senior officials, /associates) get their own colour and label */
+const ASSOCIATE_BADGE = { chip: 'bg-indigo-50 text-indigo-700 border-indigo-200', avatar: 'bg-indigo-100 text-indigo-700' };
+const badgeOf = (o: Officer) => (o.kind === 'Associate' ? ASSOCIATE_BADGE : OFFICER_BADGE[o.type] ?? OFFICER_BADGE.Other);
+const labelOf = (o: Officer) => (o.kind === 'Associate' ? 'Associate' : o.type);
+
+/* "Create new …" in the participant picker → CreateOfficerPanel locked to that type */
+const NEW_PERSON_OPTIONS: { type: OfficerService | 'Other'; label: string }[] = [
+  { type: 'IAS', label: 'New IAS officer' },
+  { type: 'IPS', label: 'New IPS officer' },
+  { type: 'IFS', label: 'New IFS officer' },
+  { type: 'IRS', label: 'New IRS officer' },
+  { type: 'Other', label: 'New contact' },
 ];
 
 const PLACE_OPTIONS = [
@@ -180,7 +225,9 @@ const EMPTY_FORM = {
   previous_postings: '', date_of_birth: '', priority: '', meeting_type: '',
   meeting_place: '', status_flag: 'Scheduled', follow_up_date: '', follow_up_notes: '', attendees: '',
   /* Google integrations + send invite auto-selected for every new meeting */
-  send_invite: true, sync_gcal: true, add_meet: true,
+  send_invite: true, sync_gcal: true,
+  /* video call: Google Meet (needs Google) or Zoom (needs ZOOM_* keys) — the link is kept in meet_link */
+  video_call: 'meet' as VideoPlatform,
   created_by: '', meet_link: '', gcal_event_id: '', gcal_link: '',
   city: '',
 };
@@ -300,10 +347,12 @@ const initialsOf = (name: string) =>
 let officerCache: { data: Officer[]; ts: number } | null = null;
 const OFFICER_CACHE_TTL = 60_000;
 
-/* IAS officers loaded up front; everyone else is found by server-side search */
+/* a first page of each service is loaded up front; everyone else is found by server-side search */
 const IAS_PAGE = 40;
 
-const mapOfficer = (o: any, type: Officer['type']): Officer => ({
+const mapOfficer = (rec: any, type: Officer['type']): Officer => {
+  const o = type === 'Other' ? rec : toDirectoryOfficer(rec, type);
+  return {
   id: o.id,
   name: o.name || '',
   designation: o.designation || o.current_position || o.occupation || '',
@@ -314,8 +363,9 @@ const mapOfficer = (o: any, type: Officer['type']): Officer => ({
   email: o.email || '',
   department: o.department || '',
   current_position: o.current_position || o.designation || '',
-  batch_year: o.batch_year || '',
-});
+  batch_year: o.batch_year ? String(o.batch_year) : '',
+  };
+};
 
 /** base list + extra records, de-duplicated by id (base wins, so fresh data replaces old) */
 const mergeOfficers = (base: Officer[], extra: Officer[]) => {
@@ -380,6 +430,41 @@ function SectionHead({ icon: Icon, title, sub, required, optional, size = 'md' }
           {optional && <span className="ml-1.5 text-[11px] font-normal text-slate-400">Optional</span>}
         </p>
         {sub && <p className={`${subCls} text-slate-400`}>{sub}</p>}
+      </div>
+    </div>
+  );
+}
+
+/* Video call: none / Google Meet / Zoom — only the services that are set up are offered */
+function VideoCallChoice({ value, meet, zoom, onChange }: {
+  value: VideoPlatform; meet: boolean; zoom: boolean; onChange: (v: VideoPlatform) => void;
+}) {
+  const options: { v: VideoPlatform; label: string; hint: string }[] = [
+    { v: 'none', label: 'None', hint: 'In person or phone' },
+    ...(meet ? [{ v: 'meet' as const, label: 'Google Meet', hint: 'Link shown right after saving — copy or WhatsApp it' }] : []),
+    ...(zoom ? [{ v: 'zoom' as const, label: 'Zoom', hint: 'Link shown right after saving — copy or WhatsApp it' }] : []),
+  ];
+  const current = options.find((o) => o.v === value) ?? options[0];
+  return (
+    <div className={`rounded-2xl border p-3 transition-all duration-150 ${current.v !== 'none' ? 'border-violet-200 bg-violet-50/50' : 'border-slate-200 bg-white'}`}>
+      <div className="flex items-center gap-3">
+        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${current.v !== 'none' ? 'bg-violet-100 text-violet-600' : 'bg-slate-100 text-slate-400'}`}>
+          <Video className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <p className="text-[13px] font-semibold text-slate-800">Video call</p>
+          <p className="truncate text-[11px] text-slate-400">{current.hint}</p>
+        </div>
+      </div>
+      <div role="radiogroup" aria-label="Video call" className="mt-2.5 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
+        {options.map((o) => (
+          <button key={o.v} type="button" role="radio" aria-checked={current.v === o.v} onClick={() => onChange(o.v)}
+            className={`rounded-xl px-2 py-1.5 text-xs font-semibold transition-colors ${
+              current.v === o.v ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:text-violet-700'
+            }`}>
+            {o.label}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -976,13 +1061,28 @@ export default function CreateMeetingPanel({
   const [officerSearch, setOfficerSearch] = useState('');
   const [iasTotal, setIasTotal] = useState(0);
   const [iasSearching, setIasSearching] = useState(false);
-  const [typeFilter, setTypeFilter] = useState<'All' | 'IAS' | 'IPS' | 'Other'>('All');
+  const [typeFilter, setTypeFilter] = useState<'All' | OfficerService | 'Other' | 'Associates'>('All');
   const [selectedOfficer, setSelectedOfficer] = useState<Officer | null>(null);
   const [showOfficerEdit, setShowOfficerEdit] = useState(false);
 
   /* employees pool for Internal meetings */
   const [employees, setEmployees] = useState<Officer[]>([]);
+  /* associates (the /associates list) — participants of External meetings */
+  const [associates, setAssociates] = useState<Officer[]>([]);
+  /* which associate's details are unfolded in the lists */
+  const [openDetails, setOpenDetails] = useState<string | null>(null);
   const [employeeLoading, setEmployeeLoading] = useState(false);
+
+  /* "Create new IAS / IPS / contact" opened from the picker — saved to the directory, then selected */
+  const [newPersonType, setNewPersonType] = useState<Officer['type'] | null>(null);
+  /* who the new person becomes: the main participant, or one more participant */
+  const [newPersonFor, setNewPersonFor] = useState<'main' | 'extra'>('main');
+  const createPerson = (type: Officer['type'], target: 'main' | 'extra') => { setNewPersonFor(target); setNewPersonType(type); };
+
+  /* "Add more participants" list filter — like the main picker */
+  const [extraFilter, setExtraFilter] = useState<ExtraFilter>('All');
+  /* the "Add more participants" list is closed until clicked — keeps the form short */
+  const [extrasOpen, setExtrasOpen] = useState(false);
 
   /* additional officers (More details) */
   const [extraOfficers, setExtraOfficers] = useState<Officer[]>([]);
@@ -1037,6 +1137,8 @@ export default function CreateMeetingPanel({
   const notesReadyRef = useRef<boolean>(true);
   /* "date|time|duration" as loaded for edit — unchanged slot is never blocked */
   const originalSlotRef = useRef<string>('');
+  /* the status as loaded for edit — a change to Cancelled / Completed emails the participants */
+  const originalStatusRef = useRef<string>('');
 
   const goStep = (s: 1 | 2) => { stepRef.current = s; setStep(s); };
 
@@ -1049,20 +1151,18 @@ export default function CreateMeetingPanel({
     if (cached) setOfficers(officerCache!.data);
     else setOfficerLoading(true);
     try {
-      /* IAS has thousands of officers — load one page now, the rest via search (searchIas) */
-      const [ias, ips, others] = await Promise.all([
-        pb.collection('ias_officers').getList(1, IAS_PAGE, { sort: 'name' }),
-        pb.collection('ips_officers').getFullList({ sort: 'name' }),
+      /* each service has thousands of officers — load one page of each now, the rest via search (searchIas) */
+      const [pages, others] = await Promise.all([
+        Promise.all(OFFICER_SERVICES.map((s) => pb.collection(OFFICER_COLLECTION[s]).getList(1, IAS_PAGE, { sort: 'name' }))),
         pb.collection('other_contacts').getFullList({ sort: 'name' }),
       ]);
-      setIasTotal(ias.totalItems);
+      setIasTotal(pages.reduce((n, p) => n + p.totalItems, 0));
       const data = [
-        ...ias.items.map((o: any) => mapOfficer(o, 'IAS')),
-        ...ips.map((o: any) => mapOfficer(o, 'IPS')),
+        ...pages.flatMap((p, i) => p.items.map((o: any) => mapOfficer(o, OFFICER_SERVICES[i]))),
         ...others.map((o: any) => mapOfficer(o, 'Other')),
       ];
       officerCache = { data, ts: Date.now() };
-      setOfficers((prev) => mergeOfficers(data, prev.filter((o) => o.type === 'IAS')));
+      setOfficers((prev) => mergeOfficers(data, prev.filter((o) => o.type !== 'Other')));
     } catch (error) {
       console.error('Failed to load directory:', error);
     } finally {
@@ -1070,10 +1170,28 @@ export default function CreateMeetingPanel({
     }
   }
 
+  async function fetchAssociates() {
+    try {
+      const [fields, people] = await Promise.all([listFields(), listAssociates()]);
+      setAssociates(people.map((a) => {
+        const s = associateSummary(a, fields);
+        return {
+          id: a.id, name: a.name, type: 'Other' as const, kind: 'Associate' as const,
+          designation: s.designation, department: s.organization || s.department,
+          email: s.email, contact_number: s.phone, cadre: s.cadre, state: s.state, batch_year: s.batch,
+          current_position: s.designation, details: s.details,
+        };
+      }));
+    } catch {
+      setAssociates([]); // no Associates list on this server yet — the pickers simply don't show any
+    }
+  }
+
   async function fetchEmployees() {
     setEmployeeLoading(true);
     try {
-      const rows = await pb.collection('employees').getFullList({ sort: 'name' });
+      // the HRMS directory + employees added in the app (same list as the Employees page)
+      const { employees: rows } = await loadDirectoryEmployees();
       setEmployees(rows.map((e: any) => ({
         id: e.id,
         name: e.name || '',
@@ -1120,6 +1238,7 @@ export default function CreateMeetingPanel({
       }));
       loadedFollowUpRef.current = '';
       originalSlotRef.current = '';
+      originalStatusRef.current = '';
       setExistingDocs([]); initialDocsRef.current = [];
     } else {
       resetForm();
@@ -1152,7 +1271,7 @@ export default function CreateMeetingPanel({
   }, [isOpen, editingId]);
 
   /* load both pools when the panel opens */
-  useEffect(() => { if (isOpen) { fetchOfficers(); fetchEmployees(); } }, [isOpen]);
+  useEffect(() => { if (isOpen) { fetchOfficers(); fetchEmployees(); fetchAssociates(); } }, [isOpen]);
 
   /* dev only: the API routes compile on first use (Google's library is large) —
      touch them when the form opens so they're ready by the time it's saved */
@@ -1161,24 +1280,22 @@ export default function CreateMeetingPanel({
     [GOOGLE_ROUTE, INVITE_ROUTE].forEach((u) => fetch(u, { method: 'HEAD' }).catch(() => {}));
   }, [isOpen]);
 
-  /* IAS search on the server — adds matching officers to the pool as you type */
+  /* directory search on the server (all four services) — adds matching officers to the pool as you type */
   async function searchIas(filter: string, limit = 50) {
-    try {
-      const res = await pb.collection('ias_officers').getList(1, limit, { filter, sort: 'name', requestKey: null });
-      const found = res.items.map((o: any) => mapOfficer(o, 'IAS'));
-      if (found.length) setOfficers((prev) => mergeOfficers(prev, found));
-    } catch (e) {
-      console.warn('[directory] IAS search failed', e);
-    }
+    const lists = await Promise.all(OFFICER_SERVICES.map((s) =>
+      pb.collection(OFFICER_COLLECTION[s]).getList(1, limit, { filter, sort: 'name', requestKey: null })
+        .then((res) => res.items.map((o: any) => mapOfficer(o, s)))
+        .catch((e) => { console.warn(`[directory] ${s} search failed`, e); return [] as Officer[]; })));
+    const found = lists.flat();
+    if (found.length) setOfficers((prev) => mergeOfficers(prev, found));
   }
 
   const iasQuery = (formData.meeting_type === 'Internal' ? '' : (officerSearch || extraSearch)).trim();
   useEffect(() => {
     if (!isOpen || iasQuery.length < 2) return;
     setIasSearching(true);
-    const q = pbq(iasQuery);
     const t = setTimeout(() => {
-      searchIas(['name', 'current_position', 'cadre', 'state', 'email'].map((f) => `${f} ~ "${q}"`).join(' || '))
+      searchIas(officerSearchFilter(iasQuery))
         .finally(() => setIasSearching(false));
     }, 250);
     return () => { clearTimeout(t); setIasSearching(false); };
@@ -1189,7 +1306,7 @@ export default function CreateMeetingPanel({
   useEffect(() => {
     if (!isOpen || !editingId) return;
     const parts: string[] = [];
-    if (formData.officer_type === 'IAS' && formData.officer_id) parts.push(`id = "${pbq(formData.officer_id)}"`);
+    if (serviceOf(formData.officer_type) && formData.officer_id) parts.push(`id = "${pbq(formData.officer_id)}"`);
     attendeeList.map((a) => a.trim().toLowerCase()).filter((a) => a.includes('@')).slice(0, 20)
       .forEach((e) => parts.push(`email = "${pbq(e)}"`));
     if (parts.length) searchIas(parts.join(' || '), 30);
@@ -1220,7 +1337,7 @@ export default function CreateMeetingPanel({
     if ((!officers.length && !employees.length) || !editingId) return;
     setExtraOfficers((prev) => {
       if (prev.length) return prev;
-      const pool = [...officers, ...employees];
+      const pool = [...officers, ...associates, ...employees];
       const emails = new Set(attendeeList.map((a) => a.trim().toLowerCase()).filter(Boolean));
       const matches = pool.filter((o) => o.email && emails.has(o.email.toLowerCase()));
       if (!matches.length) return prev;
@@ -1241,10 +1358,11 @@ export default function CreateMeetingPanel({
 
   useEffect(() => {
     if (!isOpen) return;
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    // while the "create officer / contact" panel is on top, Escape belongs to it
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape' && !newPersonType) onClose(); };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, newPersonType]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1322,7 +1440,7 @@ export default function CreateMeetingPanel({
       follow_up_notes: m.follow_up_notes || '',
       send_invite: m.send_invite ?? EMPTY_FORM.send_invite,
       sync_gcal: m.sync_gcal ?? EMPTY_FORM.sync_gcal,
-      add_meet: m.add_meet ?? EMPTY_FORM.add_meet,
+      video_call: videoPlatform(m.meet_link) === 'zoom' ? 'zoom' : (m.add_meet ?? true) ? 'meet' : 'none',
       created_by: m.created_by || '',
       meet_link: m.meet_link || '',
       gcal_event_id: m.gcal_event_id || '',
@@ -1330,8 +1448,18 @@ export default function CreateMeetingPanel({
       city: m.city || '',
     });
 
+    /* the other participants saved by name (lib/participants) — their e-mails are not repeated as attendees */
+    const savedExtras: Officer[] = parseParticipants(m.participants).map((p) => ({
+      id: p.id || `walkin:${p.name.toLowerCase()}`, name: p.name, email: p.email, designation: p.designation,
+      type: serviceOf(p.type) ?? 'Other',
+      ...(p.type === 'Associate' && { kind: 'Associate' as const }),
+    }));
+    const extraEmails = new Set(savedExtras.map((o) => o.email).filter(Boolean));
+    attendeesArr = attendeesArr.filter((a) => !extraEmails.has(a.trim().toLowerCase()));
+
     syncDurationUI(String(m.duration ?? ''));
     originalSlotRef.current = `${formattedDate}|${formattedTime}|${Number(m.duration) || 0}`;
+    originalStatusRef.current = normalizedStatus;
     setAttendeeList(attendeesArr);
     setAttendeeInput('');
 
@@ -1339,19 +1467,21 @@ export default function CreateMeetingPanel({
       setSelectedOfficer({
         id: m.officer_id || '', name: m.officer_name,
         designation: m.designation,
-        type: (m.officer_type as 'IAS' | 'IPS' | 'Other') || 'Other',
+        type: serviceOf(m.officer_type) ?? 'Other',
         contact_number: m.contact_number, email: m.email,
         department: m.department, current_position: m.current_position,
         batch_year: m.batch_year, cadre: m.cadre, state: m.state,
+        // "Schedule meeting" from the Associates list: keep it an associate (badge + Details)
+        ...(m.__kind === 'Associate' && { kind: 'Associate' as const, details: Array.isArray(m.__details) ? m.__details : undefined }),
       });
     } else {
       setSelectedOfficer(null);
     }
-    setExtraOfficers([]);
+    setExtraOfficers(savedExtras);
     setExtraSearch('');
     setShowOfficerEdit(false);
     setShowMoreDetails(Boolean(
-      m.attendees || m.follow_up_date || m.followup_date || m.follow_up_notes ||
+      savedExtras.length || m.attendees || m.follow_up_date || m.followup_date || m.follow_up_notes ||
       m.meet_link || m.gcal_link || m.send_invite || m.sync_gcal || m.add_meet,
     ));
 
@@ -1369,8 +1499,10 @@ export default function CreateMeetingPanel({
 
   function resetForm() {
     setFormData(EMPTY_FORM);
+    setExtrasOpen(false);
     loadedFollowUpRef.current = '';
     originalSlotRef.current = '';
+    originalStatusRef.current = '';
     setSelectedOfficer(null);
     setExtraOfficers([]);
     setExtraSearch('');
@@ -1394,40 +1526,57 @@ export default function CreateMeetingPanel({
 
   const LIST_CAP = 40;
   const filteredOfficersAll = useMemo(() => {
-    const pool = isInternal ? employees : officers;
+    const pool = isInternal ? employees : [...officers, ...associates];
     const q = officerSearch.trim().toLowerCase();
     return pool.filter((o) => {
-      if (isExternal && typeFilter !== 'All' && o.type !== typeFilter) return false;
+      if (isExternal && typeFilter === 'Associates' && o.kind !== 'Associate') return false;
+      if (isExternal && typeFilter !== 'All' && typeFilter !== 'Associates' && (o.type !== typeFilter || o.kind === 'Associate')) return false;
       if (!q) return true;
       return (
         o.name?.toLowerCase().includes(q) ||
         o.designation?.toLowerCase().includes(q) ||
         o.department?.toLowerCase().includes(q) ||
         o.cadre?.toLowerCase().includes(q) ||
-        o.state?.toLowerCase().includes(q)
+        o.state?.toLowerCase().includes(q) ||
+        o.email?.toLowerCase().includes(q) ||
+        o.batch_year?.toLowerCase().includes(q)
       );
     });
-  }, [officers, employees, officerSearch, typeFilter, isInternal, isExternal]);
+  }, [officers, employees, associates, officerSearch, typeFilter, isInternal, isExternal]);
 
   const officerSearchActive = !!officerSearch.trim();
   const filteredOfficers = officerSearchActive ? filteredOfficersAll : filteredOfficersAll.slice(0, LIST_CAP);
   const officersTruncated = !officerSearchActive && (filteredOfficersAll.length > LIST_CAP || (!isInternal && iasTotal > IAS_PAGE));
 
-  const extraCandidates = useMemo(() => {
+  /* "Add more participants" — a browsable list like the main picker; people already added stay
+     in it, marked Added (tap again to remove), like items in a cart.
+     internal → employees; external → officers + your own employees (colleagues who also attend) */
+  const extraPoolAll = useMemo(() => {
     const q = extraSearch.trim().toLowerCase();
-    if (!q) return [];
-    const pool = isInternal ? employees : officers;
-    const taken = new Set([selectedOfficer?.id, ...extraOfficers.map((o) => o.id)]);
-    return pool
-      .filter((o) => !taken.has(o.id))
-      .filter((o) =>
+    const tagged: { o: Officer; group: ExtraFilter }[] = isInternal
+      ? employees.map((o) => ({ o, group: 'Employees' as const }))
+      : [
+          ...officers.map((o) => ({ o, group: o.type as ExtraFilter })),
+          ...associates.map((o) => ({ o, group: 'Associates' as const })),
+          ...employees.map((o) => ({ o, group: 'Employees' as const })),
+        ];
+    return tagged
+      .filter(({ o }) => o.id !== selectedOfficer?.id)
+      .filter(({ group }) => isInternal || extraFilter === 'All' || group === extraFilter)
+      .filter(({ o }) => !q || (
         o.name?.toLowerCase().includes(q) ||
         o.designation?.toLowerCase().includes(q) ||
         o.department?.toLowerCase().includes(q) ||
-        o.cadre?.toLowerCase().includes(q)
-      )
-      .slice(0, 8);
-  }, [officers, employees, extraSearch, extraOfficers, selectedOfficer, isInternal]);
+        o.email?.toLowerCase().includes(q) ||
+        o.cadre?.toLowerCase().includes(q) ||
+        o.state?.toLowerCase().includes(q)
+      ));
+  }, [officers, employees, associates, extraSearch, extraFilter, selectedOfficer, isInternal]);
+  const extraPool = extraSearch.trim() ? extraPoolAll.slice(0, 80) : extraPoolAll.slice(0, LIST_CAP);
+  const isExtraAdded = (id: string) => extraOfficers.some((x) => x.id === id);
+  // the search text stays, so several people can be added from one search
+  const toggleExtra = (o: Officer) =>
+    setExtraOfficers((p) => (p.some((x) => x.id === o.id) ? p.filter((x) => x.id !== o.id) : [...p, o]));
 
   const participantLoading = isInternal ? employeeLoading : officerLoading;
 
@@ -1463,6 +1612,14 @@ export default function CreateMeetingPanel({
   /* ---------------- slot conflicts ---------------- */
 
   const busy = useBusySlots(formData.meeting_date, editingId, isOpen);
+  // Google Calendar / Meet only for the organisation that owns the Google account
+  const googleOn = useGoogleEnabled();
+  // which account the calendar event, Meet link and invites come from (lib/senders)
+  const senderInfo = useSenders(googleOn && isOpen).summary;
+  // who invite emails come from and the name shown (SendAsPicker) — also organises the calendar event
+  const sendAs = useSendAs(isOpen);
+  // Zoom links — when ZOOM_* keys are set on the server (lib/zoom)
+  const zoomOn = useZoomEnabled(isOpen);
   /* a Cancelled meeting never occupies a slot (same rule as the server hook) */
   const slotBlocking = (formData.status_flag || 'Scheduled').toLowerCase() !== 'cancelled';
   /* edit mode: only hard-block when date/time/duration actually changed */
@@ -1523,11 +1680,22 @@ export default function CreateMeetingPanel({
     if (errors.officer) setErrors((p) => ({ ...p, officer: '' }));
   };
 
-  const startManualOfficer = () => {
-    setSelectedOfficer({ id: '', name: '', type: 'Other' });
-    setFormData((prev) => ({ ...prev, officer_name: '', officer_id: '', officer_type: 'Other' }));
-    setShowOfficerEdit(true);
-    if (errors.officer) setErrors((p) => ({ ...p, officer: '' }));
+  /* a record just created in the directory → add it to the list (and the cache) and select it */
+  const handlePersonCreated = (rec: Record<string, any> | undefined, type: Officer['type'] | undefined) => {
+    if (!rec?.id || !type) return;
+    const officer = mapOfficer(rec, type);
+    setOfficers((prev) => mergeOfficers([officer], prev));
+    if (officerCache) officerCache = { ...officerCache, data: mergeOfficers([officer], officerCache.data) };
+    if (type !== 'Other') setIasTotal((n) => n + 1);
+    if (newPersonFor === 'extra') {
+      setExtraOfficers((p) => (p.some((x) => x.id === officer.id) ? p : [...p, officer]));
+      setExtraFilter('All');
+      showToast(`${officer.name} added to the directory and to this meeting`, 'success');
+      return;
+    }
+    handleSelectOfficer(officer);
+    setTypeFilter('All');
+    showToast(`${officer.name} added to the directory and selected`, 'success');
   };
 
   const handleClearOfficer = () => {
@@ -1552,8 +1720,28 @@ export default function CreateMeetingPanel({
   const handleRemoveExtraOfficer = (officer: Officer) =>
     setExtraOfficers((p) => p.filter((x) => x.id !== officer.id));
 
-  const handleOfficerField = (key: string, v: string) =>
-    setFormData((prev) => ({ ...prev, [key]: v }));
+  /* a batchmate picked from the Batchmates card — load the full record so the invite has their e-mail */
+  const handleAddBatchmate = async (b: BatchOfficer) => {
+    const col = OFFICER_COLLECTION[b.service];
+    const full = await pb.collection(col).getOne(b.id).catch(() => null);
+    handleAddExtraOfficer(full ? mapOfficer(full, b.service) : {
+      id: b.id, name: b.name, type: b.service, designation: b.position, current_position: b.position,
+      cadre: b.cadre, state: b.state, batch_year: b.batch,
+    });
+  };
+
+  /* names: letters only — invalid characters never reach the field */
+  const handleOfficerField = (key: string, v: string) => {
+    const clean = key === 'officer_name' ? cleanName(v) : v; // phone comes from <PhoneInput>
+    setFormData((prev) => ({ ...prev, [key]: clean }));
+    if (errors.officer) setErrors((p) => ({ ...p, officer: '' }));
+  };
+
+  /* participant details typed by hand are checked; picks from the directory are trusted */
+  const participantProblem = () =>
+    showOfficerEdit
+      ? nameError(formData.officer_name || '', { label: 'Participant name' }) || phoneError(formData.contact_number || '')
+      : '';
 
   const handleDateChange = (value: string) => {
     if (value && isPastISODate(value) && value !== formData.meeting_date) {
@@ -1697,28 +1885,83 @@ export default function CreateMeetingPanel({
   /* ---------------- automations ---------------- */
   /* Google runs first so the email can carry the Meet link.
      Returns a list of human-readable failures (empty = all OK). */
-  async function runAutomations(recId: string, payload: Record<string, any>) {
+  async function runAutomations(recId: string, payload: Record<string, any>, before: { slot: string; status: string } | null = null) {
     const failures: string[] = [];
-    const wantInvite = formData.send_invite;
+    /* Which email the participants get (lib/emailTemplates):
+         status changed to Cancelled → cancellation · to Completed → thank-you
+         date / time changed         → "meeting rescheduled" (with the old slot)
+         otherwise                   → the invitation */
+    const statusChanged = !!before && before.status !== payload.status;
+    const statusMail = !formData.send_invite || !statusChanged ? null
+      : /^cancel/i.test(payload.status) ? 'cancelled' as const
+      : /^complet/i.test(payload.status) ? 'thanks' as const : null;
+    const [prevDate = '', prevTime = ''] = (before?.slot || '').split('|');
+    const rescheduled = !!before?.slot && (prevDate !== payload.meeting_date || prevTime !== payload.meeting_time);
+    const mailTemplate = rescheduled ? { template: 'rescheduled', previous: { date: prevDate, time: prevTime } } : {};
+    const wantInvite = formData.send_invite && !statusMail && !/^(cancel|complet)/i.test(payload.status);
 
     const isEmail = (e: string) => /^\S+@\S+\.\S+$/.test(e);
     const primaryEmail = (formData.email || '').trim().toLowerCase();
-    const allEmails = Array.from(new Set(
-      [primaryEmail, ...extraOfficers.map((o) => o.email || ''), ...attendeeList]
-        .map((e) => e.trim().toLowerCase())
-        .filter(isEmail),
-    ));
+    /* everyone invited, each with their name — every one of them gets their own email
+       (and their own Google Calendar invitation) */
+    const people = new Map<string, string>(); // email → name
+    for (const [email, name] of [
+      [primaryEmail, payload.officer_name || ''],
+      ...extraOfficers.map((o) => [o.email || '', o.name || '']),
+      ...attendeeList.map((a) => [a, '']),
+    ] as [string, string][]) {
+      const e = email.trim().toLowerCase();
+      if (isEmail(e) && !people.has(e)) people.set(e, name);
+    }
+    const allEmails = [...people.keys()];
+    const otherParticipants = allEmails.filter((e) => e !== primaryEmail).map((email) => ({ email, name: people.get(email) || '' }));
 
     const notes = [
       payload.follow_up_date && `Follow-up date: ${payload.follow_up_date}`,
       payload.follow_up_notes && `Follow-up notes: ${payload.follow_up_notes}`,
     ].filter(Boolean).join('\n');
 
-    let meetLink = formData.meet_link || '';
+    const prevLink = formData.meet_link || '';
+    const prevZoom = videoPlatform(prevLink) === 'zoom';
+    const wantMeet = googleOn && formData.video_call === 'meet';
+    let meetLink = formData.video_call !== 'none' && videoPlatform(prevLink) === formData.video_call ? prevLink : '';
     let primaryInvited = false;
+    let gcalEvent: { uid?: string; organizer?: string; sequence?: number } | undefined; // the Google event the invites answer into
+    const notDelivered: string[] = []; // invite emails that couldn't be sent
+
+    /* 0) Zoom — create / move the Zoom meeting; switching away from Zoom removes it */
+    if (formData.video_call === 'zoom' && zoomOn) {
+      try {
+        const r = await postJSON('/api/zoom', {
+          agenda: payload.agenda,
+          date: payload.meeting_date,
+          time: payload.meeting_time,
+          duration: Number(payload.duration) || 30,
+          notes: [payload.officer_name && `With: ${payload.officer_name}`, notes].filter(Boolean).join('\n'),
+          existingLink: prevZoom ? prevLink : '',
+        }, 60_000); // no retry — a retried request could create a second Zoom meeting
+        if (r.joinUrl) {
+          meetLink = r.joinUrl;
+          if (r.joinUrl !== prevLink) {
+            try { await pb.collection('meetings').update(recId, { meet_link: r.joinUrl }); }
+            catch (e) { console.error('Saving the Zoom link failed:', e); }
+          }
+        }
+      } catch (err: any) {
+        console.error('/api/zoom failed:', err);
+        console.warn('[zoom]', err);
+        failures.push(err?.name === 'AbortError' ? 'The Zoom link took too long — please try again' : (err?.message || 'The Zoom link couldn’t be created'));
+      }
+    } else if (prevZoom && formData.video_call !== 'zoom') {
+      await removeZoomMeeting({ id: recId, meet_link: prevLink });
+    }
+    if (formData.video_call === 'none' && prevLink && !prevZoom) {
+      await pb.collection('meetings').update(recId, { meet_link: '' }).catch(() => {});
+    }
+    const zoomLink = videoPlatform(meetLink) === 'zoom' ? meetLink : '';
 
     /* 1) Google Calendar / Meet (+ email to the primary officer) */
-    if (formData.sync_gcal || formData.add_meet) {
+    if (googleOn && (formData.sync_gcal || wantMeet)) {
       try {
         const r = await postJSON(GOOGLE_ROUTE, {
           meetingId: recId,
@@ -1730,31 +1973,40 @@ export default function CreateMeetingPanel({
           notes,
           officerName: payload.officer_name,
           officerEmail: primaryEmail || allEmails[0] || '',
-          includeMeet: formData.add_meet,
+          includeMeet: wantMeet,
           sendInvite: wantInvite,
           syncCalendar: formData.sync_gcal,
           gcalEventId: formData.gcal_event_id || '',
-          existingMeetLink: formData.meet_link || '',
-        }, 45_000);
+          existingMeetLink: wantMeet ? meetLink : '',
+          videoLink: zoomLink, // a Zoom link goes into the event and the email instead of Meet
+          guests: otherParticipants, // the added participants are on the event too
+          ...sendAs.payload, // sender account, "on behalf of", the From name
+          ...mailTemplate, // after a date / time change → the "rescheduled" email
+        // generous: this runs in the background, and in dev the route may still be compiling
+        // (Google's library is large). No retry — a retried request could create a duplicate event.
+        }, 120_000);
 
-        if (r.meetLink) meetLink = r.meetLink;
+        if (wantMeet && r.meetLink) meetLink = r.meetLink;
         primaryInvited = !!r.emailSent;
+        gcalEvent = r.calendar || undefined;
 
         const update: Record<string, string> = {};
         if (r.eventId) update.gcal_event_id = r.eventId;
         if (r.htmlLink) update.gcal_link = r.htmlLink;
-        if (r.meetLink) update.meet_link = r.meetLink;
+        if (wantMeet && r.meetLink) update.meet_link = r.meetLink;
         if (Object.keys(update).length) {
           try { await pb.collection('meetings').update(recId, update); }
           catch (e) { console.error('Saving Google links failed:', e); }
         }
-        if (formData.add_meet && !r.meetLink) failures.push('Calendar saved, but no Meet link was created');
+        if (wantMeet && !r.meetLink) failures.push('Calendar saved, but no Meet link was created');
       } catch (err: any) {
-        console.error(`${GOOGLE_ROUTE} failed:`, err);
         if (err?.needsReconnect) {
-          failures.push('Calendar/Meet: Google connection expired — an admin must click “Reconnect Google” on the Meetings page');
+          // expected & handled (shown to the user below) — a warning, not a red dev-overlay error
+          console.warn(`${GOOGLE_ROUTE}: Google connection expired — renew GOOGLE_REFRESH_TOKEN in .env.local`);
+          failures.push('The meeting is saved, but Google Calendar needs to be reconnected — please ask your administrator');
         } else {
-          failures.push(`Calendar/Meet: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+          console.error(`${GOOGLE_ROUTE} failed:`, err);
+          failures.push(err?.name === 'AbortError' ? 'Google Calendar took too long — the meeting is saved' : (err?.message || 'Couldn’t add the meeting to Google Calendar'));
         }
       }
     }
@@ -1763,12 +2015,12 @@ export default function CreateMeetingPanel({
     if (wantInvite) {
       const recipients = primaryInvited ? allEmails.filter((e) => e !== primaryEmail) : allEmails;
       if (!allEmails.length) {
-        failures.push('Invite skipped: no participant has an email address');
+        failures.push('No invite sent — none of the participants has an email address');
       } else if (recipients.length) {
         try {
-          await postJSON(INVITE_ROUTE, {
-            to: recipients.join(', '),
-            name: recipients.length === 1 && recipients[0] === primaryEmail ? payload.officer_name : '',
+          const r = await postJSON(INVITE_ROUTE, {
+            // one personal email each ("Dear <name>"), not one shared email
+            recipients: recipients.map((email) => ({ email, name: people.get(email) || '' })),
             agenda: payload.agenda,
             date: new Date(`${payload.meeting_date}T00:00:00`).toLocaleDateString('en-IN', {
               weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
@@ -1781,12 +2033,54 @@ export default function CreateMeetingPanel({
             isoTime: payload.meeting_time,
             duration: Number(payload.duration) || 30,
             meetingId: recId,
-          }, 20_000);
+            ...sendAs.payload, // sender account, "on behalf of", the From name
+            ...mailTemplate, // after a date / time change → the "rescheduled" email
+            ...(gcalEvent && { calendar: gcalEvent }), // Yes / No / Maybe → updates the Google event
+          }, 180_000); // background, one email per person; no retry (would send the emails twice)
+          if (r?.failed?.length) {
+            failures.push(`Invite not delivered to ${r.failed.map((f: any) => f.email).join(', ')}`);
+            notDelivered.push(...r.failed.map((f: any) => String(f.email || '').toLowerCase()));
+          }
         } catch (err: any) {
           console.error(`${INVITE_ROUTE} failed:`, err);
-          failures.push(`Invite: ${err?.name === 'AbortError' ? 'timed out' : err?.message}`);
+          console.warn('[invite]', err);
+          failures.push(err?.name === 'AbortError' ? 'The invite emails took too long — please try again' : (err?.message || 'The invite emails couldn’t be sent'));
+          notDelivered.push(...recipients); // none of them got it
         }
       }
+    }
+
+    /* 2b) Cancelled / Completed → the cancellation or thank-you email to everyone with an email address */
+    if (statusMail && allEmails.length) {
+      try {
+        const r = await postJSON('/api/meeting-email', {
+          kind: statusMail,
+          meeting: { ...payload, id: recId, meet_link: meetLink || formData.meet_link || '' },
+          ...sendAs.payload,
+        }, 120_000);
+        if (r?.failed?.length) failures.push(`Not delivered to ${r.failed.join(', ')}`);
+      } catch (err: any) {
+        console.warn('[meeting-email]', err);
+        failures.push(err?.message || (statusMail === 'cancelled' ? 'The cancellation email couldn’t be sent' : 'The thank-you email couldn’t be sent'));
+      }
+    }
+
+    /* 3) "Meeting ready — share it": the Meet / Zoom link to copy, and everyone who did NOT get
+          the email (no email, a malformed one, or not delivered) — each with a WhatsApp button */
+    const manual: ManualShare[] = [];
+    if (wantInvite) {
+      const consider = (name: string, email: string, phone: string) => {
+        const e = email.trim().toLowerCase();
+        if (!e) manual.push({ name, phone, reason: 'no-email' });
+        else if (!isEmail(e)) manual.push({ name, phone, email, reason: 'invalid-email' });
+        else if (notDelivered.includes(e)) manual.push({ name, phone, email: e, reason: 'not-delivered' });
+      };
+      if (payload.officer_name) consider(payload.officer_name, formData.email || '', formData.contact_number || '');
+      for (const o of extraOfficers) consider(o.name || '', o.email || '', o.contact_number || '');
+      for (const a of attendeeList) if (!isEmail(a.trim().toLowerCase()) || notDelivered.includes(a.trim().toLowerCase())) consider(a, a, '');
+    }
+    if (meetLink || manual.length) {
+      showShareMeeting({ meeting: { ...payload, id: recId, meet_link: meetLink }, manual });
     }
 
     return failures;
@@ -1806,7 +2100,9 @@ export default function CreateMeetingPanel({
     const e: Record<string, string> = {};
     if (!formData.meeting_type) e.meeting_type = 'Please choose Internal or External.';
     if (!selectedOfficer?.name && !formData.officer_name) e.officer = 'Please choose a participant or add one manually.';
-    if (!formData.agenda.trim()) e.agenda = 'Please enter the agenda.';
+    if (!e.officer && participantProblem()) e.officer = participantProblem();
+    const agendaProblem = textError(formData.agenda, { label: 'Agenda' });
+    if (agendaProblem) e.agenda = agendaProblem === 'Agenda is required.' ? 'Please enter the agenda.' : agendaProblem;
     if (Object.keys(e).length) {
       setErrors((p) => ({ ...p, ...e }));
       setSubmitError(null);
@@ -1823,7 +2119,9 @@ export default function CreateMeetingPanel({
     const e: Record<string, string> = {};
     if (!formData.meeting_type) e.meeting_type = 'Please choose Internal or External.';
     if (!selectedOfficer?.name && !formData.officer_name) e.officer = 'Please choose a participant or add one manually.';
-    if (!formData.agenda.trim()) e.agenda = 'Please enter the agenda.';
+    if (!e.officer && participantProblem()) e.officer = participantProblem();
+    const agendaProblem = textError(formData.agenda, { label: 'Agenda' });
+    if (agendaProblem) e.agenda = agendaProblem === 'Agenda is required.' ? 'Please enter the agenda.' : agendaProblem;
     if (!formData.meeting_date) e.date = 'Please pick a date.';
     if (!formData.meeting_time) e.time = 'Please pick a time.';
     if (!formData.duration) e.duration = 'Please set a duration.';
@@ -1890,9 +2188,16 @@ export default function CreateMeetingPanel({
           ...attendeeList,
           ...extraOfficers.map((o) => o.email || '').filter(Boolean),
         ])).join(', '),
+        participants: extraOfficers.map((o): Participant => ({
+          id: o.id.startsWith('walkin:') ? '' : o.id,
+          name: o.name,
+          type: employees.some((e) => e.id === o.id) ? 'Employee' : o.kind === 'Associate' ? 'Associate' : o.type,
+          email: (o.email || '').toLowerCase(),
+          designation: o.designation || '',
+        })),
         send_invite: formData.send_invite,
-        sync_gcal: formData.sync_gcal,
-        add_meet: formData.add_meet,
+        sync_gcal: googleOn && formData.sync_gcal,
+        add_meet: googleOn && formData.video_call === 'meet',
         created_by: formData.created_by,
         city: formData.city.trim(),
       };
@@ -1902,15 +2207,26 @@ export default function CreateMeetingPanel({
         delete payload.follow_up_notes;
       }
 
+      /* the creator gets this meeting's follow-up alerts (lib/creatorAlerts) — set once, never on edit */
+      if (!editingId && pb.authStore.record?.email) {
+        payload.owner_email = String(pb.authStore.record.email).toLowerCase();
+      }
+
       let rec: any = editingId
         ? await pb.collection('meetings').update(editingId, payload)
         : await pb.collection('meetings').create(payload);
+      logActivity(editingId ? 'updated' : 'created', 'meeting', meetingLabel(rec), rec?.id);
+      if (payload.participants.length && rec && !('participants' in rec)) {
+        console.warn(PARTICIPANTS_FIELD_HINT);
+        showToast(PARTICIPANTS_FIELD_MISSING, 'error');
+      }
 
       /* follow_up_notes — make sure it actually landed on the record */
       if ('follow_up_notes' in payload && (rec?.follow_up_notes ?? '') !== payload.follow_up_notes) {
         rec = await pb.collection('meetings').update(rec.id, { follow_up_notes: payload.follow_up_notes });
         if ((rec?.follow_up_notes ?? '') !== payload.follow_up_notes) {
-          showToast('Follow-up notes could not be saved — check the follow_up_notes field in the meetings collection', 'error');
+          console.warn('[follow-up notes] not stored — check the follow_up_notes field in the meetings collection (PocketBase)', Object.keys(rec || {}));
+          showToast('The meeting is saved, but the follow-up notes couldn’t be stored. Please ask your administrator.', 'error');
         }
       }
 
@@ -1919,22 +2235,26 @@ export default function CreateMeetingPanel({
       /* The meeting is saved — close right away. Google Calendar / Meet and the
          invite emails can take several seconds, so they finish in the background
          and report back with a second toast (the list picks up the Meet link live). */
-      const hasAutomations = formData.sync_gcal || formData.add_meet || formData.send_invite;
+      const hasAutomations = (googleOn && (formData.sync_gcal || formData.video_call === 'meet')) || formData.send_invite
+        || formData.video_call !== 'meet' && !!formData.meet_link // switched the video call / removed it
+        || (zoomOn && formData.video_call === 'zoom');
       showToast(
         `${editingId ? 'Meeting updated' : 'Meeting created'}${hasAutomations ? ' — calendar & invites are being sent in the background' : ''}`,
         'success',
       );
+      // what the meeting was before this edit (slot + status) → which email the participants get
+      const before = editingId ? { slot: originalSlotRef.current, status: originalStatusRef.current } : null;
       onSavedMeeting?.({ ...payload, id: rec.id, __isNew: !editingId });
       onSuccess();
       onClose();
 
       if (hasAutomations) {
-        runAutomations(rec.id, payload)
+        runAutomations(rec.id, payload, before)
           .then((failures) => {
             if (failures.length) showToast(failures.join(' · '), 'error');
             else showToast(`Calendar & invites done — ${payload.agenda || 'meeting'}`, 'success');
           })
-          .catch((e) => showToast(`Calendar / invites failed: ${e?.message || 'unknown error'}`, 'error'));
+          .catch((e) => { console.error('[automations]', e); showToast('The meeting is saved, but the calendar / invites step didn’t finish — please try again later.', 'error'); });
       }
     } catch (err: any) {
       /* the PocketBase hook rejected it — someone booked this slot
@@ -1990,7 +2310,7 @@ export default function CreateMeetingPanel({
               <span key={s} className={`h-1.5 rounded-full transition-all ${step === s ? 'w-5 bg-violet-600' : 'w-1.5 bg-slate-200'}`} />
             ))}
           </div>
-          <button type="button" onClick={onClose}
+          <button type="button" onClick={onClose} aria-label="Close" data-tooltip="Close  ·  Esc"
             className="shrink-0 rounded-xl p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
             <X className="h-5 w-5" />
           </button>
@@ -2056,7 +2376,7 @@ export default function CreateMeetingPanel({
                   <div key={`list-${formData.meeting_type}`} className="c-fade-in">
                     {isExternal && (
                       <div className="mb-2 flex flex-wrap gap-1.5">
-                        {(['All', 'IAS', 'IPS', 'Other'] as const).map((t) => (
+                        {(['All', ...OFFICER_SERVICES, 'Other', ...(associates.length ? ['Associates' as const] : [])] as const).map((t) => (
                           <button key={t} type="button" onClick={() => setTypeFilter(t)}
                             className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition-all active:scale-95 ${
                               typeFilter === t ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
@@ -2087,21 +2407,36 @@ export default function CreateMeetingPanel({
                           <p className="mt-1.5 text-xs text-slate-400">
                             No {isInternal ? 'employees' : 'officers'} found{officerSearch ? ` for “${officerSearch}”` : ''}
                           </p>
+                          {isExternal && (
+                            <>
+                              <p className="mt-3 text-[11px] font-semibold text-slate-600">Add them to the directory and continue:</p>
+                              <div className="mt-2 flex flex-wrap justify-center gap-1.5">
+                                {NEW_PERSON_OPTIONS
+                                  .filter((p) => typeFilter === 'All' || p.type === typeFilter)
+                                  .map((p) => (
+                                    <button key={p.type} type="button" onClick={() => createPerson(p.type, 'main')}
+                                      className="inline-flex items-center gap-1 rounded-full bg-slate-900 px-3 py-1.5 text-[11.5px] font-semibold text-white transition hover:bg-slate-800 active:scale-95">
+                                      <Plus className="h-3 w-3" /> {p.label}
+                                    </button>
+                                  ))}
+                              </div>
+                            </>
+                          )}
                         </div>
                       ) : (
                         <div className="nice-scroll max-h-72 space-y-1.5 overflow-y-auto pr-0.5">
                           {filteredOfficers.map((o) => (
                             <button key={o.id} type="button" onClick={() => handleSelectOfficer(o)}
                               className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white p-2.5 text-left transition-all hover:border-violet-300 hover:bg-violet-50/40 active:scale-[.99]">
-                              <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold ${OFFICER_BADGE[o.type]?.avatar ?? OFFICER_BADGE.Other.avatar}`}>
+                              <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold ${badgeOf(o).avatar}`}>
                                 {initialsOf(o.name || '?')}
                               </span>
                               <span className="min-w-0 flex-1">
                                 <span className="flex items-center gap-1.5">
                                   <span className="truncate text-[13px] font-semibold text-slate-800">{o.name}</span>
                                   {isExternal && (
-                                    <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${OFFICER_BADGE[o.type]?.chip ?? OFFICER_BADGE.Other.chip}`}>
-                                      {o.type}
+                                    <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${badgeOf(o).chip}`}>
+                                      {labelOf(o)}
                                     </span>
                                   )}
                                 </span>
@@ -2118,7 +2453,7 @@ export default function CreateMeetingPanel({
                         <p className="mt-1.5 text-center text-[10px] text-slate-400">
                           {isInternal
                             ? `Showing first ${LIST_CAP} — type to search the full employee list`
-                            : `Showing a few of ${iasTotal.toLocaleString('en-IN')} IAS officers — type a name, post, cadre or state to search them all`}
+                            : `Showing a few of ${iasTotal.toLocaleString('en-IN')} officers — type a name, post, department or cadre to search them all`}
                         </p>
                       )}
                       {iasSearching && !isInternal && (
@@ -2127,27 +2462,38 @@ export default function CreateMeetingPanel({
                         </p>
                       )}
 
-                      <button type="button" onClick={startManualOfficer}
-                        className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-slate-300 py-2.5 text-xs font-semibold text-slate-500 transition-colors hover:border-violet-400 hover:text-violet-600">
-                        <Plus className="h-3.5 w-3.5" /> Add manually
-                      </button>
+                      {/* not in the list → create the officer / contact in the directory; it is selected on save */}
+                      {isExternal && filteredOfficers.length > 0 && (
+                        <div className="mt-2 flex flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-dashed border-slate-300 px-3 py-2.5">
+                          <span className="text-[11px] font-semibold text-slate-500">Not in the list?</span>
+                          {NEW_PERSON_OPTIONS.map((p) => (
+                            <button key={p.type} type="button" onClick={() => createPerson(p.type, 'main')}
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-violet-400 hover:text-violet-600 active:scale-95">
+                              <Plus className="h-3 w-3" /> {p.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : (
                   /* selected participant card */
                   <div className="rounded-2xl border border-violet-200 bg-violet-50/60 p-3">
                     <div className="flex items-start gap-3">
-                      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-xs font-bold ${OFFICER_BADGE[selectedOfficer.type]?.avatar ?? OFFICER_BADGE.Other.avatar}`}>
+                      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-xs font-bold ${badgeOf(selectedOfficer).avatar}`}>
                         {initialsOf(selectedOfficer.name || '?')}
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
                           <p className="truncate text-sm font-bold text-slate-900">{selectedOfficer.name || 'New contact'}</p>
-                          <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${OFFICER_BADGE[selectedOfficer.type]?.chip ?? OFFICER_BADGE.Other.chip}`}>
-                            {selectedOfficer.type}
+                          <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${badgeOf(selectedOfficer).chip}`}>
+                            {labelOf(selectedOfficer)}
                           </span>
                         </div>
                         {formData.designation && <p className="truncate text-[11px] text-slate-500">{formData.designation}</p>}
+                        {selectedOfficer.kind === 'Associate' && !!selectedOfficer.details?.length && (
+                          <AssociateDetails id={selectedOfficer.id} details={selectedOfficer.details} open={openDetails === selectedOfficer.id} onToggle={setOpenDetails} />
+                        )}
                         {(formData.contact_number || formData.email) && (
                           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
                             {formData.contact_number && (
@@ -2176,21 +2522,212 @@ export default function CreateMeetingPanel({
                     </div>
                     {showOfficerEdit && (
                       <div className="mt-3 grid grid-cols-1 gap-2 border-t border-violet-100 pt-3 sm:grid-cols-2">
-                        {OFFICER_EDIT_FIELDS.map((f) => (
-                          <label key={f.key} className="block">
-                            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{f.label}</span>
-                            <input
-                              value={(formData as any)[f.key] ?? ''}
-                              onChange={(e) => handleOfficerField(f.key, e.target.value)}
-                              className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-500/10"
-                            />
-                          </label>
-                        ))}
+                        {OFFICER_EDIT_FIELDS.map((f) =>
+                          f.key === 'contact_number' ? (
+                            /* a div, not a label — PhoneInput has its own label for the country picker */
+                            <div key={f.key}>
+                              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{f.label}</span>
+                              <PhoneInput
+                                value={formData.contact_number ?? ''}
+                                onChange={(v) => handleOfficerField('contact_number', v)}
+                                className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                              />
+                            </div>
+                          ) : (
+                            <label key={f.key} className="block">
+                              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{f.label}</span>
+                              <input
+                                value={(formData as any)[f.key] ?? ''}
+                                onChange={(e) => handleOfficerField(f.key, e.target.value)}
+                                type={f.key === 'email' ? 'email' : 'text'}
+                                className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-500/10"
+                              />
+                            </label>
+                          ),
+                        )}
                       </div>
                     )}
                   </div>
                 )}
                 <FieldError message={errors.officer} />
+                {selectedOfficer && (
+                  <>
+                    {/* same-batch IAS / IPS officers — add any of them to this meeting */}
+                    {selectedOfficer.type !== 'Other' && (
+                      <div className="mt-3">
+                        <BatchmatesCard
+                          mode="form"
+                          officer={{ id: selectedOfficer.id, name: selectedOfficer.name, type: selectedOfficer.type, batch_year: formData.batch_year || selectedOfficer.batch_year }}
+                          place={{ city: formData.city, location: formData.location, address: formData.address }}
+                          onAdd={handleAddBatchmate}
+                          addedIds={extraOfficers.map((o) => o.id)}
+                        />
+                      </div>
+                    )}
+                    {/* more participants — right under the main one; the list opens only when asked for, so the form stays short */}
+                    <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-3">
+                      <button type="button" onClick={() => setExtrasOpen((o) => !o)} aria-expanded={extrasOpen}
+                        className={`flex w-full items-center gap-2 text-left ${extrasOpen ? 'mb-2' : ''}`}>
+                        <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-violet-50 text-violet-600">
+                          <Plus className={`h-3.5 w-3.5 transition-transform duration-300 ${extrasOpen ? 'rotate-45' : ''}`} />
+                        </span>
+                        <span className="flex-1 text-[12px] font-semibold text-slate-700">
+                          {extrasOpen ? 'Add more participants' : extraOfficers.length ? 'Add or remove participants' : 'Add more participants'}
+                        </span>
+                        {extraOfficers.length > 0 && (
+                          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+                            {extraOfficers.length} added
+                          </span>
+                        )}
+                        <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform duration-300 ${extrasOpen ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      {extrasOpen && (<>
+                      {/* type chips + search — same as choosing the main participant */}
+                      {!isInternal && (
+                        <div className="mb-2 flex flex-wrap gap-1.5">
+                          {EXTRA_FILTERS.map((t) => (
+                            <button key={t} type="button" onClick={() => setExtraFilter(t)}
+                              className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition-all active:scale-95 ${
+                                extraFilter === t ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                              }`}>{t}</button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3.5 transition focus-within:border-violet-400 focus-within:ring-4 focus-within:ring-violet-500/10">
+                        <Search className="h-4 w-4 shrink-0 text-slate-400" />
+                        <input
+                          value={extraSearch}
+                          onChange={(e) => setExtraSearch(e.target.value)}
+                          placeholder={isInternal ? 'Search employees by name, designation…' : 'Search officers or employees by name, designation…'}
+                          className="w-full bg-transparent py-2.5 text-sm outline-none placeholder:text-slate-400"
+                        />
+                        {extraSearch && (
+                          <button type="button" onClick={() => setExtraSearch('')} aria-label="Clear search"
+                            className="rounded-full p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+
+                      {/* the list — ADD puts a person in the meeting, ADDED takes them out again */}
+                      <div className="mt-2">
+                        {participantLoading ? (
+                          <div className="flex items-center justify-center gap-2 py-6 text-sm text-slate-400">
+                            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                          </div>
+                        ) : extraPool.length === 0 ? (
+                          <div className="rounded-2xl border border-dashed border-slate-200 py-6 text-center">
+                            <User className="mx-auto h-5 w-5 text-slate-300" />
+                            <p className="mt-1.5 text-xs text-slate-400">
+                              Nobody found{extraSearch ? ` for “${extraSearch}”` : ''}
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="nice-scroll max-h-72 space-y-1.5 overflow-y-auto pr-0.5">
+                            {extraPool.map(({ o, group }) => {
+                              const added = isExtraAdded(o.id);
+                              return (
+                                <div key={`${group}:${o.id}`}
+                                  className={`flex items-center gap-3 rounded-2xl border p-2.5 transition-all ${
+                                    added ? 'border-emerald-200 bg-emerald-50/50' : 'border-slate-200 bg-white hover:border-violet-200'
+                                  }`}>
+                                  <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold ${badgeOf(o).avatar}`}>
+                                    {initialsOf(o.name || '?')}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="flex items-center gap-1.5">
+                                      <span className="truncate text-[13px] font-semibold text-slate-800">{o.name}</span>
+                                      {!isInternal && (
+                                        <span className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${
+                                          group === 'Employees' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : badgeOf(o).chip
+                                        }`}>
+                                          {group === 'Employees' ? 'Employee' : labelOf(o)}
+                                        </span>
+                                      )}
+                                    </span>
+                                    <span className="block truncate text-[11px] text-slate-400">
+                                      {[o.designation, o.department].filter(Boolean).join(' · ') || '—'}
+                                    </span>
+                                    {o.kind === 'Associate' && !!o.details?.length && (
+                                      <AssociateDetails id={o.id} details={o.details} open={openDetails === o.id} onToggle={setOpenDetails} />
+                                    )}
+                                  </span>
+                                  <button type="button" onClick={() => toggleExtra(o)}
+                                    title={added ? 'Remove from this meeting' : 'Add to this meeting'}
+                                    className={`inline-flex w-[84px] shrink-0 items-center justify-center gap-1 rounded-lg py-1.5 text-[11px] font-extrabold tracking-wide shadow-sm transition-all active:scale-95 ${
+                                      added
+                                        ? 'bg-emerald-600 text-white hover:bg-rose-600'
+                                        : 'border border-slate-300 bg-white text-emerald-700 hover:border-emerald-500 hover:bg-emerald-50'
+                                    }`}>
+                                    {added ? <><Check className="h-3.5 w-3.5" /> ADDED</> : <>ADD <Plus className="h-3.5 w-3.5" /></>}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {!extraSearch.trim() && extraPoolAll.length > extraPool.length && (
+                          <p className="mt-1.5 text-center text-[10px] text-slate-400">
+                            Showing {extraPool.length} of {extraPoolAll.length}{!isInternal && iasTotal > IAS_PAGE ? ' (+ more officers)' : ''} — type to search everyone
+                          </p>
+                        )}
+                        {iasSearching && !isInternal && extraSearch.trim() && (
+                          <p className="mt-1.5 flex items-center justify-center gap-1.5 text-[10px] text-slate-400">
+                            <Loader2 className="h-3 w-3 animate-spin" /> Searching the IAS directory…
+                          </p>
+                        )}
+                        {/* not in the list → create them in the directory; they're added to this meeting on save */}
+                        {!isInternal && (
+                          <div className="mt-2 flex flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-dashed border-slate-300 px-3 py-2.5">
+                            <span className="text-[11px] font-semibold text-slate-500">Not in the list?</span>
+                            {NEW_PERSON_OPTIONS.map((p) => (
+                              <button key={p.type} type="button" onClick={() => createPerson(p.type, 'extra')}
+                                className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-violet-400 hover:text-violet-600 active:scale-95">
+                                <Plus className="h-3 w-3" /> {p.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      </>)}
+
+                      {/* the "cart" — everyone added, with their invite status (shown even when the list is closed) */}
+                      {extraOfficers.length > 0 && (
+                        <div className="mt-3 rounded-xl bg-slate-50 p-2.5 ring-1 ring-slate-100">
+                          <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            In this meeting · {selectedOfficer.name || 'Main participant'} + {extraOfficers.length}
+                          </p>
+                        <div className="mb-2 flex flex-wrap gap-1.5">
+                          {extraOfficers.map((o) => (
+                            <span key={o.id}
+                              title={o.email ? `Gets their own invite at ${o.email}` : 'No email address — won’t receive the invite'}
+                              className={`inline-flex items-center gap-1 rounded-full border py-1 pl-2 pr-1 text-[11px] font-semibold ${
+                                o.email ? 'border-slate-200 bg-slate-50 text-slate-700' : 'border-amber-200 bg-amber-50 text-amber-800'
+                              }`}>
+                              {o.email
+                                ? <Mail className="h-3 w-3 shrink-0 text-violet-500" />
+                                : <AlertCircle className="h-3 w-3 shrink-0 text-amber-500" />}
+                              {o.name}
+                              <button type="button" onClick={() => handleRemoveExtraOfficer(o)}
+                                className="rounded-full p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                          <p className="flex items-center gap-1 text-[10px] text-slate-500">
+                            <Mail className="h-3 w-3 text-violet-500" />
+                            {formData.send_invite
+                              ? `Everyone gets their own invite email${googleOn && formData.sync_gcal ? ' and calendar invitation' : ''}`
+                              : 'Turn on “Send invite” in the next step to email them'}
+                            {extraOfficers.some((o) => !o.email) && ' · ⚠ marked people have no email'}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* agenda lives in Step 1 */}
@@ -2203,6 +2740,7 @@ export default function CreateMeetingPanel({
                     if (errors.agenda) setErrors((p) => ({ ...p, agenda: '' }));
                   }}
                   rows={3}
+                  maxLength={AGENDA_MAX}
                   placeholder="What is this meeting about?"
                   className={`${inputCls} resize-y ${errors.agenda ? inputErr : ''}`}
                 />
@@ -2216,7 +2754,10 @@ export default function CreateMeetingPanel({
             <div className="space-y-4">
               {/* summary pills */}
               <div className="flex flex-wrap items-center gap-2">
-                {selectedOfficer?.name && <Pill><User className="h-3.5 w-3.5" />{selectedOfficer.name}</Pill>}
+                {/* everyone in the meeting: the main person, then the participants added to them */}
+                {[selectedOfficer?.name, ...extraOfficers.map((o) => o.name)].filter(Boolean).map((name, i) => (
+                  <Pill key={`${i}-${name}`}><User className="h-3.5 w-3.5" />{name}</Pill>
+                ))}
                 {formData.agenda.trim() && (
                   <Pill><Edit2 className="h-3.5 w-3.5" />{formData.agenda.length > 28 ? `${formData.agenda.slice(0, 28)}…` : formData.agenda}</Pill>
                 )}
@@ -2324,6 +2865,8 @@ export default function CreateMeetingPanel({
                   onPick={applySuggestion}
                 />
                 <ParticipantNotice meetings={participantClashes} />
+                {/* enough time to travel from the previous meeting / to the next one? */}
+                <TravelTimeNotice planned={formData} editingId={editingId} />
               </div>
 
               {/* place */}
@@ -2448,6 +2991,9 @@ export default function CreateMeetingPanel({
                 />
               </div>
 
+              {/* who the emails come from — the MD himself, or the PA (on his behalf / in her own name) */}
+              {formData.send_invite && <SendAsPicker state={sendAs} className="c-fade-up" />}
+
               {/* more details */}
               <div className="c-fade-up">
                 <button type="button" onClick={() => setShowMoreDetails((v) => !v)}
@@ -2478,49 +3024,6 @@ export default function CreateMeetingPanel({
                         placeholder="Next steps, things to follow up on…"
                         className={`${inputCls} resize-y`}
                       />
-                    </div>
-
-                    {/* additional officers */}
-                    <div className="rounded-2xl border border-slate-200 bg-white p-3">
-                      <p className="mb-2 text-[11px] font-semibold text-slate-500">
-                        Additional {isInternal ? 'employees' : 'officers'}
-                      </p>
-                      {extraOfficers.length > 0 && (
-                        <div className="mb-2 flex flex-wrap gap-1.5">
-                          {extraOfficers.map((o) => (
-                            <span key={o.id} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 py-1 pl-2.5 pr-1 text-[11px] font-semibold text-slate-700">
-                              {o.name}
-                              <button type="button" onClick={() => handleRemoveExtraOfficer(o)}
-                                className="rounded-full p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
-                                <X className="h-3 w-3" />
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      <input
-                        value={extraSearch}
-                        onChange={(e) => setExtraSearch(e.target.value)}
-                        placeholder="Search directory to add more…"
-                        className={inputCls}
-                      />
-                      {extraCandidates.length > 0 && (
-                        <div className="mt-1.5 space-y-1 rounded-xl border border-slate-200 bg-white p-1.5">
-                          {extraCandidates.map((o) => (
-                            <button key={o.id} type="button" onClick={() => handleAddExtraOfficer(o)}
-                              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-violet-50">
-                              <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[9px] font-bold ${OFFICER_BADGE[o.type].avatar}`}>
-                                {initialsOf(o.name || '?')}
-                              </span>
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate text-xs font-semibold text-slate-800">{o.name}</span>
-                                <span className="block truncate text-[10px] text-slate-400">{o.designation}</span>
-                              </span>
-                              <Plus className="h-3.5 w-3.5 shrink-0 text-violet-500" />
-                            </button>
-                          ))}
-                        </div>
-                      )}
                     </div>
 
                     {/* attendees */}
@@ -2554,20 +3057,39 @@ export default function CreateMeetingPanel({
                       </div>
                     </div>
 
+                    {/* where invites come from / which calendars get the meeting (Settings → Google accounts) */}
+                    {googleOn && senderInfo && (formData.sync_gcal || formData.video_call === 'meet' || formData.send_invite) && (
+                      <p className="flex items-start gap-2 rounded-2xl bg-violet-50/60 px-3.5 py-2.5 text-[11px] leading-relaxed text-slate-600 ring-1 ring-inset ring-violet-100">
+                        <Mail className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-500" />
+                        <span>
+                          Invites are sent from <b>{sendAs.me?.email || senderInfo.from.email || senderInfo.from.label}</b>
+                          {senderInfo.calendars.length > 1 && <> · the event is saved in <b>{senderInfo.calendars.length}</b> Google calendars ({senderInfo.calendars.join(', ')})</>}
+                          {senderInfo.from.google.connected === false && <span className="block text-amber-700">{senderInfo.from.email} isn’t connected yet — the event goes from {senderInfo.calendars.find((c) => c !== senderInfo.from.email) || 'the other account'} until an admin connects it in Settings → Google accounts.</span>}
+                        </span>
+                      </p>
+                    )}
+
                     {/* toggles */}
                     <div className="space-y-2">
                       <ToggleRow icon={Mail} title="Send invite" description="Email the agenda to participants"
                         checked={formData.send_invite} onChange={(v) => setFormData((p) => ({ ...p, send_invite: v }))} />
-                      <ToggleRow icon={Calendar} title="Sync to Google Calendar" description="Create / update the calendar event"
-                        checked={formData.sync_gcal} onChange={(v) => setFormData((p) => ({ ...p, sync_gcal: v }))} />
-                      <ToggleRow icon={Video} title="Add Google Meet link" description="Attach a Meet link to the event"
-                        checked={formData.add_meet} onChange={(v) => setFormData((p) => ({ ...p, add_meet: v }))} />
+                      {googleOn && (
+                        <>
+                          <ToggleRow icon={Calendar} title="Sync to Google Calendar" description="Create / update the calendar event"
+                            checked={formData.sync_gcal} onChange={(v) => setFormData((p) => ({ ...p, sync_gcal: v }))} />
+                        </>
+                      )}
+                      {(googleOn || zoomOn) && (
+                        <VideoCallChoice value={formData.video_call} meet={googleOn} zoom={zoomOn}
+                          onChange={(v) => setFormData((p) => ({ ...p, video_call: v }))} />
+                      )}
                     </div>
+
 
                     {(formData.meet_link || formData.gcal_link) && (
                       <a href={formData.meet_link || formData.gcal_link} target="_blank" rel="noreferrer"
                         className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-violet-600 transition-colors hover:bg-violet-50">
-                        <Video className="h-4 w-4" /> Open meeting link
+                        <Video className="h-4 w-4" /> {formData.meet_link ? `Open ${videoLabel(formData.meet_link)} link` : 'Open calendar event'}
                       </a>
                     )}
                   </div>
@@ -2599,6 +3121,16 @@ export default function CreateMeetingPanel({
           )}
         </div>
       </div>
+
+      {/* new IAS / IPS officer or contact — opens on top; once saved it is selected and the meeting continues */}
+      <CreateOfficerPanel
+        isOpen={!!newPersonType}
+        stacked
+        officerType={newPersonType ?? undefined}
+        initialName={officerSearch}
+        onClose={() => setNewPersonType(null)}
+        onSuccess={handlePersonCreated}
+      />
     </div>
   );
 }

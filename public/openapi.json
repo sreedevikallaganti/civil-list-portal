@@ -1,0 +1,1164 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Civillist — Meeting Management API",
+    "version": "0.1.0",
+    "summary": "Server routes of the Civillist Next.js app: health, Google Calendar / Meet sync and email invites.",
+    "description": "These are the app's own server routes (Next.js `src/app/api`).\n\n**Data** (meetings, officers, contacts, employees, users) is **not** served here — it lives in **PocketBase** and is read/written through PocketBase's built-in REST API, proxied by this app at `/pb/api/...` (see https://pocketbase.io/docs/api-records/).\n\n**Authentication** — protected routes expect the signed-in user's PocketBase token in the `Authorization` header (`Authorization: <token>`; a `Bearer ` prefix is also accepted). Get one with `POST /api/auth/login` (in this page the token is applied to Authorize automatically). The token's account role decides access: **viewer** < **editor** < **admin** (Admin / Super Admin roles and PocketBase superusers are admin).\n\n⚠️ *Try it out* calls the real server: Google routes create/delete real calendar events and the invite route sends real email."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This app (same origin)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Log in, check who you are, log out — one login for everyone, the same rules as the `/login` page.\n\n**Try it:** open **Log in → Try it out**, enter your email and password, **Execute**. The token is applied to **Authorize** automatically, so every other route now runs as you. Then **Check** shows who you are signed in as. (Already signed in to the app in this browser? That session is used without logging in here.)\n\nUnder the hood the app signs in with PocketBase (proxied at `/pb`): `users` first, then `_superusers`."
+    },
+    {
+      "name": "Health",
+      "description": "Is the app working?"
+    },
+    {
+      "name": "Google",
+      "description": "Google Calendar events, Meet links and the Google account connection"
+    },
+    {
+      "name": "Email",
+      "description": "Meeting invite emails with a calendar (.ics) attachment"
+    },
+    {
+      "name": "Activity",
+      "description": "The audit trail shown on Reports → Activity Log"
+    }
+  ],
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Log in — one login for everyone",
+        "description": "Same rules as the /login page: app users first (Admin, Super Admin, Editor, Viewer), then PocketBase superusers; deactivated accounts are refused. **In this page the returned token is applied to Authorize automatically** — every other route then runs as you.",
+        "operationId": "login",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Logged in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Email or password missing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid email or password.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated (status is not Active).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database (PocketBase) cannot be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Check — who am I signed in as?",
+        "description": "Verifies the token in the Authorization header and returns the account and its access level. Use it to confirm a login worked or a session is still valid.",
+        "operationId": "me",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or the session expired — log in again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Log out",
+        "description": "Tokens are stateless, so logging out means deleting the token on your side (the app clears it from the browser; in this page the token is removed from Authorize automatically). This call also drops it from the server's short verification cache.",
+        "operationId": "logout",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Status of every service",
+        "description": "Public. Reports ok / warn / down for the database (PocketBase), Google Calendar (refresh token), SMTP email and configuration — never addresses, emails or secrets. Sub-checks are cached for 1 minute (SMTP for 5); pass `fresh` to re-check now.",
+        "operationId": "getHealth",
+        "security": [],
+        "parameters": [
+          {
+            "name": "fresh",
+            "in": "query",
+            "required": false,
+            "description": "Present (any value) → skip the caches and re-check every service now.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The app is usable (`status` is `ok` or `degraded`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The app is down — the database cannot be reached (`status` is `down`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/google": {
+      "post": {
+        "tags": [
+          "Google"
+        ],
+        "summary": "Create or update a meeting's Google Calendar event (+ Meet link, + invite email)",
+        "description": "Requires **editor**. Creates the event (or updates it when `gcalEventId` is given), optionally adds a Google Meet link, and optionally emails the main participant. When neither calendar nor invite is wanted it returns `skipped: true` without calling Google.",
+        "operationId": "syncGoogleEvent",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoogleSyncRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event saved (or skipped).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleSyncResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Not signed in / session expired — **or** the Google refresh token expired (`needsReconnect: true`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Google"
+        ],
+        "summary": "Remove a meeting's Google Calendar event",
+        "description": "Requires **editor**. Used when a meeting is cancelled or deleted. An event that is already gone counts as success.",
+        "operationId": "deleteGoogleEvent",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "gcalEventId"
+                ],
+                "properties": {
+                  "gcalEventId": {
+                    "type": "string",
+                    "description": "Google Calendar event id saved on the meeting (`gcal_event_id`)."
+                  },
+                  "notify": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Email attendees about the cancellation."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Google"
+        ],
+        "summary": "Warm-up ping",
+        "description": "Public, no data. The meeting form calls it in development so the route is compiled before the first save.",
+        "operationId": "pingGoogleRoute",
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "Ready."
+          }
+        }
+      }
+    },
+    "/api/google/status": {
+      "post": {
+        "tags": [
+          "Google"
+        ],
+        "summary": "Is the Google account still connected?",
+        "description": "Requires **viewer**. Exchanges the stored refresh token for an access token to prove it still works. Cached for 1 minute unless `fresh` is true.",
+        "operationId": "getGoogleStatus",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "fresh": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Connection state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/google/connect": {
+      "post": {
+        "tags": [
+          "Google"
+        ],
+        "summary": "Start (re)connecting the Google account",
+        "description": "Requires **admin**. Returns Google's consent-screen URL with a signed, 10-minute `state`. Open it in the browser; Google then redirects to `/api/google/callback`. The redirect URI must be listed in the OAuth client's *Authorized redirect URIs*.",
+        "operationId": "startGoogleConnect",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Consent URL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "url"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/google/callback": {
+      "get": {
+        "tags": [
+          "Google"
+        ],
+        "summary": "OAuth redirect target (browser only)",
+        "description": "Called by Google after consent — not by clients. Verifies `state`, exchanges `code` for tokens and saves the new refresh token to `.google-token.json`. Always answers with a small HTML page describing the result.",
+        "operationId": "googleOAuthCallback",
+        "security": [],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Authorization code from Google."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Signed state from /api/google/connect."
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Set by Google when the user cancels."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML result page (connected, cancelled, link expired or failed).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/invite": {
+      "post": {
+        "tags": [
+          "Email"
+        ],
+        "summary": "Send a meeting invite (or update) by email",
+        "description": "Requires **editor**. Emails up to 25 recipients. With `isoDate` + `isoTime` a calendar invite (.ics, METHOD:REQUEST) is attached so recipients get Yes / No / Maybe. With `notice` the email is an update (subject *Update: …*) that replaces the earlier calendar entry.",
+        "operationId": "sendInvite",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "sent": {
+                      "type": "integer",
+                      "description": "Number of recipients."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Email"
+        ],
+        "summary": "Warm-up ping",
+        "description": "Public, no data. Used by the meeting form in development.",
+        "operationId": "pingInviteRoute",
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "Ready."
+          }
+        }
+      }
+    },
+    "/api/activity": {
+      "post": {
+        "tags": [
+          "Activity"
+        ],
+        "summary": "Record an activity log entry",
+        "description": "Requires any signed-in user (viewer and above). The caller sends what happened; who did it (user id and name), the IP address, the device (user agent) and the time are filled in on the server from the verified session, so they cannot be faked. Written to the PocketBase `activity_logs` collection with the caller's own session, so that collection's Create rule applies.",
+        "operationId": "logActivity",
+        "security": [
+          {
+            "PocketBaseToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "action"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "maxLength": 40,
+                    "examples": [
+                      "created",
+                      "status changed",
+                      "deleted",
+                      "login"
+                    ]
+                  },
+                  "resource_type": {
+                    "type": "string",
+                    "maxLength": 40,
+                    "examples": [
+                      "meeting",
+                      "officer",
+                      "contact",
+                      "user",
+                      "auth"
+                    ]
+                  },
+                  "resource_id": {
+                    "type": "string",
+                    "maxLength": 40
+                  },
+                  "details": {
+                    "type": "string",
+                    "maxLength": 500,
+                    "examples": [
+                      "Meeting “Budget review” with Shri R. Kumar on 8 Oct 2026 → Completed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "PocketBase refused the entry — check the activity_logs Create rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The database could not be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "PocketBaseToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "The signed-in user's PocketBase auth token (from `pb.authStore.token`, or `POST /pb/api/collections/users/auth-with-password`). Paste the raw token."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Missing or invalid input.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No token, or the session expired — sign in again.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Signed in, but the account's role is too low for this action.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Google / SMTP / server failure; `error` explains it.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "examples": [
+              "Sign in required",
+              "Google connection expired"
+            ]
+          },
+          "needsReconnect": {
+            "type": "boolean",
+            "description": "true when the Google refresh token must be renewed."
+          }
+        }
+      },
+      "Ok": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": [
+          "status",
+          "summary",
+          "checkedAt",
+          "durationMs",
+          "app",
+          "checks"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "down"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "examples": [
+              "Everything is working."
+            ]
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "durationMs": {
+            "type": "integer"
+          },
+          "app": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "environment": {
+                "type": "string",
+                "examples": [
+                  "production",
+                  "development"
+                ]
+              },
+              "node": {
+                "type": "string"
+              },
+              "uptimeSeconds": {
+                "type": "integer"
+              }
+            }
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthCheck"
+            }
+          }
+        }
+      },
+      "HealthCheck": {
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "status",
+          "ms",
+          "detail",
+          "critical"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "enum": [
+              "database",
+              "google",
+              "email",
+              "config"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warn",
+              "down"
+            ]
+          },
+          "ms": {
+            "type": "integer",
+            "description": "How long the check took."
+          },
+          "detail": {
+            "type": "string"
+          },
+          "critical": {
+            "type": "boolean",
+            "description": "true = the app cannot work without it (only the database)."
+          }
+        }
+      },
+      "GoogleSyncRequest": {
+        "type": "object",
+        "required": [
+          "date"
+        ],
+        "properties": {
+          "meetingId": {
+            "type": "string",
+            "description": "PocketBase meeting id (added to the event description)."
+          },
+          "agenda": {
+            "type": "string",
+            "description": "Event title."
+          },
+          "date": {
+            "type": "string",
+            "format": "date",
+            "examples": [
+              "2026-10-08"
+            ]
+          },
+          "time": {
+            "type": "string",
+            "pattern": "^\\d{2}:\\d{2}$",
+            "default": "09:00",
+            "examples": [
+              "14:30"
+            ]
+          },
+          "duration": {
+            "type": "integer",
+            "default": 30,
+            "description": "Minutes."
+          },
+          "location": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "officerName": {
+            "type": "string"
+          },
+          "officerEmail": {
+            "type": "string",
+            "format": "email",
+            "description": "Invited when `sendInvite` is true."
+          },
+          "includeMeet": {
+            "type": "boolean",
+            "default": false,
+            "description": "Add a Google Meet link."
+          },
+          "sendInvite": {
+            "type": "boolean",
+            "default": false,
+            "description": "Email the main participant."
+          },
+          "syncCalendar": {
+            "type": "boolean",
+            "default": true,
+            "description": "Create / update the calendar event."
+          },
+          "gcalEventId": {
+            "type": "string",
+            "description": "Existing event to update instead of creating a new one."
+          },
+          "existingMeetLink": {
+            "type": "string",
+            "description": "Keep this Meet link instead of creating another."
+          }
+        }
+      },
+      "GoogleSyncResponse": {
+        "type": "object",
+        "properties": {
+          "skipped": {
+            "type": "boolean",
+            "description": "true when nothing was requested."
+          },
+          "eventId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Save on the meeting as `gcal_event_id`."
+          },
+          "htmlLink": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri",
+            "description": "Event page in Google Calendar."
+          },
+          "meetLink": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri"
+          },
+          "emailSent": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GoogleStatus": {
+        "type": "object",
+        "required": [
+          "connected"
+        ],
+        "properties": {
+          "connected": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "null = Google could not be reached to tell."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "not_connected",
+              "expired",
+              "error"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "InviteRequest": {
+        "type": "object",
+        "required": [
+          "to",
+          "agenda"
+        ],
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "1–25 emails separated by commas, semicolons or spaces.",
+            "examples": [
+              "officer@example.gov.in, pa@example.gov.in"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Greeting name (\"Dear …\")."
+          },
+          "agenda": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string",
+            "description": "Human-readable date shown in the email.",
+            "examples": [
+              "Thu, 8 Oct 2026"
+            ]
+          },
+          "time": {
+            "type": "string",
+            "description": "Human-readable time shown in the email.",
+            "examples": [
+              "14:30 hrs (30 min)"
+            ]
+          },
+          "location": {
+            "type": "string"
+          },
+          "meetLink": {
+            "type": "string",
+            "format": "uri"
+          },
+          "notice": {
+            "type": "string",
+            "description": "Makes this an update, e.g. \"Running 15 minutes late — new time 11:15\"."
+          },
+          "isoDate": {
+            "type": "string",
+            "format": "date",
+            "description": "With isoTime: attach a calendar invite (.ics)."
+          },
+          "isoTime": {
+            "type": "string",
+            "pattern": "^\\d{2}:\\d{2}$"
+          },
+          "duration": {
+            "type": "integer",
+            "default": 30,
+            "description": "Minutes (for the .ics)."
+          },
+          "meetingId": {
+            "type": "string",
+            "description": "Stable id so updates replace the earlier calendar entry."
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "examples": [
+              "you@example.com"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          }
+        }
+      },
+      "PublicUser": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "account": {
+            "type": "string",
+            "enum": [
+              "App user",
+              "PocketBase superuser"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "description": "The role field in PocketBase.",
+            "examples": [
+              "Admin",
+              "Super Admin",
+              "Editor",
+              "Viewer"
+            ]
+          },
+          "access": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "editor",
+              "viewer"
+            ],
+            "description": "What the app actually allows this account to do."
+          },
+          "department": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "examples": [
+              "Active"
+            ]
+          }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "user"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "Send as the Authorization header on protected routes."
+          },
+          "user": {
+            "$ref": "#/components/schemas/PublicUser"
+          }
+        }
+      },
+      "MeResponse": {
+        "type": "object",
+        "properties": {
+          "signedIn": {
+            "type": "boolean",
+            "const": true
+          },
+          "user": {
+            "$ref": "#/components/schemas/PublicUser"
+          }
+        }
+      }
+    }
+  }
+}

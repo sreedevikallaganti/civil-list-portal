@@ -40,7 +40,7 @@ export default function UserDetailsPanel({ user, onClose }: Props) {
       />
 
       <aside
-        className={`absolute right-0 top-0 flex h-full w-full max-w-md flex-col bg-white shadow-2xl transition-transform duration-300 ease-out ${
+        className={`absolute right-0 top-0 flex h-full w-full sm:max-w-xl lg:max-w-2xl flex-col bg-white shadow-2xl transition-transform duration-300 ease-out ${
           show ? "translate-x-0" : "translate-x-full"
         }`}
       >

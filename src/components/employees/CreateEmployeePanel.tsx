@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { createEmployee, type Employee } from "./employee-api";
+import { cleanName, nameError, phoneError } from "@/lib/validation";
+import PhoneInput from "@/components/PhoneInput";
 
 interface Props {
   onSaved: (employee: Employee) => void;
@@ -27,7 +29,7 @@ const FIELDS: {
   { key: "name", label: "Full name", required: true, placeholder: "e.g. Jane Doe" },
   { key: "designation", label: "Designation", placeholder: "e.g. Assistant Engineer" },
   { key: "department", label: "Department", placeholder: "e.g. Civil" },
-  { key: "contact_number", label: "Contact number", placeholder: "e.g. 9876543210" },
+  { key: "contact_number", label: "Contact number", type: "tel" },
   { key: "email", label: "Email", type: "email", placeholder: "e.g. jane@example.com" },
   { key: "photo_url", label: "Photo URL", placeholder: "https://..." },
 ];
@@ -58,12 +60,15 @@ export default function CreateEmployeePanel({ onSaved, onClose }: Props) {
   }, [handleClose]);
 
   function setField(key: keyof typeof EMPTY_FORM, value: string) {
-    setForm((f) => ({ ...f, [key]: value }));
+    // names: letters only
+    const clean = key === "name" ? cleanName(value) : value; // phone comes pre-validated from <PhoneInput>
+    setForm((f) => ({ ...f, [key]: clean }));
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim()) { setError("Name is required."); return; }
+    const problem = nameError(form.name) || phoneError(form.contact_number, { label: "Contact number" });
+    if (problem) { setError(problem); return; }
     if (form.email && !/^\S+@\S+\.\S+$/.test(form.email.trim())) {
       setError("Please enter a valid email address.");
       return;
@@ -97,7 +102,7 @@ export default function CreateEmployeePanel({ onSaved, onClose }: Props) {
       />
 
       <aside
-        className={`absolute right-0 top-0 flex h-full w-full max-w-md flex-col bg-white shadow-2xl transition-transform duration-300 ease-out ${
+        className={`absolute right-0 top-0 flex h-full w-full sm:max-w-xl lg:max-w-2xl flex-col bg-white shadow-2xl transition-transform duration-300 ease-out ${
           show ? "translate-x-0" : "translate-x-full"
         }`}
       >
@@ -124,14 +129,23 @@ export default function CreateEmployeePanel({ onSaved, onClose }: Props) {
                 <label htmlFor={`emp-${f.key}`} className="mb-1 block text-sm font-medium text-gray-700">
                   {f.label}{f.required && <span className="text-red-500"> *</span>}
                 </label>
-                <input
-                  id={`emp-${f.key}`}
-                  type={f.type ?? "text"}
-                  value={form[f.key]}
-                  onChange={(e) => setField(f.key, e.target.value)}
-                  placeholder={f.placeholder}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
-                />
+                {f.key === "contact_number" ? (
+                  <PhoneInput
+                    id={`emp-${f.key}`}
+                    value={form.contact_number}
+                    onChange={(v) => setField("contact_number", v)}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  />
+                ) : (
+                  <input
+                    id={`emp-${f.key}`}
+                    type={f.type ?? "text"}
+                    value={form[f.key]}
+                    onChange={(e) => setField(f.key, e.target.value)}
+                    placeholder={f.placeholder}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
+                  />
+                )}
               </div>
             ))}
             {error && (

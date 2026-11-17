@@ -215,6 +215,8 @@ export function Toaster() {
     const entry = timers.current.get(id);
     if (!entry) return;
     clearTimeout(entry.timer);
+    // runs on hover (an event), not during render — reading the clock here is intended
+    // eslint-disable-next-line react-hooks/purity
     entry.remaining = Math.max(0, entry.remaining - (Date.now() - entry.startedAt));
     setPausedId(id);
   };
@@ -222,6 +224,7 @@ export function Toaster() {
   const resume = (id: number) => {
     const entry = timers.current.get(id);
     if (!entry) return;
+    // eslint-disable-next-line react-hooks/purity -- event handler, not render
     entry.startedAt = Date.now();
     entry.timer = setTimeout(() => dismiss(id), entry.remaining);
     setPausedId((p) => (p === id ? null : p));

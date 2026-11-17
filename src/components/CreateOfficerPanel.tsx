@@ -7,8 +7,12 @@ import {
 } from 'lucide-react';
 import { ClientResponseError } from 'pocketbase';
 import pb from '@/lib/pocketbase';
+import { logActivity } from '@/lib/activity';
+import { cleanName, nameError as nameRule, phoneError as phoneRule } from '@/lib/validation';
+import PhoneInput from '@/components/PhoneInput';
+import { OFFICER_COLLECTION, OFFICER_STATUSES, type OfficerService } from '@/lib/officerDirectory';
 
-type TypeKey = 'IAS' | 'IPS' | 'Other';
+type TypeKey = OfficerService | 'Other';
 
 /* EDIT MODE — a PocketBase record (with `type` added by the directory page) */
 interface EditOfficer {
@@ -20,34 +24,35 @@ interface EditOfficer {
 interface CreateOfficerPanelProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: () => void;
+  /** Called after saving. On create it gets the new record and its type (e.g. to select it straight away). */
+  onSuccess: (created?: Record<string, any>, type?: TypeKey) => void;
   /** Lock the panel to a specific record type. Omit for "general" mode (user picks). */
   officerType?: TypeKey;
   /** EDIT MODE — pass the record (must include `id` and `type`). */
   editOfficer?: EditOfficer | null;
+  /** CREATE MODE — start with this name filled in (e.g. what was typed in a search box). */
+  initialName?: string;
+  /** Opened on top of another panel (the New Meeting form) — sits above it. */
+  stacked?: boolean;
 }
 
 /* ------------------------------- Constants ------------------------------- */
 
-/* Officer fields (ias_officers / ips_officers) — UNCHANGED */
+/* Officer fields — the officers directory (ias_directory / ips_directory / ifs_directory / irs_directory).
+   batch_year and status_flag are form names; they are saved as `batch` and `status`. */
 const INITIAL_FORM = {
   name: '',
   officer_id: '',
   batch_year: '',
   cadre: '',
-  state: '',
   date_of_birth: '',
-  current_position: '',
+  date_of_joining: '',
   designation: '',
   department: '',
-  officer_category: '',
-  previous_postings: '',
-  status_flag: 'Active',
+  status_flag: 'Serving',
   contact_number: '',
   email: '',
-  address: '',
-  website: '',
-  notes: '',
+  photo_url: '',
 };
 
 /* Contact fields (other_contacts) — matches the real schema */
@@ -79,11 +84,11 @@ const INITIAL_ALL: FormShape = { ...INITIAL_FORM, ...INITIAL_CONTACT_FORM };
 const OFFICER_KEYS = Object.keys(INITIAL_FORM) as (keyof FormShape)[];
 const CONTACT_KEYS = Object.keys(INITIAL_CONTACT_FORM) as (keyof FormShape)[];
 
-const TYPE_KEYS = ['IAS', 'IPS', 'Other'] as const;
+const TYPE_KEYS = ['IAS', 'IPS', 'IFS', 'IRS', 'Other'] as const;
 
 const TYPE_META = {
   IAS: {
-    label: 'IAS', dot: 'bg-sky-500', collection: 'ias_officers', desc: 'Indian Administrative Service',
+    label: 'IAS', dot: 'bg-sky-500', collection: OFFICER_COLLECTION.IAS, desc: 'Indian Administrative Service',
     gradient: 'from-sky-600 via-blue-700 to-indigo-800', glow: 'shadow-blue-700/25',
     iconTint: 'bg-sky-100 text-sky-600 ring-sky-600/10', cardIcon: Briefcase,
     cardSelected: 'border-sky-300 bg-gradient-to-br from-sky-50/90 via-white to-white ring-2 ring-sky-400/40',
@@ -91,12 +96,28 @@ const TYPE_META = {
     button: 'from-sky-500 to-blue-600', buttonGlow: 'shadow-blue-600/25',
   },
   IPS: {
-    label: 'IPS', dot: 'bg-indigo-500', collection: 'ips_officers', desc: 'Indian Police Service',
+    label: 'IPS', dot: 'bg-indigo-500', collection: OFFICER_COLLECTION.IPS, desc: 'Indian Police Service',
     gradient: 'from-indigo-600 via-violet-700 to-purple-800', glow: 'shadow-indigo-700/25',
     iconTint: 'bg-indigo-100 text-indigo-600 ring-indigo-600/10', cardIcon: Shield,
     cardSelected: 'border-indigo-300 bg-gradient-to-br from-indigo-50/90 via-white to-white ring-2 ring-indigo-400/40',
     checkBg: 'bg-indigo-500',
     button: 'from-indigo-500 to-violet-600', buttonGlow: 'shadow-indigo-600/25',
+  },
+  IFS: {
+    label: 'IFS', dot: 'bg-emerald-500', collection: OFFICER_COLLECTION.IFS, desc: 'Indian Forest Service',
+    gradient: 'from-emerald-600 via-teal-700 to-cyan-800', glow: 'shadow-emerald-700/25',
+    iconTint: 'bg-emerald-100 text-emerald-600 ring-emerald-600/10', cardIcon: Briefcase,
+    cardSelected: 'border-emerald-300 bg-gradient-to-br from-emerald-50/90 via-white to-white ring-2 ring-emerald-400/40',
+    checkBg: 'bg-emerald-500',
+    button: 'from-emerald-500 to-teal-600', buttonGlow: 'shadow-emerald-600/25',
+  },
+  IRS: {
+    label: 'IRS', dot: 'bg-rose-500', collection: OFFICER_COLLECTION.IRS, desc: 'Indian Revenue Service',
+    gradient: 'from-rose-600 via-pink-700 to-fuchsia-800', glow: 'shadow-rose-700/25',
+    iconTint: 'bg-rose-100 text-rose-600 ring-rose-600/10', cardIcon: Briefcase,
+    cardSelected: 'border-rose-300 bg-gradient-to-br from-rose-50/90 via-white to-white ring-2 ring-rose-400/40',
+    checkBg: 'bg-rose-500',
+    button: 'from-rose-500 to-pink-600', buttonGlow: 'shadow-rose-600/25',
   },
   Other: {
     label: 'Contact', dot: 'bg-amber-500', collection: 'other_contacts', desc: 'External / other contact',
@@ -114,11 +135,23 @@ const FALLBACK_META = {
   button: 'from-slate-800 to-slate-900', buttonGlow: 'shadow-slate-900/25',
 };
 
-const CADRE_OPTIONS = ['Andhra Pradesh', 'Telangana', 'Tamil Nadu', 'Karnataka', 'Kerala', 'Maharashtra', 'Gujarat', 'Rajasthan', 'Madhya Pradesh', 'Uttar Pradesh', 'Bihar', 'West Bengal', 'Odisha', 'Punjab', 'Haryana', 'Delhi', 'Central', 'Other'];
-const STATE_OPTIONS = ['Andhra Pradesh', 'Telangana', 'Tamil Nadu', 'Karnataka', 'Kerala', 'Maharashtra', 'Gujarat', 'Rajasthan', 'Madhya Pradesh', 'Uttar Pradesh', 'Bihar', 'West Bengal', 'Odisha', 'Punjab', 'Haryana', 'Delhi', 'Other'];
+const CADRE_OPTIONS = ['AGMUT', 'Andhra Pradesh', 'Assam-Meghalaya', 'Bihar', 'Chhattisgarh', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Karnataka', 'Kerala', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Nagaland', 'Odisha', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal'];
 
-/* Each status gets its own soft selected tint */
-const STATUS_OPTIONS = [
+type StatusOption = { value: string; dot: string; selected: string };
+
+/* Officer statuses (the directory's status field) */
+const OFFICER_STATUS_STYLE: Record<string, Omit<StatusOption, 'value'>> = {
+  Serving:            { dot: 'bg-emerald-500', selected: 'border-emerald-400 bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-500/30' },
+  'On Deputation':    { dot: 'bg-sky-500',     selected: 'border-sky-400 bg-sky-50 text-sky-700 ring-1 ring-inset ring-sky-500/30' },
+  'Under Training':   { dot: 'bg-violet-500',  selected: 'border-violet-400 bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-500/30' },
+  'Awaiting Posting': { dot: 'bg-amber-500',   selected: 'border-amber-400 bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-500/30' },
+  'Under Suspension': { dot: 'bg-rose-500',    selected: 'border-rose-400 bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-500/30' },
+  Retired:            { dot: 'bg-slate-400',   selected: 'border-slate-400 bg-slate-100 text-slate-700 ring-1 ring-inset ring-slate-500/25' },
+};
+const OFFICER_STATUS_OPTIONS: StatusOption[] = OFFICER_STATUSES.map((value) => ({ value, ...OFFICER_STATUS_STYLE[value] }));
+
+/* Contact statuses — each status gets its own soft selected tint */
+const STATUS_OPTIONS: StatusOption[] = [
   { value: 'Active',    dot: 'bg-emerald-500', selected: 'border-emerald-400 bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-500/30' },
   { value: 'Retired',   dot: 'bg-slate-400',   selected: 'border-slate-400 bg-slate-100 text-slate-700 ring-1 ring-inset ring-slate-500/25' },
   { value: 'On Leave',  dot: 'bg-amber-500',   selected: 'border-amber-400 bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-500/30' },
@@ -129,6 +162,10 @@ const STATUS_OPTIONS = [
    Works for both officer records and contact records (reads only known keys). */
 function recordToForm(record: Record<string, any>): FormShape {
   const out = { ...INITIAL_ALL };
+  /* directory records keep the batch / status under their own names */
+  if (record.type !== 'Other') {
+    record = { ...record, batch_year: record.batch_year ?? record.batch, status_flag: record.status || INITIAL_FORM.status_flag };
+  }
   (Object.keys(INITIAL_ALL) as (keyof FormShape)[]).forEach((key) => {
     const v = record[key];
     if (v === null || v === undefined) return;
@@ -137,7 +174,7 @@ function recordToForm(record: Record<string, any>): FormShape {
 
     /* Date-ish fields: normalize to YYYY-MM-DD so <input type="date"> renders them.
        Handles PocketBase "1990-05-16 00:00:00.000Z" and text like "14-06-1984". */
-    if ((key === 'date_of_birth' || key === 'appointment_date') && typeof v === 'string' && v) {
+    if ((key === 'date_of_birth' || key === 'date_of_joining' || key === 'appointment_date') && typeof v === 'string' && v) {
       const dateOnly = v.slice(0, 10);
       if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) { out[key] = dateOnly; return; }
       const dmy = /^(\d{2})-(\d{2})-(\d{4})/.exec(v); /* DD-MM-YYYY → ISO */
@@ -293,7 +330,8 @@ function Section({
 }
 
 /* Shared status pill group (used by both the officer form and the contact form) */
-function StatusPillGroup({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function StatusPillGroup({ value, onChange, options = STATUS_OPTIONS }: { value: string; onChange: (v: string) => void; options?: StatusOption[] }) {
+  const STATUS_OPTIONS = options;
   return (
     <div className="group space-y-1.5">
       <div
@@ -352,7 +390,12 @@ function StatusPillGroup({ value, onChange }: { value: string; onChange: (v: str
 
 /* ------------------------------- Main Panel ------------------------------- */
 
-export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officerType, editOfficer }: CreateOfficerPanelProps) {
+/* dropdown arrow for the <select>s — module level so React doesn't re-create it each render */
+function Chevron() {
+  return <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />;
+}
+
+export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officerType, editOfficer, initialName, stacked = false }: CreateOfficerPanelProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showErrors, setShowErrors] = useState(false);
@@ -409,7 +452,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
   /* Reset form each time the panel opens + move focus into the panel */
   useEffect(() => {
     if (isOpen) {
-      setFormData(editOfficer ? recordToForm(editOfficer) : INITIAL_ALL);
+      setFormData(editOfficer ? recordToForm(editOfficer) : { ...INITIAL_ALL, name: cleanName(initialName ?? '').trim() });
       setSelectedType(editOfficer ? editOfficer.type : officerType ?? null);
       setError(null);
       setShowErrors(false);
@@ -419,13 +462,17 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
       const t = setTimeout(() => panelRef.current?.focus(), 60);
       return () => clearTimeout(t);
     }
+    // initialName is read only when the panel opens — later typing in the caller must not wipe the form
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, officerType, editOfficer]);
 
   /* Lock body scroll while open */
   useEffect(() => {
     if (!isOpen) return;
+    // restore what was there before — when stacked, the New Meeting form underneath keeps its own lock
+    const original = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = ''; };
+    return () => { document.body.style.overflow = original; };
   }, [isOpen]);
 
   /* Clean up timers on unmount */
@@ -445,12 +492,18 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
 
   const set = (key: keyof FormShape) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
-      setFormData((f) => ({ ...f, [key]: e.target.value }));
+    {
+      /* names: letters only (international phone numbers use <PhoneInput> below) */
+      const raw = e.target.value;
+      const value = key === 'name' ? cleanName(raw) : raw; // phone fields use <PhoneInput>
+      setFormData((f) => ({ ...f, [key]: value }));
+    };
 
   const typeError = isGeneralMode && showErrors && !selectedType
     ? 'Please select a record type.'
     : null;
-  const nameError = showErrors && !formData.name.trim() ? 'Full name is required.' : null;
+  const nameError = showErrors ? nameRule(formData.name, { label: 'Full name' }) || null : null;
+  const phoneError = showErrors ? phoneRule(formData.contact_number || '', { label: 'Contact number' }) || null : null;
   /* Batch year is an OFFICER requirement — contacts never ask for it */
   const batchError = showErrors && !isContact && !formData.batch_year ? 'Batch year is required.' : null;
 
@@ -488,6 +541,22 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
       return;
     }
 
+    const nameProblem = nameRule(trimmedName, { label: 'Full name' });
+    if (nameProblem) {
+      setShowErrors(true);
+      setError(nameProblem);
+      document.getElementById(isContact ? `${uid}-c-name` : `${uid}-name`)?.focus();
+      return;
+    }
+
+    const phoneProblem = phoneRule(formData.contact_number || '', { label: 'Contact number' });
+    if (phoneProblem) {
+      setShowErrors(true);
+      setError(phoneProblem);
+      document.getElementById(isContact ? `${uid}-c-phone` : `${uid}-contact-number`)?.focus();
+      return;
+    }
+
     if (!isContact && (Number.isNaN(batchYear) || batchYear < 1900 || batchYear > new Date().getFullYear() + 1)) {
       setShowErrors(true);
       setError('Batch year must be a valid year (e.g., 2018).');
@@ -496,7 +565,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
     }
 
     if (!pb.authStore.isValid) {
-      setError(`You must be signed in as a user or superuser to ${isEditMode ? 'update' : 'create'} records.`);
+      setError('Please sign in again to save.');
       scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
@@ -523,16 +592,27 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
         }
         payload[key] = value;
       }
-      if (!isContact) payload.batch_year = batchYear;
+      if (!isContact) {
+        /* directory field names; IRS keeps its wing (IT / C&IT) when editing */
+        payload.batch = batchYear;
+        delete payload.batch_year;
+        if ('status_flag' in payload) { payload.status = payload.status_flag; delete payload.status_flag; }
+        payload.service = isEditMode && editOfficer?.service ? editOfficer.service : activeType === 'IRS' ? 'IRS (IT)' : activeType;
+      }
 
+      const kind = isContact ? 'contact' : `${activeType} officer`;
+      let created: Record<string, any> | undefined;
       if (isEditMode && editOfficer) {
         await pb.collection(collection).update(editOfficer.id, payload);
+        logActivity('updated', isContact ? 'contact' : 'officer', `${kind} ${trimmedName}`, editOfficer.id);
       } else {
-        await pb.collection(collection).create(payload);
+        const rec = await pb.collection(collection).create(payload);
+        created = rec;
+        logActivity('created', isContact ? 'contact' : 'officer', `${kind} ${trimmedName}`, rec.id);
       }
 
       setLoading(false);
-      onSuccess();
+      onSuccess(created, activeType);
       onClose();
     } catch (err) {
       setLoading(false);
@@ -544,23 +624,26 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
         const data = (err.response?.data ?? {}) as Record<string, { message?: string }>;
 
         if (err.status === 0) {
-          message = 'Cannot reach the PocketBase server — is it running, and is NEXT_PUBLIC_POCKETBASE_URL correct?';
+          console.warn('[CreateOfficerPanel] PocketBase unreachable — is it running, and is NEXT_PUBLIC_POCKETBASE_URL correct?');
+          message = 'We can’t connect right now — please check your internet connection and try again.';
         } else if (err.status === 400) {
-          message =
-            Object.entries(data)
-              .map(([field, d]) => `${field}: ${d.message ?? 'invalid value'}`)
-              .join(' · ') || err.message;
+          // field-by-field reasons for the developer; the person sees which fields to check, in plain words
+          console.warn('[CreateOfficerPanel] rejected fields:', data);
+          const fields = Object.keys(data).map((k) => k.replace(/_/g, ' '));
+          message = fields.length
+            ? `Please check these details and try again: ${fields.join(', ')}.`
+            : 'Some details weren’t accepted — please check them and try again.';
         } else if (err.status === 401) {
           message = 'Your session has expired — please sign in again.';
         } else if (err.status === 403) {
-          message = 'Permission denied (403) — open PocketBase Admin → Collections → ' + collection +
-            ' → API Rules → set the ' + (isEditMode ? 'Update' : 'Create') + ' rule to @request.auth.id != "" (or sign in as a superuser).';
+          console.warn('[CreateOfficerPanel] permission denied — PocketBase Admin → Collections → ' + collection +
+            ' → API Rules → set the ' + (isEditMode ? 'Update' : 'Create') + ' rule to @request.auth.id != ""');
+          message = 'You don’t have permission to do this. Please ask your administrator.';
         } else if (err.status === 404) {
           message = isEditMode
             ? 'This record no longer exists — it may have been deleted already.'
-            : 'Collection "' + collection + '" not found — check the collection name in PocketBase.';
-        } else {
-          message = err.message;
+            : 'This list isn’t available right now. Please ask your administrator.';
+          if (!isEditMode) console.warn('[CreateOfficerPanel] collection "' + collection + '" not found in PocketBase');
         }
       }
 
@@ -673,10 +756,6 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
   const selectCls = (invalid = false) => `${inputCls(invalid)} cursor-pointer appearance-none pr-9`;
   const areaCls = `${inputCls()} resize-none leading-relaxed`;
 
-  const Chevron = () => (
-    <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-  );
-
   /* Section accents (soft tints) + stagger delays */
   const S1 = { accent: 'bg-sky-100 text-sky-600 ring-sky-600/10',     delay: 120 };
   const S2 = { accent: 'bg-indigo-100 text-indigo-600 ring-indigo-600/10', delay: 190 };
@@ -692,7 +771,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
       {/* Backdrop */}
       <div
         aria-hidden="true"
-        className="cof-overlay fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-[2px]"
+        className={`cof-overlay fixed inset-0 ${stacked ? 'z-[90]' : 'z-40'} bg-slate-900/40 backdrop-blur-[2px]`}
         onClick={() => !loading && onClose()}
       />
 
@@ -703,7 +782,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
         aria-modal="true"
         aria-labelledby={`${uid}-heading`}
         tabIndex={-1}
-        className="c-panel fixed right-0 top-0 z-[80] flex h-full w-full flex-col bg-slate-50 shadow-2xl sm:max-w-xl lg:max-w-2xl"
+        className={`c-panel fixed right-0 top-0 ${stacked ? 'z-[95]' : 'z-[80]'} flex h-full w-full flex-col bg-slate-50 shadow-2xl sm:max-w-xl lg:max-w-2xl`}
       >
 
         {/* ------------------------------- Header ------------------------------- */}
@@ -794,7 +873,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                     <>
                       <LogIn className="h-4 w-4 flex-shrink-0 text-emerald-600" />
                       <p className="text-[13px] text-emerald-800">
-                        Signed in as <span className="font-semibold">{authLabel}</span> ({isSuperuser ? 'superuser' : 'user'}).
+                        Signed in as <span className="font-semibold">{authLabel}</span>{isSuperuser ? ' (platform owner)' : ''}.
                       </p>
                       <button
                         type="button"
@@ -808,8 +887,7 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                     <>
                       <AlertCircle className="h-4 w-4 flex-shrink-0 text-amber-600" />
                       <p className="text-[13px] text-amber-800">
-                        You are not signed in. Sign in with a <span className="font-semibold">user</span> or{' '}
-                        <span className="font-semibold">superuser</span> account to {isEditMode ? 'update' : 'create'} records.
+                        You are not signed in. Please sign in to {isEditMode ? 'save changes' : 'add this record'}.
                       </p>
                     </>
                   )}
@@ -960,22 +1038,22 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                         </div>
                       </Field>
 
-                      <Field id={`${uid}-state`} label="State">
-                        <div className="relative">
-                          <select id={`${uid}-state`} value={formData.state} onChange={set('state')} className={selectCls()}>
-                            <option value="">Select State</option>
-                            {STATE_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </select>
-                          <Chevron />
-                        </div>
-                      </Field>
-
                       <Field id={`${uid}-dob`} label="Date of Birth">
                         <input
                           id={`${uid}-dob`}
                           type="date"
                           value={formData.date_of_birth}
                           onChange={set('date_of_birth')}
+                          className={`${inputCls()} text-slate-600`}
+                        />
+                      </Field>
+
+                      <Field id={`${uid}-doj`} label="Date of Joining">
+                        <input
+                          id={`${uid}-doj`}
+                          type="date"
+                          value={formData.date_of_joining}
+                          onChange={set('date_of_joining')}
                           className={`${inputCls()} text-slate-600`}
                         />
                       </Field>
@@ -987,24 +1065,13 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                       title="Career Information" description="Position and professional history"
                       highlighted={jumpHighlight === `${uid}-section-2`}
                     >
-                      <Field id={`${uid}-current-position`} label="Current Position" className="col-span-full">
-                        <input
-                          id={`${uid}-current-position`}
-                          type="text"
-                          value={formData.current_position}
-                          onChange={set('current_position')}
-                          placeholder="e.g., District Magistrate"
-                          className={inputCls()}
-                        />
-                      </Field>
-
                       <Field id={`${uid}-designation`} label="Designation">
                         <input
                           id={`${uid}-designation`}
                           type="text"
                           value={formData.designation}
                           onChange={set('designation')}
-                          placeholder="e.g., IAS Officer"
+                          placeholder="e.g., Collector & District Magistrate"
                           className={inputCls()}
                         />
                       </Field>
@@ -1020,32 +1087,11 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                         />
                       </Field>
 
-                      <Field id={`${uid}-officer-category`} label="Officer Category" className="col-span-full">
-                        <input
-                          id={`${uid}-officer-category`}
-                          type="text"
-                          value={formData.officer_category}
-                          onChange={set('officer_category')}
-                          placeholder="e.g., Senior Administrative Grade"
-                          className={inputCls()}
-                        />
-                      </Field>
-
-                      <Field id={`${uid}-previous-postings`} label="Previous Postings" className="col-span-full">
-                        <textarea
-                          id={`${uid}-previous-postings`}
-                          rows={2}
-                          value={formData.previous_postings}
-                          onChange={set('previous_postings')}
-                          placeholder="List previous positions held..."
-                          className={areaCls}
-                        />
-                      </Field>
-
                       <Field label="Status" className="col-span-full">
                         <StatusPillGroup
                           value={formData.status_flag}
                           onChange={(v) => setFormData((f) => ({ ...f, status_flag: v }))}
+                          options={OFFICER_STATUS_OPTIONS}
                         />
                       </Field>
                     </Section>
@@ -1056,15 +1102,13 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                       title="Contact Information" description="How to reach this person"
                       highlighted={jumpHighlight === `${uid}-section-3`}
                     >
-                      <Field id={`${uid}-contact-number`} label="Contact Number">
-                        <input
+                      <Field id={`${uid}-contact-number`} label="Contact Number" error={phoneError}>
+                        <PhoneInput
                           id={`${uid}-contact-number`}
-                          type="tel"
-                          autoComplete="tel"
                           value={formData.contact_number}
-                          onChange={set('contact_number')}
-                          placeholder="+91 98765 43210"
-                          className={inputCls()}
+                          onChange={(v) => setFormData((f) => ({ ...f, contact_number: v }))}
+                          invalid={!!phoneError}
+                          className={inputCls(!!phoneError)}
                         />
                       </Field>
 
@@ -1080,44 +1124,22 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                         />
                       </Field>
 
-                      <Field id={`${uid}-address`} label="Address" className="col-span-full">
-                        <textarea
-                          id={`${uid}-address`}
-                          rows={2}
-                          value={formData.address}
-                          onChange={set('address')}
-                          placeholder="Official address..."
-                          className={areaCls}
-                        />
-                      </Field>
-
-                      <Field id={`${uid}-website`} label="Website / Profile URL" className="col-span-full">
-                        <input
-                          id={`${uid}-website`}
-                          type="url"
-                          autoComplete="url"
-                          value={formData.website}
-                          onChange={set('website')}
-                          placeholder="https://..."
-                          className={inputCls()}
-                        />
-                      </Field>
                     </Section>
 
                     {/* ------------------------ 04 Additional Information ------------------------ */}
                     <Section
                       id={`${uid}-section-4`} icon={FileText} step={4} accent={S4.accent} delay={S4.delay}
-                      title="Additional Information" description="Any extra context worth noting"
+                      title="Photo" description="A link to the officer's photo"
                       highlighted={jumpHighlight === `${uid}-section-4`}
                     >
-                      <Field id={`${uid}-notes`} label="Notes" className="col-span-full">
-                        <textarea
-                          id={`${uid}-notes`}
-                          rows={3}
-                          value={formData.notes}
-                          onChange={set('notes')}
-                          placeholder="Any additional information..."
-                          className={areaCls}
+                      <Field id={`${uid}-photo-url`} label="Photo URL" className="col-span-full">
+                        <input
+                          id={`${uid}-photo-url`}
+                          type="url"
+                          value={formData.photo_url}
+                          onChange={set('photo_url')}
+                          placeholder="https://..."
+                          className={inputCls()}
                         />
                       </Field>
                     </Section>
@@ -1234,15 +1256,13 @@ export default function CreateOfficerPanel({ isOpen, onClose, onSuccess, officer
                       title="Contact Information" description="How to reach this contact"
                       highlighted={jumpHighlight === `${uid}-section-3`}
                     >
-                      <Field id={`${uid}-c-phone`} label="Contact Number">
-                        <input
+                      <Field id={`${uid}-c-phone`} label="Contact Number" error={phoneError}>
+                        <PhoneInput
                           id={`${uid}-c-phone`}
-                          type="tel"
-                          autoComplete="tel"
                           value={formData.contact_number}
-                          onChange={set('contact_number')}
-                          placeholder="+91 98765 43210"
-                          className={inputCls()}
+                          onChange={(v) => setFormData((f) => ({ ...f, contact_number: v }))}
+                          invalid={!!phoneError}
+                          className={inputCls(!!phoneError)}
                         />
                       </Field>
 

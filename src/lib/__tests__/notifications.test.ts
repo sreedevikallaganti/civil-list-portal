@@ -76,6 +76,22 @@ describe('buildNotifications', () => {
     expect(starting.urgent).toBe(true);
   });
 
+  it('sends follow-up work to the meeting’s creator only', () => {
+    const data = [
+      mtg('late', { meeting_date: '2026-09-28', meeting_time: '10:00', owner_email: 'PA@office.in' }),
+      mtg('fu', { meeting_date: '2026-09-20', status: 'Completed', minutes: 'ok', follow_up_date: '2026-09-27', owner_email: 'pa@office.in' }),
+      mtg('done', { meeting_date: '2026-09-25', status: 'Completed', minutes: '', owner_email: 'pa@office.in' }),
+      mtg('soon', { meeting_date: '2026-09-29', meeting_time: '14:10', owner_email: 'pa@office.in' }),
+    ];
+    const kinds = (me: string) => buildNotifications(data, new Map(), NOW, me).map((n) => n.kind).sort();
+    expect(kinds('pa@office.in')).toEqual(['followup', 'minutes', 'overdue', 'starting', 'today']);
+    expect(kinds('someone@else.in')).toEqual(['starting', 'today']); // everyone still sees today's schedule
+    expect(kinds('')).toEqual(['followup', 'minutes', 'overdue', 'starting', 'today']);
+    // older meetings without an owner keep showing for everyone
+    expect(buildNotifications([mtg('x', { meeting_date: '2026-09-28', meeting_time: '10:00' })], new Map(), NOW, 'a@b.in')
+      .map((n) => n.kind)).toEqual(['overdue']);
+  });
+
   it('ignores cancelled meetings', () => {
     const data = [mtg('x', { meeting_date: '2026-09-29', meeting_time: '14:00', status: 'Cancelled' })];
     expect(buildNotifications(data, new Map(), NOW)).toHaveLength(0);

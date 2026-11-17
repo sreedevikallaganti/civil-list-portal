@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>Offline · Civillist</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: grid; place-items: center; padding: 24px;
+      background: linear-gradient(135deg, #e0e7ff, #f5f3ff 50%, #ede9fe);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #0f172a;
+    }
+    main {
+      width: 100%; max-width: 380px; text-align: center; background: #fff;
+      border-radius: 28px; padding: 36px 28px; box-shadow: 0 24px 60px -24px rgba(91, 33, 182, .35);
+    }
+    img { width: 72px; height: 72px; }
+    h1 { margin: 18px 0 6px; font-size: 1.35rem; }
+    p { margin: 0; color: #64748b; line-height: 1.55; font-size: .95rem; }
+    button {
+      margin-top: 22px; border: 0; border-radius: 999px; padding: 12px 22px; cursor: pointer;
+      background: #0f172a; color: #fff; font: 600 .95rem inherit;
+    }
+    button:focus-visible { outline: 3px solid #a78bfa; outline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="/icons/icon-192.png" alt="">
+    <h1>You’re offline</h1>
+    <p>Civillist needs an internet connection to show your meetings. Check Wi-Fi or mobile data, then try again.</p>
+    <button type="button" onclick="location.reload()">Try again</button>
+  </main>
+  <script>window.addEventListener('online', function () { location.reload(); });</script>
+</body>
+</html>

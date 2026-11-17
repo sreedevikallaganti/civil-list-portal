@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useNow } from '@/lib/useNow';
 import {
   X, Calendar, ChevronLeft, ChevronRight, AlertCircle, Flag,
   Sunrise, Sun, Sunset, Feather, Activity, Zap, Building2, Globe, Users, Clock, Check,
@@ -14,7 +15,7 @@ export interface Officer {
   id: string;
   name: string;
   designation?: string;
-  type: 'IAS' | 'IPS' | 'Other';
+  type: 'IAS' | 'IPS' | 'IFS' | 'IRS' | 'Other';
   cadre?: string;
   state?: string;
   contact_number?: string;
@@ -470,7 +471,7 @@ function TimeSlotPicker({ value, onChange, meetingDate }: {
       {dateIsToday && (
         <p className="flex items-center gap-1.5 text-[11px] text-amber-600 bg-amber-50 ring-1 ring-amber-100 rounded-lg px-2.5 py-2">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-          Meeting is today — times before {to12Hour(nowHHMM())} can't be picked.
+          Meeting is today — times before {to12Hour(nowHHMM())} can’t be picked.
         </p>
       )}
 
@@ -604,6 +605,7 @@ export function FollowUpOffCanvas({ T, open, initial, onClose, onSave }: {
 }) {
   const dark = T.name === 'dark';
   const [selected, setSelected] = useState(initial);
+  const now = useNow();
 
   useEffect(() => {
     if (open) setSelected(initial);
@@ -618,7 +620,7 @@ export function FollowUpOffCanvas({ T, open, initial, onClose, onSave }: {
     { label: '2 weeks', days: 14 },
     { label: '1 month', days: 30 },
   ];
-  const quickISO = (days: number) => toLocalISODate(new Date(Date.now() + days * 86400000));
+  const quickISO = (days: number) => toLocalISODate(new Date(now + days * 86400000));
 
   return (
     <>
@@ -627,16 +629,16 @@ export function FollowUpOffCanvas({ T, open, initial, onClose, onSave }: {
         onClick={onClose}
       />
 
-      <div className={`fixed inset-y-0 right-0 z-[70] w-full sm:max-w-md shadow-2xl flex flex-col animate-in slide-in-from-right duration-300 ${T.panel}`}>
+      <div className={`fixed inset-y-0 right-0 z-[70] w-full sm:max-w-xl lg:max-w-2xl shadow-2xl flex flex-col animate-in slide-in-from-right duration-300 ${T.panel}`}>
         <div className={`flex items-center gap-3 px-5 py-4 border-b shrink-0 ${dark ? 'border-white/10' : 'border-slate-100'}`}>
           <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${dark ? 'bg-amber-500/15 text-amber-300' : 'bg-amber-50 text-amber-600'}`}>
             <Flag className="w-4 h-4" />
           </div>
           <div className="min-w-0 flex-1">
             <h4 className={`text-sm font-bold ${T.heading}`}>Follow-up date</h4>
-            <p className={`text-[11px] truncate ${T.faint}`}>Set when you'll continue after this meeting</p>
+            <p className={`text-[11px] truncate ${T.faint}`}>Set when you’ll continue after this meeting</p>
           </div>
-          <button type="button" onClick={onClose} className={`p-2 rounded-xl transition-colors shrink-0 ${dark ? 'text-slate-400 hover:bg-white/10 hover:text-slate-200' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'}`}>
+          <button type="button" onClick={onClose} aria-label="Close" className={`p-2 rounded-xl transition-colors shrink-0 ${dark ? 'text-slate-400 hover:bg-white/10 hover:text-slate-200' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'}`}>
             <X className="w-4 h-4" />
           </button>
         </div>

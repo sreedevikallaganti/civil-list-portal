@@ -1,5 +1,9 @@
-export const PB_BASE_URL =
-  process.env.NEXT_PUBLIC_PB_URL ?? "http://172.30.0.200:8091";
+import { getPocketBaseURL, pb } from "@/lib/pocketbase";
+import { orgIdOf, scopeFetch } from "@/lib/tenancy";
+
+/* Same address as the rest of the app: "/pb" (the Next.js proxy) in the browser,
+   POCKETBASE_URL from .env.local on the server — nothing hard-coded. */
+export const PB_BASE_URL = getPocketBaseURL();
 
 export interface PBUser {
   collectionId: string;
@@ -52,7 +56,7 @@ export async function fetchUsers(
   perPage = 30,
   signal?: AbortSignal
 ): Promise<UsersResponse> {
-  const url = `${PB_BASE_URL}/api/collections/users/records?page=${page}&perPage=${perPage}&sort=-created`;
+  const url = scopeFetch(`${PB_BASE_URL}/api/collections/users/records?page=${page}&perPage=${perPage}&sort=-created`, pb.authStore.record as any);
   const res = await fetch(url, { signal, cache: "no-store", headers: getAuthHeaders() });
   if (!res.ok) throw new Error(`Failed to fetch users (${res.status})`);
   return res.json();
@@ -63,7 +67,8 @@ export async function createUser(payload: NewUserPayload): Promise<PBUser> {
   const res = await fetch(`${PB_BASE_URL}/api/collections/users/records`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ ...payload, emailVisibility: true }), // so emails show in the list
+    // emailVisibility so emails show in the list; org = the admin's own organisation
+    body: JSON.stringify({ ...payload, emailVisibility: true, org: orgIdOf(pb.authStore.record as any) || undefined }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);

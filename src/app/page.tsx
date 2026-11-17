@@ -1,23 +1,19 @@
 "use client";
 
 import {
-  ArrowRight,
   BarChart3,
-  Briefcase,
+  CalendarClock,
   CalendarDays,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Clock3,
-  FileText,
+  Hourglass,
   Plus,
-  RefreshCw,
   Search,
-  ShieldCheck,
   Sparkles,
   TrendingUp,
   User,
-  Users,
+  UserCheck,
   X,
   XCircle,
 } from "lucide-react";
@@ -27,7 +23,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import pb from "@/lib/pocketbase";
+import { apiJSON } from "@/lib/apiClient";
+import { serviceOf } from "@/lib/officerDirectory";
 import { hydrate, useLivePeople } from "@/lib/liveDirectory";
+import { useNow } from "@/lib/useNow";
 import ProtectedRoute from "@/components/auth/ProtectedRoute";
 
 /* ────────────────────────────────────────────────
@@ -48,10 +47,11 @@ const CreateMeetingPanel = dynamic(() => import("@/components/CreateMeetingPanel
 const UpdateMeetingPanel = dynamic(() => import("@/components/UpdateMeetingPanel"), { ssr: false });
 const MeetingDetailsPanel = dynamic(() => import("@/components/MeetingDetailsPanel"), { ssr: false });
 const OnThisDayCard = dynamic(() => import("@/components/memories/OnThisDayCard"), { ssr: false });
-const ReconnectCard = dynamic(() => import("@/components/memories/ReconnectCard"), { ssr: false });
+const KeyPeopleCard = dynamic(() => import("@/components/dashboard/KeyPeopleCard"), { ssr: false });
 const RecapTeaserCard = dynamic(() => import("@/components/memories/RecapTeaserCard"), { ssr: false });
 const VisitPlannerCard = dynamic(() => import("@/components/meetings/VisitPlannerCard"), { ssr: false });
 const PeopleUpdatesCard = dynamic(() => import("@/components/memories/PeopleUpdatesCard"), { ssr: false });
+const CommandPalette = dynamic(() => import("@/components/dashboard/CommandPalette"), { ssr: false });
 
 /* ────────────────────────────────────────────────
    Types
@@ -81,6 +81,11 @@ type Meeting = {
   location?: string;
   meeting_place?: string;
   email?: string;
+  status_flag?: string;
+  follow_up_date?: string;
+  send_invite?: boolean;
+  gcal_event_id?: string;
+  participants?: unknown;
 
   collectionId?: string;
   collectionName?: string;
@@ -96,7 +101,16 @@ type DashboardStats = {
   rescheduled: number;
   cancelled: number;
   completionRate: number;
+  thisWeek: number;
+  weekDelta: number;
+  metThisYear: number;
+  metByService: string;
+  followUpsOverdue: number;
+  followUpsSoon: number;
 };
+
+/* replies to the Google Calendar invitations of upcoming meetings ("Awaiting confirmation") */
+type Replies = { accepted: number; declined: number; tentative: number; waiting: number } | null;
 
 type ActivityRange = "week" | "month";
 
@@ -114,8 +128,6 @@ type KpiAccent = "blue" | "violet" | "rose" | "emerald";
 
 type DashboardCache = {
   meetings: Meeting[];
-  iasCount: number;
-  ipsCount: number;
   savedAt: number;
 };
 
@@ -124,7 +136,24 @@ type DashboardCache = {
 ──────────────────────────────────────────────── */
 
 const UPCOMING_PAGE_SIZE = 5;
-const MEETINGS_FETCH_LIMIT = 500;
+
+/* priority filter + sort for the upcoming list (same colours as the meetings page) */
+type PriorityKey = "high" | "medium" | "low";
+type PriorityFilter = "all" | PriorityKey;
+type UpcomingSort = "soonest" | "priority-high" | "priority-low";
+const PRIORITY_LEVELS: { key: PriorityKey; label: string; dot: string; badge: string }[] = [
+  { key: "high", label: "High", dot: "bg-rose-500", badge: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20" },
+  { key: "medium", label: "Medium", dot: "bg-amber-500", badge: "bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20" },
+  { key: "low", label: "Low", dot: "bg-emerald-500", badge: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20" },
+];
+const PRIORITY_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
+const priorityOf = (m: { priority?: string }) => String(m.priority || "").trim().toLowerCase();
+const UPCOMING_SORTS: { value: UpcomingSort; label: string }[] = [
+  { value: "soonest", label: "Soonest first" },
+  { value: "priority-high", label: "Highest priority first" },
+  { value: "priority-low", label: "Lowest priority first" },
+];
+const MEETINGS_PAGE_SIZE = 500;
 const CACHE_KEY = "civillist:dashboard:v1";
 
 const STATUS_STYLES: Record<string, { label: string; dot: string; badge: string }> = {
@@ -242,33 +271,33 @@ function parseMeetingDate(dateValue?: string, timeValue?: string): Date | null {
     return new Date(year, month, day, time?.hours ?? 0, time?.minutes ?? 0);
   }
 
-  const parsed = new Date(dateString);
-  if (Number.isNaN(parsed.getTime())) return null;
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dateString) && timeValue) {
+  /* "2026-10-02" or PocketBase's "2026-10-02 00:00:00.000Z": the calendar date is the first
+     10 characters, the clock time comes from meeting_time — same as the Meetings page.
+     (Parsing the whole string would read it as UTC midnight = 05:30 IST and drop the time.) */
+  const isoDate = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoDate) {
     const time = parseTimeParts(timeValue);
-    if (time) parsed.setHours(time.hours, time.minutes, 0, 0);
+    return new Date(Number(isoDate[1]), Number(isoDate[2]) - 1, Number(isoDate[3]), time?.hours ?? 0, time?.minutes ?? 0);
   }
 
-  return parsed;
+  const parsed = new Date(dateString);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 /* PERF: reuse formatters instead of creating new Intl objects per row */
 const DATE_FMT = new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-const TIME_FMT = new Intl.DateTimeFormat("en-IN", { hour: "numeric", minute: "2-digit", hour12: true });
 const MONTH_SHORT_FMT = new Intl.DateTimeFormat("en-IN", { month: "short" });
 
 function formatMeetingDate(date: Date | null): string {
   return date ? DATE_FMT.format(date) : "Date not available";
 }
 
+/* 24-hour HH:mm — the same format the Meetings page shows (old "2:30 PM" values are converted) */
 function formatMeetingTime(timeValue?: string): string {
   if (!timeValue) return "Time not available";
   const time = parseTimeParts(timeValue);
   if (!time) return timeValue;
-  const date = new Date();
-  date.setHours(time.hours, time.minutes, 0, 0);
-  return TIME_FMT.format(date);
+  return `${String(time.hours).padStart(2, "0")}:${String(time.minutes).padStart(2, "0")}`;
 }
 
 function getPageWindow(current: number, total: number, size = 5): number[] {
@@ -378,24 +407,34 @@ function buildActivityData(
 
 /* ────────────────────────────────────────────────
    Data fetching
-   PERF: officer counts only request 1 row with just the id
-   (PocketBase still returns totalItems), instead of downloading
-   up to 500 full officer records per collection.
 ──────────────────────────────────────────────── */
 
+/* every meeting, fetched MEETINGS_PAGE_SIZE at a time — the counts, chart and cards need all of them */
 async function fetchDashboardData() {
-  const [meetingResult, iasResult, ipsResult] = await Promise.all([
-    pb.collection("meetings").getList<Meeting>(1, MEETINGS_FETCH_LIMIT, { requestKey: null }),
-    pb.collection("ias_officers").getList(1, 1, { fields: "id", requestKey: null }),
-    pb.collection("ips_officers").getList(1, 1, { fields: "id", requestKey: null }),
-  ]);
-
-  return {
-    meetings: meetingResult.items || [],
-    iasCount: iasResult.totalItems || 0,
-    ipsCount: ipsResult.totalItems || 0,
-  };
+  const meetings = await pb.collection("meetings").getFullList<Meeting>({ batch: MEETINGS_PAGE_SIZE, requestKey: null });
+  return { meetings };
 }
+
+/* the people in a meeting — the main officer and the added participants — as stable keys
+   ("IAS:<id>", or the name when the person isn't linked to the directory) with their service */
+function peopleIn(meeting: Meeting): { key: string; service: string }[] {
+  const out: { key: string; service: string }[] = [];
+  const add = (type: unknown, id: unknown, name: unknown) => {
+    const service = serviceOf(type) ?? "";
+    const key = service && id ? `${service}:${id}` : String(name || "").trim().toLowerCase();
+    if (key) out.push({ key, service });
+  };
+  add(meeting.officer_type, meeting.officer_id, meeting.officer_name);
+  let extra: unknown = meeting.participants;
+  if (typeof extra === "string") {
+    try { extra = JSON.parse(extra); } catch { extra = []; }
+  }
+  if (Array.isArray(extra)) for (const p of extra) add(p?.type, p?.id, p?.name);
+  return out;
+}
+
+const isoDate = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
 /* ────────────────────────────────────────────────
    Animated count-up
@@ -441,6 +480,7 @@ function StatCard({
   accent,
   loading = false,
   onClick,
+  tooltip,
   delay = 0,
 }: {
   icon: ReactNode;
@@ -450,6 +490,7 @@ function StatCard({
   accent: KpiAccent;
   loading?: boolean;
   onClick?: () => void;
+  tooltip?: string;
   delay?: number;
 }) {
   const theme = KPI_THEME[accent];
@@ -457,6 +498,7 @@ function StatCard({
   return (
     <button
       type="button"
+      data-tooltip={tooltip}
       onClick={onClick}
       style={{ animationDelay: `${delay}ms` }}
       className={`anim-fade-up group relative w-full cursor-pointer overflow-hidden rounded-3xl bg-gradient-to-br p-5 text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-slate-900/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/20 active:scale-[0.98] ${theme.card}`}
@@ -528,14 +570,14 @@ function EmptyMeetings({
         </div>
         <p className="mt-3 text-sm font-semibold text-slate-700">No matching meetings</p>
         <p className="mt-1 text-xs text-slate-500">
-          No upcoming meetings match your search. Try a different term.
+          No upcoming meetings match your search or priority filter.
         </p>
         <button
           type="button"
           onClick={onClearSearch}
           className="mt-4 cursor-pointer rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-200 hover:text-violet-600 active:scale-95"
         >
-          Clear search
+          Clear filters
         </button>
       </div>
     );
@@ -576,6 +618,7 @@ function UpcomingMeetingRow({
   index?: number;
 }) {
   const statusStyle = getStatusStyle(getMeetingStatus(meeting));
+  const priority = PRIORITY_LEVELS.find((p) => p.key === priorityOf(meeting));
   const isToday = meetingDate ? meetingDate.toDateString() === new Date().toDateString() : false;
   const relativeLabel = meetingDate ? getRelativeDayLabel(meetingDate) : "";
 
@@ -635,6 +678,13 @@ function UpcomingMeetingRow({
             )}
           </div>
         </div>
+
+        {priority && (
+          <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${priority.badge}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${priority.dot}`} />
+            {priority.label}
+          </span>
+        )}
 
         <span className={`hidden shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold md:inline-flex ${statusStyle.badge}`}>
           {statusStyle.label}
@@ -852,85 +902,6 @@ function LegendDot({ label, dotClass }: { label: string; dotClass: string }) {
   );
 }
 
-function SummaryStat({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="rounded-2xl bg-slate-50/80 px-3.5 py-3 transition-colors duration-200 hover:bg-violet-50/60">
-      <p className="text-lg font-extrabold leading-none text-slate-900">{value}</p>
-      <p className="mt-1 text-[11px] font-medium text-slate-400">{label}</p>
-    </div>
-  );
-}
-
-function StatusRow({
-  icon,
-  iconClass,
-  label,
-  value,
-  total,
-  loading,
-}: {
-  icon: ReactNode;
-  iconClass: string;
-  label: string;
-  value: number;
-  total: number;
-  loading: boolean;
-}) {
-  const percent = total > 0 ? Math.round((value / total) * 100) : 0;
-
-  return (
-    <div className="flex items-center gap-3 rounded-2xl p-2 transition-colors hover:bg-slate-50">
-      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${iconClass}`}>{icon}</span>
-      <p className="flex-1 truncate text-sm font-medium text-slate-600">{label}</p>
-      {loading ? (
-        <div className="skeleton h-5 w-8 rounded-full" />
-      ) : (
-        <>
-          <p className="text-sm font-bold text-slate-900">{value}</p>
-          <p className="w-9 text-right text-xs text-slate-400">{percent}%</p>
-        </>
-      )}
-    </div>
-  );
-}
-
-function QuickActionButton({
-  icon,
-  label,
-  onClick,
-  highlight = false,
-}: {
-  icon: ReactNode;
-  label: string;
-  onClick: () => void;
-  highlight?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onClick()}
-      className={`group relative z-10 flex w-full cursor-pointer select-none items-center justify-between rounded-2xl border px-4 py-3 text-left text-xs font-semibold transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm active:scale-[0.98] ${
-        highlight
-          ? "border-violet-200 bg-gradient-to-r from-violet-50 to-fuchsia-50 text-violet-700 hover:border-violet-300"
-          : "border-slate-200 bg-white text-slate-600 hover:border-violet-200 hover:bg-violet-50/60 hover:text-violet-700"
-      }`}
-    >
-      <span className="flex items-center gap-2.5">
-        <span
-          className={`flex h-7 w-7 items-center justify-center rounded-lg transition-all duration-300 group-hover:scale-110 ${
-            highlight
-              ? "bg-white text-violet-600 shadow-sm"
-              : "bg-slate-50 text-slate-400 group-hover:bg-white group-hover:text-violet-600"
-          }`}
-        >
-          {icon}
-        </span>
-        {label}
-      </span>
-      <ArrowRight className="h-3.5 w-3.5 text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-violet-500" />
-    </button>
-  );
-}
 
 /* ────────────────────────────────────────────────
    Dashboard Page
@@ -941,8 +912,6 @@ export default function DashboardPage() {
 
   /* ── Data state ── */
   const [meetings, setMeetings] = useState<Meeting[]>([]);
-  const [iasCount, setIasCount] = useState(0);
-  const [ipsCount, setIpsCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -953,10 +922,17 @@ export default function DashboardPage() {
   const [userName, setUserName] = useState("Admin");
   const [todayLabel, setTodayLabel] = useState("");
   const [activityRange, setActivityRange] = useState<ActivityRange>("week");
-  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const openPalette = useCallback((query = "") => {
+    setPaletteQuery(query);
+    setPaletteOpen(true);
+  }, []);
 
   /* ── Upcoming meetings pagination ── */
   const [upcomingPage, setUpcomingPage] = useState(1);
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
+  const [upcomingSort, setUpcomingSort] = useState<UpcomingSort>("soonest");
 
   /* ── Off-canvas state ── */
   const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
@@ -980,8 +956,6 @@ export default function DashboardPage() {
       const data = await fetchDashboardData();
 
       setMeetings(data.meetings);
-      setIasCount(data.iasCount);
-      setIpsCount(data.ipsCount);
       setError("");
       writeCache(data);
     } catch (err) {
@@ -997,14 +971,32 @@ export default function DashboardPage() {
     const cached = readCache();
     if (cached) {
       setMeetings(cached.meetings);
-      setIasCount(cached.iasCount);
-      setIpsCount(cached.ipsCount);
       setLoading(false);
       loadDashboardData({ silent: true });
     } else {
       loadDashboardData();
     }
   }, [loadDashboardData]);
+
+  /* live updates — a meeting booked, changed or deleted by anyone (MD, PA, another tab)
+     appears here straight away, without reloading the whole list */
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    let cancelled = false;
+    pb.collection("meetings")
+      .subscribe<Meeting>("*", ({ action, record }) => {
+        setMeetings((prev) => {
+          const rest = prev.filter((m) => m.id !== record.id);
+          const next = action === "delete" ? rest : prev.some((m) => m.id === record.id) ? prev.map((m) => (m.id === record.id ? record : m)) : [...prev, record];
+          writeCache({ meetings: next });
+          return next;
+        });
+      })
+      .then((fn) => { if (cancelled) fn(); else unsub = fn; })
+      // status 0 = the attempt was cancelled (dev mode mounts twice) — not a real failure
+      .catch((e) => { if (e?.status !== 0 && !e?.isAbort) console.warn("[Dashboard] live updates unavailable:", e); });
+    return () => { cancelled = true; unsub?.(); };
+  }, []);
 
   /* PERF: warm up the routes users jump to from here */
   useEffect(() => {
@@ -1111,17 +1103,26 @@ export default function DashboardPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [panelOpen, updateMeeting]);
 
-  /* Keyboard shortcuts: "N" = new meeting, "R" = yearly recap */
+  /* Keyboard shortcuts: Ctrl/⌘+K or "/" = search & commands, "N" = new meeting, "R" = yearly recap */
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteQuery("");
+        setPaletteOpen((open) => !open);
+        return;
+      }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (panelOpen || selectedMeeting || updateMeeting) return;
+      if (paletteOpen || panelOpen || selectedMeeting || updateMeeting) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
 
       const key = e.key.toLowerCase();
-      if (key === "n") {
+      if (key === "/") {
+        e.preventDefault();
+        openPalette();
+      } else if (key === "n") {
         e.preventDefault();
         openCreatePanel();
       } else if (key === "r") {
@@ -1131,7 +1132,7 @@ export default function DashboardPage() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [panelOpen, selectedMeeting, updateMeeting, openCreatePanel, goTo]);
+  }, [paletteOpen, panelOpen, selectedMeeting, updateMeeting, openCreatePanel, openPalette, goTo]);
 
   /* ────────────────────────────────
      Derived data
@@ -1145,8 +1146,8 @@ export default function DashboardPage() {
     return map;
   }, [meetings]);
 
+  const now = useNow(); // ticks every minute, so finished meetings drop off "upcoming"
   const upcomingMeetings = useMemo(() => {
-    const now = Date.now();
     return meetings
       .filter((meeting) => {
         const status = getMeetingStatus(meeting);
@@ -1159,9 +1160,9 @@ export default function DashboardPage() {
           (meetingDates.get(a.id)?.getTime() ?? Number.POSITIVE_INFINITY) -
           (meetingDates.get(b.id)?.getTime() ?? Number.POSITIVE_INFINITY)
       );
-  }, [meetings, meetingDates]);
+  }, [meetings, meetingDates, now]);
 
-  const filteredUpcomingMeetings = useMemo(() => {
+  const searchedUpcomingMeetings = useMemo(() => {
     const searchValue = search.toLowerCase().trim();
     if (!searchValue) return upcomingMeetings;
 
@@ -1178,6 +1179,38 @@ export default function DashboardPage() {
         .includes(searchValue)
     );
   }, [upcomingMeetings, search]);
+
+  /* how many upcoming meetings of each priority (after the text search) — shown on the chips */
+  const priorityCounts = useMemo(() => {
+    const counts: Record<PriorityFilter, number> = { all: searchedUpcomingMeetings.length, high: 0, medium: 0, low: 0 };
+    for (const m of searchedUpcomingMeetings) {
+      const p = priorityOf(m);
+      if (p === "high" || p === "medium" || p === "low") counts[p]++;
+    }
+    return counts;
+  }, [searchedUpcomingMeetings]);
+
+  const filteredUpcomingMeetings = useMemo(() => {
+    const list = priorityFilter === "all"
+      ? searchedUpcomingMeetings
+      : searchedUpcomingMeetings.filter((m) => priorityOf(m) === priorityFilter);
+    if (upcomingSort === "soonest") return list;
+    // by priority, soonest first within the same priority (the list is already date-sorted;
+    // sort is stable); meetings without a priority always go last
+    const dir = upcomingSort === "priority-high" ? -1 : 1;
+    return [...list].sort((a, b) => {
+      const ra = PRIORITY_RANK[priorityOf(a)] || 0;
+      const rb = PRIORITY_RANK[priorityOf(b)] || 0;
+      if (!ra || !rb) return rb - ra;
+      return dir * (ra - rb);
+    });
+  }, [searchedUpcomingMeetings, priorityFilter, upcomingSort]);
+  const upcomingFiltered = search.trim().length > 0 || priorityFilter !== "all";
+  const clearUpcomingFilters = () => {
+    setSearch("");
+    setPriorityFilter("all");
+    setUpcomingPage(1);
+  };
 
   const upcomingTotalPages = Math.max(1, Math.ceil(filteredUpcomingMeetings.length / UPCOMING_PAGE_SIZE));
   const safeUpcomingPage = Math.min(upcomingPage, upcomingTotalPages);
@@ -1216,8 +1249,67 @@ export default function DashboardPage() {
     }
 
     const totalMeetings = meetings.length;
+    const today = new Date(now);
+    const todayIso = isoDate(today);
+    const isOff = (m: Meeting) => {
+      const s = getMeetingStatus(m);
+      return isCancelled(s) || s.includes("rejected");
+    };
+
+    /* this week (Monday–Sunday) vs last week, cancelled meetings left out */
+    const weekStart = startOfDay(today);
+    weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+    const lastWeekStart = new Date(weekStart);
+    lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+    const nextWeekStart = new Date(weekStart);
+    nextWeekStart.setDate(nextWeekStart.getDate() + 7);
+    let thisWeek = 0;
+    let lastWeek = 0;
+
+    /* officers met this year — each person once, meetings already held */
+    const met = new Map<string, string>();
+
+    for (const m of meetings) {
+      const date = meetingDates.get(m.id);
+      if (!date || isOff(m)) continue;
+      if (date >= weekStart && date < nextWeekStart) thisWeek += 1;
+      else if (date >= lastWeekStart && date < weekStart) lastWeek += 1;
+      if (date.getFullYear() === today.getFullYear() && date.getTime() <= now) {
+        for (const p of peopleIn(m)) met.set(p.key, p.service);
+      }
+    }
+    const byService = new Map<string, number>();
+    for (const s of met.values()) if (s) byService.set(s, (byService.get(s) || 0) + 1);
+    const metByService = ["IAS", "IPS", "IFS", "IRS"]
+      .filter((s) => byService.get(s))
+      .map((s) => `${s} ${byService.get(s)}`)
+      .join(" · ");
+
+    /* follow-ups: the latest meeting per person only (same rule as the Today card) */
+    const latest = new Map<string, Meeting>();
+    for (const m of meetings) {
+      const k = m.officer_id || m.officer_name;
+      if (!k || isOff(m)) continue;
+      const prev = latest.get(k);
+      if (!prev || String(m.meeting_date) > String(prev.meeting_date)) latest.set(k, m);
+    }
+    const soonIso = isoDate(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 7));
+    let followUpsOverdue = 0;
+    let followUpsSoon = 0;
+    for (const m of latest.values()) {
+      const fu = String(m.follow_up_date || "").slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(fu)) continue;
+      if (fu < todayIso) followUpsOverdue += 1;
+      else if (fu <= soonIso) followUpsSoon += 1;
+    }
 
     return {
+      thisWeek,
+      weekDelta: thisWeek - lastWeek,
+      metThisYear: met.size,
+      metByService,
+      followUpsOverdue,
+      followUpsSoon,
       totalMeetings,
       scheduled,
       completed,
@@ -1225,7 +1317,55 @@ export default function DashboardPage() {
       cancelled,
       completionRate: totalMeetings === 0 ? 0 : Math.round((completed / totalMeetings) * 100),
     };
-  }, [meetings]);
+  }, [meetings, meetingDates, now]);
+
+  /* "Awaiting confirmation": upcoming meetings whose invitation went out through Google Calendar,
+     and how the guests replied. Asked once per set of meetings (not every minute). */
+  const invitedIds = useMemo(
+    () =>
+      upcomingMeetings
+        .filter((m) => m.send_invite !== false && m.gcal_event_id)
+        .slice(0, 40)
+        .map((m) => String(m.gcal_event_id))
+        .sort()
+        .join(","),
+    [upcomingMeetings]
+  );
+  const [replies, setReplies] = useState<{ ids: string; byEvent: Record<string, Replies> } | null>(null);
+  useEffect(() => {
+    if (!invitedIds) return;
+    let alive = true;
+    apiJSON<{ responses: Record<string, Replies> }>("/api/google/responses", { eventIds: invitedIds.split(",") }, { timeoutMs: 30_000 })
+      .then((r) => alive && setReplies({ ids: invitedIds, byEvent: r.responses || {} }))
+      .catch((e) => {
+        console.warn("[Dashboard] invitation replies couldn't be loaded:", e);
+        if (alive) setReplies({ ids: invitedIds, byEvent: {} });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [invitedIds]);
+
+  const awaiting = useMemo(() => {
+    if (!invitedIds) return { loading: false, meetings: 0, guests: 0, known: true };
+    if (replies?.ids !== invitedIds) return { loading: true, meetings: 0, guests: 0, known: true };
+    let meetingsWaiting = 0;
+    let guests = 0;
+    let known = 0;
+    for (const id of invitedIds.split(",")) {
+      const r = replies.byEvent[id];
+      if (!r) continue;
+      known += 1;
+      const notYet = r.waiting + r.tentative;
+      if (notYet > 0) {
+        meetingsWaiting += 1;
+        guests += notYet;
+      }
+    }
+    return { loading: false, meetings: meetingsWaiting, guests, known: known > 0 };
+  }, [invitedIds, replies]);
+
+  const scrollTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
   const currentYear = new Date().getFullYear();
 
@@ -1236,7 +1376,7 @@ export default function DashboardPage() {
   return (
     <ProtectedRoute>
       <div
-        className={`${inter.className} dash-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8`}
+        className={`${inter.className} dash-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8`}
       >
         <CustomStyles />
 
@@ -1253,16 +1393,17 @@ export default function DashboardPage() {
           />
         </div>
 
-        <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+        <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
           {/* ── App bar ── */}
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 bg-white px-4 py-5 sm:px-6 sm:py-6">
-            <div className="flex min-w-0 items-center gap-4">
-              <span className="anim-scale-in flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-900 to-slate-700 text-white shadow-lg shadow-slate-900/20 sm:h-16 sm:w-16">
+          <div className="flex flex-wrap items-center lg:flex-nowrap justify-between gap-4 border-b border-slate-100 bg-white px-4 py-5 sm:px-6 sm:py-6">
+            <div className="flex min-w-0 flex-1 items-center gap-4">
+              <span className="anim-scale-in flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-900 to-slate-700 text-white shadow-lg shadow-slate-900/20 sm:h-16 sm:w-16">
                 <CalendarDays className="h-6 w-6 sm:h-7 sm:w-7" />
               </span>
               <div className="min-w-0">
-                <h1 className="anim-fade-up truncate bg-gradient-to-r from-slate-900 via-violet-800 to-slate-900 bg-clip-text text-2xl font-extrabold leading-tight tracking-tight text-transparent sm:text-3xl lg:text-4xl">
-                  {greeting}, {userName}
+                <h1 className="anim-fade-up text-xl font-extrabold leading-tight tracking-tight text-slate-900 [overflow-wrap:anywhere] sm:text-2xl xl:text-[1.75rem]">
+                  {greeting},{" "}
+                  <span className="bg-gradient-to-r from-violet-700 to-fuchsia-600 bg-clip-text text-transparent">{userName}</span>
                 </h1>
                 <p className="anim-fade-up mt-1 truncate text-xs font-medium text-slate-400 sm:text-sm" style={{ animationDelay: "40ms" }}>
                   {todayLabel || "Meeting Management"}
@@ -1270,34 +1411,33 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              {/* Desktop search */}
+            <div className="flex shrink-0 items-center gap-2">
+              {/* Search & commands (Ctrl/⌘+K) */}
+              {/* Desktop: a real search field — focusing or typing opens the search panel with the text carried over */}
               <div className="relative hidden md:block">
                 <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  type="search"
+                  value=""
+                  onChange={(e) => openPalette(e.target.value)}
+                  onFocus={(e) => {
+                    e.currentTarget.blur();
+                    openPalette();
+                  }}
                   placeholder="Search meetings, officers..."
-                  className="h-11 w-64 rounded-full border border-slate-200 bg-slate-50/80 pl-11 pr-9 text-sm text-slate-900 placeholder-slate-400 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                  aria-label="Search meetings, officers and commands"
+                  className="h-11 w-60 rounded-full border border-slate-200 bg-slate-50/80 pl-11 pr-16 text-sm text-slate-900 placeholder-slate-400 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:outline-none xl:w-72"
                 />
-                {search && (
-                  <button
-                    type="button"
-                    onClick={() => setSearch("")}
-                    aria-label="Clear search"
-                    className="absolute right-3.5 top-1/2 -translate-y-1/2 cursor-pointer rounded-full p-1 text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 active:scale-90"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
+                <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
+                  Ctrl K
+                </kbd>
               </div>
 
-              {/* Mobile search toggle */}
+              {/* Mobile: icon only */}
               <button
                 type="button"
-                onClick={() => setMobileSearchOpen((open) => !open)}
-                aria-label="Toggle search"
+                onClick={() => openPalette()}
+                aria-label="Search meetings, officers and commands"
                 className="flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-all duration-200 hover:-translate-y-0.5 hover:text-violet-600 active:scale-95 md:hidden"
               >
                 <Search className="h-4 w-4" />
@@ -1312,7 +1452,7 @@ export default function DashboardPage() {
                 className="group relative inline-flex h-11 cursor-pointer items-center gap-2 rounded-full border border-violet-200 bg-gradient-to-r from-violet-50 to-fuchsia-50 px-3.5 text-sm font-semibold text-violet-700 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-300 hover:shadow-md hover:shadow-violet-500/10 active:scale-95"
               >
                 <Sparkles className="h-4 w-4 transition-transform duration-300 group-hover:rotate-12 group-hover:scale-110" />
-                <span className="hidden lg:inline">Recap {currentYear}</span>
+                <span className="hidden xl:inline">Recap {currentYear}</span>
                 <span className="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5">
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-fuchsia-400 opacity-60 motion-reduce:animate-none" />
                   <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-fuchsia-500" />
@@ -1324,6 +1464,7 @@ export default function DashboardPage() {
                 type="button"
                 onClick={() => goTo("/calendar")}
                 aria-label="Open calendar"
+                data-tooltip="Open the calendar"
                 className="flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-all duration-200 hover:-translate-y-0.5 hover:text-violet-600 active:scale-95"
               >
                 <CalendarDays className="h-4 w-4" />
@@ -1333,6 +1474,7 @@ export default function DashboardPage() {
               <button
                 type="button"
                 onClick={openCreatePanel}
+                data-tooltip="Schedule a new meeting  ·  shortcut N"
                 className="group inline-flex h-11 cursor-pointer items-center gap-2 rounded-full bg-slate-900 px-5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
               >
                 <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
@@ -1342,35 +1484,8 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Mobile search bar */}
-          {mobileSearchOpen && (
-            <div className="anim-fade-in border-b border-slate-100 bg-white px-4 py-3 md:hidden">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search meetings, officers..."
-                  autoFocus
-                  className="h-11 w-full rounded-full border border-slate-200 bg-slate-50/80 pl-11 pr-9 text-sm text-slate-900 placeholder-slate-400 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
-                />
-                {search && (
-                  <button
-                    type="button"
-                    onClick={() => setSearch("")}
-                    aria-label="Clear search"
-                    className="absolute right-3.5 top-1/2 -translate-y-1/2 cursor-pointer rounded-full p-1 text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 active:scale-90"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
           {/* ── Content ── */}
-          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+          <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
             {/* Error banner */}
             {error && (
               <div className="anim-fade-up flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 shadow-sm">
@@ -1389,90 +1504,154 @@ export default function DashboardPage() {
               </div>
             )}
 
+            {/* "Next up" and "Needs attention" (TodayFocusCard) are hidden from the dashboard for now —
+                re-add its dynamic import (components/dashboard/TodayFocusCard) and put <TodayFocusCard meetings={liveMeetings}
+                loading={loading} onOpen={openMeetingDetails}
+                onUpdate={handleOpenUpdate} onCreate={openCreatePanel} /> back here to show them again. */}
+
             {/* ── KPI cards ── */}
-            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <section className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
               <StatCard
-                icon={<Users className="h-5 w-5" />}
-                label="Total Meetings"
-                value={stats.totalMeetings}
-                sub={`${stats.scheduled} scheduled`}
+                icon={<CalendarDays className="h-5 w-5" />}
+                label="This week's meetings"
+                value={stats.thisWeek}
+                sub={stats.weekDelta === 0 ? "Same as last week" : `${Math.abs(stats.weekDelta)} ${stats.weekDelta > 0 ? "more" : "fewer"} than last week`}
                 accent="blue"
                 loading={loading}
-                onClick={() => goTo("/meetings")}
+                onClick={() => goTo("/calendar")}
+                tooltip="Meetings Monday to Sunday this week (cancelled ones left out), compared with last week — click to open the Calendar"
                 delay={0}
               />
               <StatCard
-                icon={<Briefcase className="h-5 w-5" />}
-                label="IAS Officers"
-                value={iasCount}
-                sub="Administrative service"
+                icon={<UserCheck className="h-5 w-5" />}
+                label={`Officers met in ${currentYear}`}
+                value={stats.metThisYear}
+                sub={stats.metByService || "Each person counted once"}
                 accent="violet"
                 loading={loading}
-                onClick={() => goTo("/officers?type=ias")}
+                onClick={() => goTo("/recap")}
+                tooltip="Different people met this year, each counted once, including added participants — click for the yearly recap"
                 delay={40}
               />
               <StatCard
-                icon={<ShieldCheck className="h-5 w-5" />}
-                label="IPS Officers"
-                value={ipsCount}
-                sub="Police service"
+                icon={<CalendarClock className="h-5 w-5" />}
+                label="Follow-ups due"
+                value={stats.followUpsOverdue + stats.followUpsSoon}
+                sub={
+                  stats.followUpsOverdue + stats.followUpsSoon === 0
+                    ? "Nothing due this week"
+                    : `${stats.followUpsOverdue} overdue · ${stats.followUpsSoon} in the next 7 days`
+                }
                 accent="rose"
                 loading={loading}
-                onClick={() => goTo("/officers?type=ips")}
+                tooltip="Follow-up dates that have passed or fall in the next 7 days"
                 delay={80}
               />
               <StatCard
-                icon={<CheckCircle2 className="h-5 w-5" />}
-                label="Completion Rate"
-                value={`${stats.completionRate}%`}
-                sub={`${stats.completed} completed`}
+                icon={<Hourglass className="h-5 w-5" />}
+                label="Awaiting confirmation"
+                value={awaiting.loading ? "…" : awaiting.known ? awaiting.meetings : "—"}
+                sub={
+                  awaiting.loading
+                    ? "Checking Google Calendar…"
+                    : !awaiting.known
+                    ? invitedIds ? "Google Calendar not reachable" : "No invitations sent"
+                    : awaiting.meetings === 0
+                    ? "Every invited guest has replied"
+                    : `${awaiting.guests} guest${awaiting.guests === 1 ? "" : "s"} yet to accept`
+                }
                 accent="emerald"
                 loading={loading}
-                onClick={() => goTo("/reports")}
+                onClick={() => scrollTo("upcoming-meetings")}
+                tooltip="Upcoming meetings where an invited guest hasn't accepted the Google Calendar invitation yet — click for Upcoming Meetings"
                 delay={120}
               />
             </section>
 
             {/* ── Main grid ── */}
-            <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-5 xl:grid-cols-3">
               {/* Left column */}
-              <div className="space-y-6 xl:col-span-2">
-                {/* who else to meet on upcoming visits to other cities */}
-                <VisitPlannerCard meetings={meetings} loading={loading} delay={40} />
-
-                {!loading && (
-                  <ReconnectCard
-                    meetings={meetings}
-                    onOpenMeeting={openMeetingDetails}
-                    onPlanMeeting={() => openCreatePanel()}
-                    delay={60}
-                  />
-                )}
-
-                {!loading && <OnThisDayCard meetings={meetings} onOpenMeeting={openMeetingDetails} delay={80} />}
-
+              <div className="space-y-6 lg:col-span-3 xl:col-span-2">
                 {/* Upcoming meetings */}
                 <section
-                  className="anim-fade-up overflow-hidden rounded-3xl border border-violet-100 bg-white shadow-sm"
-                  style={{ animationDelay: "100ms" }}
+                  id="upcoming-meetings"
+                  className="anim-fade-up scroll-mt-4 overflow-hidden rounded-3xl border border-violet-100 bg-white shadow-sm"
+                  style={{ animationDelay: "40ms" }}
                 >
-                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
-                    <div>
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+                    <div className="flex items-center gap-2.5">
                       <h2 className="text-base font-bold text-slate-900">Upcoming Meetings</h2>
-                      <p className="mt-0.5 text-xs text-slate-500">Next scheduled meetings across all officers</p>
+                      <span className="rounded-full bg-violet-50 px-2.5 py-0.5 text-xs font-bold tabular-nums text-violet-700">
+                        {filteredUpcomingMeetings.length}
+                      </span>
                     </div>
-                    <span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-bold tabular-nums text-violet-700">
-                      {filteredUpcomingMeetings.length}
-                    </span>
+                    <div className="relative w-full sm:w-56">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Filter by title or officer"
+                        aria-label="Filter upcoming meetings"
+                        className="h-9 w-full rounded-full border border-slate-200 bg-slate-50/80 pl-8 pr-8 text-xs text-slate-900 placeholder-slate-400 transition-all duration-200 hover:border-slate-300 focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                      />
+                      {search && (
+                        <button
+                          type="button"
+                          onClick={() => setSearch("")}
+                          aria-label="Clear filter"
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer rounded-full p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  {/* priority chips + sort */}
+                  {upcomingMeetings.length > 0 && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-3">
+                      <div role="radiogroup" aria-label="Filter by priority" className="flex flex-wrap items-center gap-1.5">
+                        {([{ key: "all", label: "All", dot: "", badge: "" }, ...PRIORITY_LEVELS] as const).map((p) => {
+                          const active = priorityFilter === p.key;
+                          return (
+                            <button
+                              key={p.key}
+                              type="button"
+                              role="radio"
+                              aria-checked={active}
+                              onClick={() => { setPriorityFilter(p.key); setUpcomingPage(1); }}
+                              className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors duration-200 ${
+                                active
+                                  ? "bg-slate-900 text-white"
+                                  : "border border-slate-200 bg-white text-slate-600 hover:border-violet-200 hover:text-violet-700"
+                              }`}
+                            >
+                              {p.dot && <span className={`h-2 w-2 rounded-full ${p.dot}`} />}
+                              {p.label}
+                              <span className={`tabular-nums ${active ? "text-white/70" : "text-slate-400"}`}>{priorityCounts[p.key]}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <select
+                        value={upcomingSort}
+                        onChange={(e) => { setUpcomingSort(e.target.value as UpcomingSort); setUpcomingPage(1); }}
+                        aria-label="Sort upcoming meetings"
+                        className="h-8 cursor-pointer rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition-colors hover:border-violet-200 focus:border-violet-400 focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                      >
+                        {UPCOMING_SORTS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                      </select>
+                    </div>
+                  )}
 
                   <div className="p-5">
                     {loading ? (
                       <LoadingRows count={4} />
                     ) : filteredUpcomingMeetings.length === 0 ? (
                       <EmptyMeetings
-                        isFiltered={search.trim().length > 0}
-                        onClearSearch={() => setSearch("")}
+                        isFiltered={upcomingFiltered}
+                        onClearSearch={clearUpcomingFilters}
                         onCreate={openCreatePanel}
                       />
                     ) : (
@@ -1501,6 +1680,11 @@ export default function DashboardPage() {
                     />
                   )}
                 </section>
+
+                {/* Trips: who else to meet on upcoming visits, or in any other city */}
+                <VisitPlannerCard meetings={meetings} loading={loading} delay={80} />
+
+                {!loading && <OnThisDayCard meetings={meetings} onOpenMeeting={openMeetingDetails} delay={120} />}
 
                 {/* Activity chart */}
                 <section
@@ -1547,22 +1731,29 @@ export default function DashboardPage() {
                         <LegendDot label="Completed" dotClass="bg-emerald-500" />
                         <LegendDot label="Cancelled" dotClass="bg-slate-300" />
                       </div>
-
-                      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        <SummaryStat label="Scheduled" value={stats.scheduled} />
-                        <SummaryStat label="Completed" value={stats.completed} />
-                        <SummaryStat label="Cancelled" value={stats.cancelled} />
-                        <SummaryStat label="Total" value={stats.totalMeetings} />
-                      </div>
                     </>
+                  )}
+
+                  {/* all-time totals in one line (replaces the Status Breakdown card and Completion Rate) */}
+                  {!loading && stats.totalMeetings > 0 && (
+                    <p className={`text-xs text-slate-500 ${hasActivity ? "mt-3" : "mt-4 border-t border-slate-100 pt-4"}`}>
+                      <span className="font-semibold text-slate-700">All time: {stats.totalMeetings} meetings</span>
+                      {" · "}{stats.completed} completed ({stats.completionRate}%)
+                      {" · "}{stats.scheduled} scheduled
+                      {stats.rescheduled > 0 && <>{" · "}{stats.rescheduled} rescheduled</>}
+                      {stats.cancelled > 0 && <>{" · "}{stats.cancelled} cancelled</>}
+                    </p>
                   )}
                 </section>
               </div>
 
               {/* Right column */}
-              <div className="space-y-6">
+              <div className="space-y-6 lg:col-span-2 xl:col-span-1">
                 {/* Yearly recap — top of the column so it's visible without scrolling */}
                 <RecapTeaserCard meetings={liveMeetings} loading={loading} delay={60} />
+
+                {/* starred officers not met for 90+ days */}
+                <KeyPeopleCard meetings={meetings} loading={loading} delay={70} />
 
                 {/* Birthdays, service anniversaries and posting changes */}
                 <PeopleUpdatesCard
@@ -1572,81 +1763,23 @@ export default function DashboardPage() {
                   onOpenMeeting={openMeetingDetails}
                   delay={80}
                 />
-
-                {/* Status breakdown */}
-                <section
-                  className="anim-fade-up rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
-                  style={{ animationDelay: "100ms" }}
-                >
-                  <h2 className="text-base font-bold text-slate-900">Status Breakdown</h2>
-                  <p className="mt-0.5 text-xs text-slate-500">All meetings by current status</p>
-
-                  <div className="mt-4 space-y-1">
-                    <StatusRow
-                      icon={<CalendarDays className="h-4 w-4 text-violet-600" />}
-                      iconClass="bg-violet-50"
-                      label="Scheduled"
-                      value={stats.scheduled}
-                      total={stats.totalMeetings}
-                      loading={loading}
-                    />
-                    <StatusRow
-                      icon={<CheckCircle2 className="h-4 w-4 text-emerald-600" />}
-                      iconClass="bg-emerald-50"
-                      label="Completed"
-                      value={stats.completed}
-                      total={stats.totalMeetings}
-                      loading={loading}
-                    />
-                    <StatusRow
-                      icon={<RefreshCw className="h-4 w-4 text-amber-600" />}
-                      iconClass="bg-amber-50"
-                      label="Rescheduled"
-                      value={stats.rescheduled}
-                      total={stats.totalMeetings}
-                      loading={loading}
-                    />
-                    <StatusRow
-                      icon={<XCircle className="h-4 w-4 text-rose-600" />}
-                      iconClass="bg-rose-50"
-                      label="Cancelled"
-                      value={stats.cancelled}
-                      total={stats.totalMeetings}
-                      loading={loading}
-                    />
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-3 gap-3 border-t border-slate-100 pt-4">
-                    <SummaryStat label="Total" value={stats.totalMeetings} />
-                    <SummaryStat label="IAS Officers" value={iasCount} />
-                    <SummaryStat label="IPS Officers" value={ipsCount} />
-                  </div>
-                </section>
-
-                {/* Quick actions */}
-                <section
-                  className="anim-fade-up relative z-10 rounded-3xl border border-violet-100 bg-white p-5 shadow-sm"
-                  style={{ animationDelay: "140ms" }}
-                >
-                  <h2 className="text-base font-bold text-slate-900">Quick Actions</h2>
-                  <div className="mt-4 space-y-2.5">
-                    <QuickActionButton
-                      icon={<Sparkles className="h-4 w-4" />}
-                      label={`Yearly Recap ${currentYear}`}
-                      onClick={() => goTo("/recap")}
-                      highlight
-                    />
-                    <QuickActionButton icon={<Plus className="h-4 w-4" />} label="New Meeting" onClick={openCreatePanel} />
-                    <QuickActionButton icon={<Users className="h-4 w-4" />} label="Officers Directory" onClick={() => goTo("/officers")} />
-                    <QuickActionButton icon={<CalendarDays className="h-4 w-4" />} label="View Calendar" onClick={() => goTo("/calendar")} />
-                    <QuickActionButton icon={<FileText className="h-4 w-4" />} label="View Reports" onClick={() => goTo("/reports")} />
-                  </div>
-                </section>
               </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* ── Search & commands (Ctrl/⌘+K) ── */}
+      <CommandPalette
+        key={paletteOpen ? `open:${paletteQuery}` : "closed"}
+        initialQuery={paletteQuery}
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        meetings={liveMeetings}
+        onOpenMeeting={openMeetingDetails}
+        onCreate={openCreatePanel}
+        goTo={goTo}
+      />
 
       {/* ── Meeting details off-canvas ── */}
       {selectedMeeting && (

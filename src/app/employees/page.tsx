@@ -1,13 +1,38 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Search, ChevronLeft, ChevronRight, ChevronDown, User, Briefcase,
   X, Mail, Phone, Users, Building2,
   Plus, Database, Loader2, ArrowRight, ArrowUpRight, IdCard, Pencil, Trash2,
-  RefreshCw, AlertCircle,
+  RefreshCw, AlertCircle, CalendarPlus, Star,
 } from 'lucide-react';
+import dynamic from 'next/dynamic';
 import pb from '@/lib/pocketbase';
+import { loadDirectoryEmployees, type DirectoryEmployee } from '@/components/employees/employee-api';
+import KeyPersonStar, { KeyPersonToggle } from '@/components/KeyPersonStar';
+import KeyPeoplePanel, { useKeyPeopleCount } from '@/components/meetings/KeyPeoplePanel';
+import { useAuth } from '@/contexts/AuthContext';
+import { canEdit } from '@/lib/roles';
+import { cleanName, nameError, phoneError } from '@/lib/validation';
+import PhoneInput from '@/components/PhoneInput';
+
+/* the meeting form — loaded only when "Schedule meeting" is clicked */
+const CreateMeetingPanel = dynamic(() => import('@/components/CreateMeetingPanel'), { ssr: false });
+
+/* Managers lead each department in the list: HRMS Role "Manager" (employees added in the
+   app have no role — their designation is used: "… Manager", "Head of …") */
+const isManager = (e: { role?: string; designation?: string; source?: string }) =>
+  e.source === 'hrms' ? String(e.role || '').trim().toLowerCase() === 'manager'
+    : /\bmanager\b|\bhead\b/i.test(String(e.designation || ''));
+
+function ManagerBadge() {
+  return (
+    <span className="inline-flex shrink-0 items-center rounded-full bg-amber-100 px-1.5 py-0.5 align-middle text-[9px] font-bold uppercase tracking-wide text-amber-800 ring-1 ring-inset ring-amber-500/30">
+      Manager
+    </span>
+  );
+}
 
 /* ------------------------------ Departments ------------------------------ */
 
@@ -434,7 +459,11 @@ function AnimatedNumber({ value }: { value: number }) {
 /* ================================ Main Page ================================ */
 
 export default function EmployeesPage() {
-  const [employees, setEmployees] = useState<any[]>([]);
+  const [allEmployees, setAllEmployees] = useState<DirectoryEmployee[]>([]);
+  const [keyPeopleOpen, setKeyPeopleOpen] = useState(false);
+  const keyPeopleCount = useKeyPeopleCount();
+  const { user } = useAuth();
+  const [hrmsError, setHrmsError] = useState('');
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -453,27 +482,70 @@ export default function EmployeesPage() {
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  /* Stats (per-department counts + total) */
-  const [deptStats, setDeptStats] = useState<{ name: string; count: number }[]>([]);
-  const [totalCount, setTotalCount] = useState(0);
+  const [showAllDepts, setShowAllDepts] = useState(false);
 
   /* Pagination state */
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [totalItems, setTotalItems] = useState(0);
   const [perPage, setPerPage] = useState(50);
 
   /* Off-canvas detail panel state */
   const [selectedEmployee, setSelectedEmployee] = useState<any>(null);
+
+  /* "Schedule meeting" — opens the meeting form with this employee already picked
+     (an Internal meeting; more employees can be added right below them) */
+  const [scheduleWith, setScheduleWith] = useState<any>(null);
+  const scheduleMeeting = (emp: any) => {
+    setSelectedEmployee(null);
+    setScheduleWith({
+      meeting_type: 'Internal',
+      officer_type: 'Other',
+      officer_id: emp.id,
+      officer_name: emp.name || '',
+      designation: emp.designation || '',
+      department: emp.department || '',
+      contact_number: emp.contact_number || '',
+      email: emp.email || '',
+      current_position: emp.designation || '',
+    });
+  };
 
   /* The employees table's DOM node, so clicking a KPI/stat card can
      smooth-scroll straight to it instead of leaving the user to scroll
      past the header/KPI cards manually. */
   const tableRef = useRef<HTMLDivElement>(null);
 
-  /* SERVER-SIDE SEARCH — debounced */
+  /* search — debounced */
   const [debouncedSearch, setDebouncedSearch] = useState('');
-  const loadToken = useRef(0);
+
+  /* ── the directory: HRMS employees + employees added in the app, filtered / paged here ── */
+  const SEARCHABLE_FIELDS = ['name', 'designation', 'department', 'contact_number', 'email', 'branch', 'emp_id'];
+  const filteredEmployees = useMemo(() => {
+    const q = debouncedSearch.toLowerCase();
+    return allEmployees
+      .filter((e) =>
+        (selectedDept === 'all' || e.department === selectedDept) &&
+        (!q || SEARCHABLE_FIELDS.some((f) => String(e[f] ?? '').toLowerCase().includes(q))))
+      // department by department; in each one the managers first, then everyone A–Z
+      .sort((a, b) =>
+        (selectedDept === 'all' ? String(a.department || '~').localeCompare(String(b.department || '~')) : 0) ||
+        Number(isManager(b)) - Number(isManager(a)) ||
+        String(a.name || '').localeCompare(String(b.name || '')));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEmployees, selectedDept, debouncedSearch]);
+  const totalItems = filteredEmployees.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / perPage));
+  const employees = filteredEmployees.slice((currentPage - 1) * perPage, currentPage * perPage);
+
+  /* Stats (per-department counts + total) */
+  const deptStats = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const e of allEmployees) {
+      const d = String(e.department || '').trim();
+      if (d) map.set(d, (map.get(d) || 0) + 1);
+    }
+    return [...map.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+  }, [allEmployees]);
+  const totalCount = allEmployees.length;
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -483,11 +555,7 @@ export default function EmployeesPage() {
     return () => clearTimeout(t);
   }, [searchQuery]);
 
-  useEffect(() => {
-    loadData(currentPage);
-  }, [currentPage, selectedDept, perPage, debouncedSearch]);
-
-  useEffect(() => { loadStats(); }, []);
+  useEffect(() => { loadAll(); }, []);
 
   useEffect(() => {
     if (!loading && currentPage > 1 && employees.length === 0) {
@@ -515,61 +583,35 @@ export default function EmployeesPage() {
 
   /* ------------------------------ Data Loading ----------------------------- */
 
-  const SEARCHABLE_FIELDS = ['name', 'designation', 'department', 'contact_number', 'email'];
-
-  async function fetchPage(page: number, per: number, query: string, dept: string) {
-    const filters: string[] = [];
-    if (dept !== 'all') {
-      const d = dept.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      filters.push(`department = "${d}"`);
-    }
-    if (query) {
-      const q = query.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      filters.push(`(${SEARCHABLE_FIELDS.map((f) => `${f} ~ "${q}"`).join(' || ')})`);
-    }
-    const opts: any = { sort: 'name' };
-    if (filters.length) opts.filter = filters.join(' && ');
-    return pb.collection('employees').getList(page, per, opts);
-  }
-
-  async function loadData(page: number) {
-    const requestId = ++loadToken.current;
+  /* everyone: the HRMS list (read-only) + employees added in this app (lib: loadDirectoryEmployees) */
+  async function loadAll({ fresh = false } = {}) {
     try {
       setLoading(true);
-      const result = await fetchPage(page, perPage, debouncedSearch, selectedDept);
-
-      if (requestId !== loadToken.current) return;
-
-      setEmployees(result.items);
-      setTotalItems(result.totalItems);
-      setTotalPages(Math.max(1, Math.ceil(result.totalItems / perPage)));
+      const { employees: list, hrmsError: err } = await loadDirectoryEmployees({ fresh });
+      setAllEmployees(list);
+      setHrmsError(err);
+      // DEEP LINK — /employees?open=<id> (from the Key persons panel) opens that employee
+      const open = new URLSearchParams(window.location.search).get('open');
+      const hit = open ? list.find((e) => e.id === open) : undefined;
+      if (hit) setSelectedEmployee(hit);
     } catch (error) {
-      if (requestId === loadToken.current) {
-        console.error('Error loading employees:', error);
-        setEmployees([]);
-      }
+      console.error('Error loading employees:', error);
     } finally {
-      if (requestId === loadToken.current) setLoading(false);
+      setLoading(false);
     }
-  }
-
-  async function loadStats() {
-    try {
-      const all = await pb.collection('employees').getFullList();
-      const map = new Map<string, number>();
-      for (const e of all) {
-        const d = String(e.department || '').trim();
-        if (d) map.set(d, (map.get(d) || 0) + 1);
-      }
-      const depts = [...map.entries()]
-        .map(([name, count]) => ({ name, count }))
-        .sort((a, b) => b.count - a.count);
-      setDeptStats(depts);
-      setTotalCount(all.length);
-    } catch { /* non-critical */ }
   }
 
   /* -------------------------------- Helpers -------------------------------- */
+
+  /* departments to choose from: the ones in the directory + the fixed list */
+  const deptOptions = (() => {
+    const seen = new Map<string, string>();
+    for (const d of [...deptStats.map((s) => s.name), ...DEPARTMENTS]) {
+      const k = d.trim().toLowerCase();
+      if (k && !seen.has(k)) seen.set(k, d.trim());
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  })();
 
   const handleCardClick = (dept: string) => {
     setSelectedDept(dept);
@@ -607,7 +649,8 @@ export default function EmployeesPage() {
 
   const handleSave = async () => {
     if (saving) return;
-    if (!form.name.trim()) { setFormError('Name is required.'); return; }
+    const problem = nameError(form.name) || phoneError(form.contact_number || '', { label: 'Contact number' });
+    if (problem) { setFormError(problem); return; }
     if (!form.department) { setFormError('Please select a department.'); return; }
     try {
       setSaving(true);
@@ -619,13 +662,16 @@ export default function EmployeesPage() {
       }
       setIsFormOpen(false);
       setEditingEmployee(null);
-      await Promise.all([loadData(currentPage), loadStats()]);
+      await loadAll();
     } catch (err: any) {
       console.error('Save failed:', err);
       const status = err?.status;
       let message = err?.message || 'Failed to save this employee. Please try again.';
       if (status === 401) message = 'Your session has expired — please sign in again.';
-      else if (status === 403) message = 'Permission denied — check the Create/Update rules on the "employees" collection (PocketBase Admin → Collection → API Rules).';
+      else if (status === 403) {
+        console.warn('[save] permission denied — check the Create/Update rule on the "employees" collection (PocketBase Admin → Collection → API Rules)');
+        message = 'You don’t have permission to do this. Please ask your administrator.';
+      }
       setFormError(message);
     } finally {
       setSaving(false);
@@ -666,7 +712,7 @@ export default function EmployeesPage() {
       if (selectedEmployee?.id === deletedId) setSelectedEmployee(null);
       if (editingEmployee?.id === deletedId) { setEditingEmployee(null); setIsFormOpen(false); }
 
-      await Promise.all([loadData(currentPage), loadStats()]);
+      await loadAll();
     } catch (err: any) {
       console.error('Delete failed:', err);
       const status = err?.status;
@@ -678,7 +724,9 @@ export default function EmployeesPage() {
 
       if (status === 401) message = 'Your session has expired — please sign in again.';
       else if (status === 403) {
-        message = `Permission denied — check the ${failedStep === 'archive' ? 'Create' : 'Delete'} rule on the "${targetCollection}" collection (PocketBase Admin → Collection → API Rules).`;
+        // for the developer: the ${failedStep === 'archive' ? 'Create' : 'Delete'} API rule on this collection rejected it
+        console.warn(`[delete] permission denied — check the ${failedStep === 'archive' ? 'Create' : 'Delete'} rule on the "${targetCollection}" collection (PocketBase Admin → Collection → API Rules)`);
+        message = 'You don’t have permission to do this. Please ask your administrator.';
       } else if (status === 404) message = 'This record was not found — it may have already been deleted.';
 
       setDeleteError(message);
@@ -730,14 +778,14 @@ export default function EmployeesPage() {
 
   if (loading && employees.length === 0) {
     return (
-      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
         <AnimationStyles />
         <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
           <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
           <div className="absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" />
         </div>
 
-        <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+        <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5 sm:px-6">
             <div className="flex items-center gap-3">
               <div className="emp-skeleton h-9 w-9 !rounded-xl" />
@@ -749,7 +797,7 @@ export default function EmployeesPage() {
             <div className="emp-skeleton h-10 w-40 !rounded-full" />
           </div>
 
-          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+          <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:gap-5">
               {[...Array(4)].map((_, i) => (
                 <div key={i} className="emp-skeleton h-[196px] !rounded-3xl" />
@@ -786,7 +834,7 @@ export default function EmployeesPage() {
   /* -------------------------------- Main View ------------------------------- */
 
   return (
-    <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+    <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
       <AnimationStyles />
 
       {/* --------------------- Decorative ambient background --------------------- */}
@@ -796,7 +844,7 @@ export default function EmployeesPage() {
         <div className="emp-blob-c absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" />
       </div>
 
-      <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+      <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
 
         {/* ------------------------------- App bar ------------------------------ */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
@@ -819,6 +867,15 @@ export default function EmployeesPage() {
 
           <div className="flex items-center gap-2">
             <button
+              onClick={() => loadAll({ fresh: true })}
+              disabled={loading}
+              title="Load the latest employee list from the HRMS"
+              className="inline-flex items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:border-violet-200 hover:text-violet-700 active:scale-[0.98] disabled:cursor-wait disabled:opacity-70"
+            >
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">Refresh</span>
+            </button>
+            <button
               onClick={openCreate}
               className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
             >
@@ -829,10 +886,18 @@ export default function EmployeesPage() {
         </div>
 
         {/* ------------------------------- Content ------------------------------ */}
-        <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+        <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
+
+          {hrmsError && (
+            <div className="flex items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span className="flex-1">Couldn’t reach the HRMS — only employees added in this app are shown. ({hrmsError})</span>
+              <button onClick={() => loadAll({ fresh: true })} className="shrink-0 font-semibold underline">Try again</button>
+            </div>
+          )}
 
           {/* ------------------------------ Page Header ----------------------------- */}
-          <header className="emp-fade-up flex flex-wrap items-end justify-between gap-4">
+          <header className="emp-fade-up flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-4">
               <div className={`flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br ${header.gradient} shadow-lg ${header.glow} ring-1 ring-inset ring-white/30`}>
                 <HeaderIcon className="h-6 w-6 text-white" />
@@ -845,6 +910,16 @@ export default function EmployeesPage() {
                 <p className="mt-0.5 text-sm text-slate-500">{header.subtitle}</p>
               </div>
             </div>
+            <button
+              onClick={() => setKeyPeopleOpen(true)}
+              title="Your starred officers and employees — last met, next meeting"
+              className="inline-flex items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700"
+            >
+              <Star className="h-4 w-4" /> Key persons
+              {keyPeopleCount > 0 && (
+                <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-slate-600">{keyPeopleCount}</span>
+              )}
+            </button>
           </header>
 
           {/* ------------------------------ Dept Stats ------------------------------ */}
@@ -897,6 +972,51 @@ export default function EmployeesPage() {
             })}
           </section>
 
+          {/* --------------------------- Department-wise ---------------------------- */}
+          {deptStats.length > 0 && (
+            <section className="emp-fade-up rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-100 lg:p-5" style={{ animationDelay: '380ms' }}>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Building2 className="h-4 w-4 text-violet-500" />
+                  <h2 className="text-sm font-bold text-slate-900">Departments</h2>
+                  <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-bold text-violet-700">{deptStats.length}</span>
+                </div>
+                {selectedDept !== 'all' && (
+                  <button onClick={() => handleCardClick('all')} className="text-xs font-semibold text-violet-600 hover:underline">
+                    Show all employees
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+                {(showAllDepts ? deptStats : deptStats.slice(0, 12)).map((d) => {
+                  const st = getDeptStyle(d.name);
+                  const active = selectedDept === d.name;
+                  return (
+                    <button
+                      key={d.name}
+                      onClick={() => handleCardClick(active ? 'all' : d.name)}
+                      title={`${d.name} — ${d.count} employee${d.count === 1 ? '' : 's'}`}
+                      className={`flex min-w-0 items-center justify-between gap-2 rounded-2xl px-3 py-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 ${
+                        active ? 'bg-slate-900 text-white shadow-md' : 'bg-slate-50 text-slate-700 ring-1 ring-inset ring-slate-100 hover:bg-white hover:shadow-sm'
+                      }`}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${st.dot}`} />
+                        <span className="truncate text-xs font-semibold">{d.name}</span>
+                      </span>
+                      <span className={`shrink-0 text-xs font-bold tabular-nums ${active ? 'text-white/70' : 'text-slate-400'}`}>{d.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {deptStats.length > 12 && (
+                <button onClick={() => setShowAllDepts((v) => !v)} className="mt-3 text-xs font-semibold text-violet-600 hover:underline">
+                  {showAllDepts ? 'Show fewer' : `Show all ${deptStats.length} departments`}
+                </button>
+              )}
+            </section>
+          )}
+
           {/* ------------------------------- Search Bar ----------------------------- */}
           <section className="emp-fade-up rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-100 lg:p-5" style={{ animationDelay: '420ms' }}>
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
@@ -928,9 +1048,11 @@ export default function EmployeesPage() {
                   className="w-full cursor-pointer appearance-none rounded-full border border-slate-200 bg-slate-50/80 py-2.5 pl-11 pr-9 text-sm font-medium text-slate-700 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10 sm:w-48"
                 >
                   <option value="all">All Departments</option>
-                  {DEPARTMENTS.map((d) => (
-                    <option key={d} value={d}>{d}</option>
-                  ))}
+                  {deptStats.length
+                    ? [...deptStats].sort((a, b) => a.name.localeCompare(b.name)).map((d) => (
+                      <option key={d.name} value={d.name}>{d.name} ({d.count})</option>
+                    ))
+                    : DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
                 </select>
                 <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               </div>
@@ -971,7 +1093,9 @@ export default function EmployeesPage() {
               </div>
 
               {/* Column headers */}
-              <div className="hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/70 px-6 py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
+              {/* header stays put; the rows scroll under it */}
+              <div className="nice-scroll max-h-[70vh] overflow-y-auto">
+              <div className="sticky top-0 z-10 hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/95 px-6 backdrop-blur py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
                 <div className="col-span-3">Name</div>
                 <div className="col-span-3">Designation</div>
                 <div className="col-span-2">Department</div>
@@ -1029,8 +1153,9 @@ export default function EmployeesPage() {
                                   </div>
                                 )}
                                 <div className="min-w-0">
-                                  <p className={`truncate text-sm font-semibold text-slate-900 transition-colors ${cfg.nameHover}`}>
-                                    {emp.name || 'N/A'}
+                                  <p className={`flex items-center gap-1.5 text-sm font-semibold text-slate-900 transition-colors ${cfg.nameHover}`}>
+                                    <span className="truncate">{emp.name || 'N/A'}</span>
+                                    {isManager(emp) && <ManagerBadge />}
                                   </p>
                                   <p className={`flex items-center gap-1 text-[11px] opacity-0 transition-opacity duration-200 group-hover:opacity-100 ${cfg.accentText}`}>
                                     View Profile <ArrowRight className="h-3 w-3" />
@@ -1053,15 +1178,25 @@ export default function EmployeesPage() {
                             <div className="col-span-1 truncate text-xs text-slate-600">
                               {emp.contact_number || '—'}
                             </div>
-                            <div className="col-span-1 flex items-center justify-center gap-1">
-                              <button onClick={(e) => { e.stopPropagation(); openEdit(emp); }} title="Edit employee"
-                                className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
-                                <Pencil className="h-4 w-4" />
+                            <div className="col-span-1 flex items-center justify-center gap-0.5">
+                              <KeyPersonToggle refId={`Employee:${emp.id}`} name={emp.name || ''} role={emp.designation || emp.department || ''} />
+                              <button onClick={(e) => { e.stopPropagation(); scheduleMeeting(emp); }} title={`Schedule a meeting with ${emp.name || 'this employee'}`}
+                                className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-violet-50 hover:text-violet-600">
+                                <CalendarPlus className="h-4 w-4" />
                               </button>
-                              <button onClick={(e) => { e.stopPropagation(); handleDelete(emp); }} title="Move to trash"
-                                className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
-                                <Trash2 className="h-4 w-4" />
-                              </button>
+                              {/* HRMS employees are maintained in the HRMS — no edit / delete here */}
+                              {emp.source !== 'hrms' && (
+                                <>
+                                  <button onClick={(e) => { e.stopPropagation(); openEdit(emp); }} title="Edit employee"
+                                    className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
+                                    <Pencil className="h-4 w-4" />
+                                  </button>
+                                  <button onClick={(e) => { e.stopPropagation(); handleDelete(emp); }} title="Move to trash"
+                                    className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </>
+                              )}
                             </div>
                           </div>
 
@@ -1081,7 +1216,9 @@ export default function EmployeesPage() {
                               )}
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-start justify-between gap-2">
-                                  <p className="line-clamp-2 text-sm font-semibold leading-snug text-slate-900">{emp.name || 'N/A'}</p>
+                                  <p className="line-clamp-2 text-sm font-semibold leading-snug text-slate-900">
+                                    {emp.name || 'N/A'}{isManager(emp) && <> <ManagerBadge /></>}
+                                  </p>
                                   <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${cfg.badge}`}>
                                     <span className={`h-1 w-1 rounded-full ${cfg.dot}`} />
                                     {emp.department || '—'}
@@ -1093,6 +1230,12 @@ export default function EmployeesPage() {
                                   {emp.contact_number && <span>{emp.contact_number}</span>}
                                 </div>
                                 <div className="mt-2.5 flex items-center gap-2">
+                                  <KeyPersonToggle refId={`Employee:${emp.id}`} name={emp.name || ''} role={emp.designation || emp.department || ''} />
+                                  <button onClick={(e) => { e.stopPropagation(); scheduleMeeting(emp); }}
+                                    className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-3 py-1.5 text-[11px] font-semibold text-violet-700 transition-colors hover:bg-violet-100 active:scale-95">
+                                    <CalendarPlus className="h-3 w-3" /> Schedule
+                                  </button>
+                                  {emp.source !== 'hrms' && <>
                                   <button onClick={(e) => { e.stopPropagation(); openEdit(emp); }}
                                     className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-3 py-1.5 text-[11px] font-semibold text-sky-700 transition-colors hover:bg-sky-100 active:scale-95">
                                     <Pencil className="h-3 w-3" /> Edit
@@ -1101,6 +1244,7 @@ export default function EmployeesPage() {
                                     className="inline-flex items-center gap-1 rounded-full bg-rose-50/70 px-3 py-1.5 text-[11px] font-semibold text-rose-500 transition-colors hover:bg-rose-100 active:scale-95">
                                     <Trash2 className="h-3 w-3" /> Delete
                                   </button>
+                                  </>}
                                 </div>
                               </div>
                               <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-slate-300" />
@@ -1111,6 +1255,7 @@ export default function EmployeesPage() {
                     })}
                   </div>
                 )}
+              </div>
               </div>
 
               {/* Pagination */}
@@ -1176,6 +1321,19 @@ export default function EmployeesPage() {
         </div>
       </div>
 
+      {/* --------------------- Key persons --------------------- */}
+      {keyPeopleOpen && (
+        <KeyPeoplePanel
+          editable={canEdit(user)}
+          onClose={() => setKeyPeopleOpen(false)}
+          onOpenEmployee={(id) => {
+            const emp = allEmployees.find((e) => e.id === id);
+            setKeyPeopleOpen(false);
+            if (emp) setSelectedEmployee(emp);
+          }}
+        />
+      )}
+
       {/* --------------------- Off-canvas: Employee detail --------------------- */}
       {selectedEmployee && (() => {
         const d = selectedEmployee;
@@ -1203,21 +1361,30 @@ export default function EmployeesPage() {
                     <div className="min-w-0">
                       <h2 className="truncate text-lg font-bold leading-snug text-slate-900">{d.name || 'N/A'}</h2>
                       <p className="truncate text-sm text-slate-500">{d.designation || '—'}</p>
-                      <div className="mt-1.5">
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${cfg.badge}`}>
                           <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
                           {d.department || 'No department'}
                         </span>
+                        {d.source === 'hrms' && (
+                          <span title="This employee comes from the HRMS — changes are made there"
+                            className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                            HRMS
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
-                  <button
-                    onClick={() => setSelectedEmployee(null)}
-                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
-                    aria-label="Close panel"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {d.id && <KeyPersonStar light refId={`Employee:${d.id}`} name={d.name || ''} role={d.designation || d.department || ''} />}
+                    <button
+                      onClick={() => setSelectedEmployee(null)}
+                      className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
+                      aria-label="Close panel"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1228,10 +1395,20 @@ export default function EmployeesPage() {
                   { icon: Building2, tint: 'bg-sky-50 text-sky-600', label: 'Department', value: d.department || '—' },
                   { icon: Mail, tint: 'bg-emerald-50 text-emerald-600', label: 'Email', value: d.email || '—', break: true },
                   { icon: Phone, tint: 'bg-amber-50 text-amber-600', label: 'Contact Number', value: d.contact_number || '—' },
-                  { icon: IdCard, tint: 'bg-indigo-50 text-indigo-600', label: 'Employee ID', value: d.id, mono: true },
-                  { icon: RefreshCw, tint: 'bg-slate-100 text-slate-600', label: 'Created', value: formatDate(d.created) },
-                  { icon: RefreshCw, tint: 'bg-slate-100 text-slate-600', label: 'Last Updated', value: formatDate(d.updated) },
-                ].map((row) => {
+                  ...(d.source === 'hrms'
+                    ? [
+                      { icon: IdCard, tint: 'bg-indigo-50 text-indigo-600', label: 'Employee ID', value: String(d.emp_id), mono: true },
+                      { icon: Building2, tint: 'bg-teal-50 text-teal-600', label: 'Branch', value: d.branch || '—' },
+                      { icon: User, tint: 'bg-fuchsia-50 text-fuchsia-600', label: 'Role', value: d.role || '—' },
+                      { icon: RefreshCw, tint: 'bg-slate-100 text-slate-600', label: 'Date of Joining',
+                        value: d.date_of_joining ? new Date(`${d.date_of_joining}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—' },
+                    ]
+                    : [
+                      { icon: IdCard, tint: 'bg-indigo-50 text-indigo-600', label: 'Employee ID', value: d.id, mono: true },
+                      { icon: RefreshCw, tint: 'bg-slate-100 text-slate-600', label: 'Created', value: formatDate(d.created) },
+                      { icon: RefreshCw, tint: 'bg-slate-100 text-slate-600', label: 'Last Updated', value: formatDate(d.updated) },
+                    ]),
+                ].map((row: { icon: typeof Mail; tint: string; label: string; value: string; mono?: boolean; break?: boolean }) => {
                   const Icon = row.icon;
                   return (
                     <div key={row.label} className="group/tile rounded-2xl border border-slate-200/80 bg-white p-4 transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md hover:shadow-slate-900/[0.04]">
@@ -1248,8 +1425,25 @@ export default function EmployeesPage() {
               </div>
 
               {/* Footer actions */}
+              {d.source === 'hrms' ? (
+                <div className="sticky bottom-0 border-t border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
+                  <button
+                    onClick={() => scheduleMeeting(d)}
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
+                  >
+                    <CalendarPlus className="h-3.5 w-3.5" /> Schedule meeting
+                  </button>
+                  <p className="mt-2 text-center text-[11px] text-slate-400">Details come from the HRMS — changes are made there.</p>
+                </div>
+              ) : (
               <div className="sticky bottom-0 border-t border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => scheduleMeeting(d)}
+                    className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-full bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-violet-600/20 transition-all duration-200 hover:-translate-y-0.5 hover:bg-violet-700 active:scale-[0.98]"
+                  >
+                    <CalendarPlus className="h-3.5 w-3.5" /> Schedule
+                  </button>
                   <button
                     onClick={() => { setSelectedEmployee(null); openEdit(d); }}
                     className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
@@ -1264,10 +1458,22 @@ export default function EmployeesPage() {
                   </button>
                 </div>
               </div>
+              )}
             </aside>
           </div>
         );
       })()}
+
+      {/* ---------------- Schedule a meeting with this employee ---------------- */}
+      {scheduleWith && (
+        <CreateMeetingPanel
+          key={`schedule-${scheduleWith.officer_id}`}
+          isOpen
+          duplicateFrom={scheduleWith}
+          onClose={() => setScheduleWith(null)}
+          onSuccess={() => setScheduleWith(null)}
+        />
+      )}
 
       {/* ------------------- Create / Edit off-canvas form ------------------- */}
       {isFormOpen && (
@@ -1305,7 +1511,7 @@ export default function EmployeesPage() {
                 <input
                   type="text"
                   value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  onChange={(e) => setForm((f) => ({ ...f, name: cleanName(e.target.value) }))}
                   placeholder="e.g. Tejaswi Rao"
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 transition-all focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
                 />
@@ -1337,7 +1543,7 @@ export default function EmployeesPage() {
                     }`}
                   >
                     <option value="" disabled>Select department…</option>
-                    {DEPARTMENTS.map((d) => (
+                    {deptOptions.map((d) => (
                       <option key={d} value={d}>{d}</option>
                     ))}
                   </select>
@@ -1367,12 +1573,10 @@ export default function EmployeesPage() {
 
               <div>
                 <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Contact Number</label>
-                <input
-                  type="tel"
-                  value={form.contact_number}
-                  onChange={(e) => setForm((f) => ({ ...f, contact_number: e.target.value }))}
-                  placeholder="+91 ..."
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 transition-all focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
+                <PhoneInput
+                  value={form.contact_number || ''}
+                  onChange={(v) => setForm((f) => ({ ...f, contact_number: v }))}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2.5 text-sm text-slate-900 transition-all focus-within:bg-white"
                 />
               </div>
 
@@ -1434,7 +1638,7 @@ export default function EmployeesPage() {
               <div className="min-w-0">
                 <h3 className="text-base font-bold text-slate-900">Move to trash?</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  <span className="font-semibold text-slate-700">"{deleteTarget.name || 'Unnamed'}"</span> will be removed from this list and archived, so it can be recovered later if needed.
+                  <span className="font-semibold text-slate-700">&ldquo;{deleteTarget.name || 'Unnamed'}&rdquo;</span> will be removed from this list and archived, so it can be recovered later if needed.
                 </p>
               </div>
             </div>

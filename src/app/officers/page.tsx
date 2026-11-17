@@ -1,15 +1,129 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Search, ChevronLeft, ChevronRight, ChevronDown, User, Shield, Briefcase,
   MapPin, GraduationCap, X, Mail, Phone, Users, Building2,
   Plus, Database, Loader2, ArrowRight, ArrowUpRight, Contact, Pencil, Trash2, AlertCircle,
-  CalendarDays, TrendingUp,
+  CalendarDays, TrendingUp, Star,
 } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
+import { canEdit } from '@/lib/roles';
+import KeyPeoplePanel, { useKeyPeopleCount } from '@/components/meetings/KeyPeoplePanel';
+import OfficerMeetings from '@/components/officers/OfficerMeetings';
+import { OfficerDetailsGrid, OfficerOccasions } from '@/components/officers/OfficerProfile';
+import Link from 'next/link';
 import { ClientResponseError } from 'pocketbase';
 import pb from '@/lib/pocketbase';
+import { logActivity } from '@/lib/activity';
 import CreateOfficerPanel from '@/components/CreateOfficerPanel';
+import Tooltip from '@/components/Tooltip';
+import KeyPersonStar, { KeyPersonToggle } from '@/components/KeyPersonStar';
+import {
+  CADRES, OFFICER_COLLECTION, OFFICER_SERVICES, OFFICER_STATUSES, SERVICE_FULL_NAME, cadreFilter, officerSearchFilter,
+  pbQuote, serviceOf, toDirectoryOfficer, type OfficerService,
+} from '@/lib/officerDirectory';
+
+/** Officer filters (contacts have no cadre / batch / status, so they're left out while one is set). */
+type OfficerFilters = { cadre: string; batch: string; status: string };
+const NO_FILTERS: OfficerFilters = { cadre: '', batch: '', status: '' };
+const BATCH_YEARS = Array.from({ length: new Date().getFullYear() - 1984 }, (_, i) => String(new Date().getFullYear() - i));
+
+/** What the page lists: everything, one service, or the other contacts. */
+type DirType = 'all' | OfficerService | 'Other';
+type RecordType = OfficerService | 'Other';
+
+/* ------------------------------- Tooltips ------------------------------- */
+
+/** What each column means — shown when hovering a column heading. */
+const COLUMN_HELP: Record<string, string> = {
+  Name: 'Full name — hover a name for the officer’s details, click the row for the full profile.',
+  'Officer ID': 'Service identification number of the officer.',
+  Batch: 'Year the officer joined the service.',
+  Cadre: 'State cadre the officer is allotted to.',
+  Status: 'Serving, on deputation, under training, awaiting posting or under suspension.',
+  'Current Position': 'Present posting / designation.',
+  Type: 'IAS — Administrative · IPS — Police · IFS — Forest · IRS — Revenue Service.',
+  Actions: 'Edit the record, or delete it permanently (asks to confirm).',
+  Category: 'Kind of contact (e.g. Government, Private, Media).',
+  Designation: 'The contact’s role or title.',
+  Organization: 'Department, company or organisation.',
+  Contact: 'Phone number.',
+};
+
+const SERVICE_NAME: Record<string, string> = { ...SERVICE_FULL_NAME, Other: 'Other contact' };
+
+function ColumnHead({ label, className = '' }: { label: string; className?: string }) {
+  return (
+    <div className={className}>
+      <Tooltip content={COLUMN_HELP[label]} className="cursor-help border-b border-dotted border-slate-300">
+        {label}
+      </Tooltip>
+    </div>
+  );
+}
+
+/** Empty, or a placeholder such as "-", "—", "N/A" → nothing worth a tooltip. */
+const isBlank = (value: unknown) =>
+  /^(|-+|—+|–+|n\/?a|na|nil|none|null|undefined)$/i.test(String(value ?? '').trim());
+
+/** "Label: value" tooltip for one cell — or null (no tooltip at all) when there is no real value. */
+function cellTip(label: string, value: unknown): ReactNode {
+  if (isBlank(value)) return null;
+  return (
+    <span>
+      <span className="font-semibold text-violet-200">{label}: </span>
+      {String(value).trim()}
+    </span>
+  );
+}
+
+/** Rich card shown when hovering an officer's name. */
+function OfficerCardTip({ officer, label, initials, avatar }: { officer: any; label: string; initials: string; avatar: string }) {
+  const isContact = officer.type === 'Other';
+  const rows: [string, unknown][] = isContact
+    ? [
+        ['Category', officer.category],
+        ['Designation', officer.designation],
+        ['Organization', officer.organization || officer.company_name],
+        ['Phone', officer.contact_number],
+        ['Email', officer.email],
+      ]
+    : [
+        ['Position', officer.current_position],
+        ['Officer ID', officer.officer_id],
+        ['Batch', officer.batch_year],
+        ['Cadre', officer.cadre],
+        ['Status', officer.status],
+        ['Phone', officer.contact_number],
+        ['Email', officer.email],
+      ];
+  const filled = rows.filter(([, v]) => !isBlank(v));
+  return (
+    <div>
+      <div className="flex items-center gap-2.5">
+        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br text-xs font-bold text-white ${avatar}`}>{initials}</span>
+        <div className="min-w-0">
+          <p className="text-sm font-bold leading-tight">{officer.name || 'N/A'}</p>
+          <p className="text-[11px] text-violet-200">{SERVICE_NAME[officer.type] || label}</p>
+        </div>
+      </div>
+      {filled.length > 0 ? (
+        <dl className="mt-2.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-white/10 pt-2.5">
+          {filled.map(([k, v]) => (
+            <div key={k} className="contents">
+              <dt className="text-slate-400">{k}</dt>
+              <dd className="break-words text-slate-100">{String(v)}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="mt-2 text-slate-400">No other details recorded.</p>
+      )}
+      <p className="mt-2.5 text-[10px] text-slate-400">Click to open the full profile</p>
+    </div>
+  );
+}
 
 /* --------------------------- Type Color Configuration --------------------------- */
 
@@ -52,6 +166,32 @@ const TYPE_CONFIG: Record<string, {
     blurB: 'bg-indigo-300/25',
     glow: 'shadow-indigo-600/20',
   },
+  IFS: {
+    label: 'IFS',
+    badge: 'bg-emerald-50/80 text-emerald-700 ring-1 ring-inset ring-emerald-600/15',
+    dot: 'bg-emerald-500',
+    avatar: 'from-emerald-400 to-teal-600',
+    accentText: 'text-emerald-600',
+    nameHover: 'group-hover:text-emerald-700',
+    panelGradient: 'from-slate-900 via-slate-900 to-emerald-950',
+    buttonGradient: 'from-emerald-500 to-teal-600',
+    blurA: 'bg-emerald-300/30',
+    blurB: 'bg-teal-300/25',
+    glow: 'shadow-emerald-600/20',
+  },
+  IRS: {
+    label: 'IRS',
+    badge: 'bg-rose-50/80 text-rose-700 ring-1 ring-inset ring-rose-600/15',
+    dot: 'bg-rose-500',
+    avatar: 'from-rose-400 to-pink-600',
+    accentText: 'text-rose-600',
+    nameHover: 'group-hover:text-rose-700',
+    panelGradient: 'from-slate-900 via-slate-900 to-rose-950',
+    buttonGradient: 'from-rose-500 to-pink-600',
+    blurA: 'bg-rose-300/30',
+    blurB: 'bg-pink-300/25',
+    glow: 'shadow-rose-600/20',
+  },
   Other: {
     label: 'Other',
     badge: 'bg-amber-50/80 text-amber-700 ring-1 ring-inset ring-amber-600/20',
@@ -68,11 +208,7 @@ const TYPE_CONFIG: Record<string, {
 };
 
 /* PocketBase collection for each record type (used for edit/delete) */
-const COLLECTION_FOR: Record<string, string> = {
-  IAS: 'ias_officers',
-  IPS: 'ips_officers',
-  Other: 'other_contacts',
-};
+const COLLECTION_FOR: Record<string, string> = { ...OFFICER_COLLECTION, Other: 'other_contacts' };
 
 /* SOFT DELETE — collection that archives a full snapshot of a record before
    it's removed from its source collection, so it can be recovered later. */
@@ -103,6 +239,16 @@ const STAT_CARDS = [
     accent: 'from-indigo-400 to-violet-500',
   },
   {
+    key: 'IFS' as const, label: 'IFS Officers', caption: 'Forest service', icon: GraduationCap,
+    card: 'from-emerald-100 to-teal-100', iconTint: 'text-emerald-600',
+    accent: 'from-emerald-400 to-teal-500',
+  },
+  {
+    key: 'IRS' as const, label: 'IRS Officers', caption: 'Revenue service', icon: TrendingUp,
+    card: 'from-rose-100 to-pink-100', iconTint: 'text-rose-600',
+    accent: 'from-rose-400 to-pink-500',
+  },
+  {
     key: 'Other' as const, label: 'Other Contacts', caption: 'Additional directory', icon: Building2,
     card: 'from-amber-100 to-orange-100', iconTint: 'text-amber-600',
     accent: 'from-amber-400 to-orange-500',
@@ -114,6 +260,8 @@ const HEADER_CONFIG = {
   all:   { title: 'Officers Directory', subtitle: 'Browse and manage all officers and contacts', icon: Users,     gradient: 'from-violet-500 to-indigo-600', glow: 'shadow-violet-600/20' },
   IAS:   { title: 'IAS Officers',       subtitle: 'Indian Administrative Service records',        icon: Briefcase, gradient: 'from-sky-500 to-blue-600',      glow: 'shadow-blue-600/20' },
   IPS:   { title: 'IPS Officers',       subtitle: 'Indian Police Service records',                icon: Shield,    gradient: 'from-indigo-500 to-violet-600', glow: 'shadow-indigo-600/20' },
+  IFS:   { title: 'IFS Officers',       subtitle: 'Indian Forest Service records',                icon: GraduationCap, gradient: 'from-emerald-500 to-teal-600', glow: 'shadow-emerald-600/20' },
+  IRS:   { title: 'IRS Officers',       subtitle: 'Indian Revenue Service records',               icon: TrendingUp, gradient: 'from-rose-500 to-pink-600',    glow: 'shadow-rose-600/20' },
   Other: { title: 'Other Contacts',     subtitle: 'Additional contacts directory',                icon: Contact,   gradient: 'from-amber-500 to-orange-500',  glow: 'shadow-amber-600/20' },
 } as const;
 
@@ -127,10 +275,6 @@ function getPaginationRange(current: number, total: number): (number | 'dots')[]
   return [1, 'dots', current - 1, current, current + 1, 'dots', total];
 }
 
-/* Fields hidden from the generic details grid in the off-canvas panel */
-const HIDDEN_DETAIL_FIELDS = new Set([
-  'id', 'type', 'collectionId', 'collectionName', 'expand', 'created', 'updated',
-]);
 
 /* ------------------------------ Animation helpers ------------------------------ */
 
@@ -201,13 +345,17 @@ function AnimatedNumber({ value }: { value: number }) {
 
 /* ================================ Main Page ================================ */
 
+
 export default function OfficersPage() {
+  const { user } = useAuth();
+  const [keyPeopleOpen, setKeyPeopleOpen] = useState(false);
+  const keyPeopleCount = useKeyPeopleCount();
   const [officers, setOfficers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedType, setSelectedType] = useState<'all' | 'IAS' | 'IPS' | 'Other'>('all');
+  const [selectedType, setSelectedType] = useState<DirType>('all');
   const [isPanelOpen, setIsPanelOpen] = useState(false);
-  const [panelOfficerType, setPanelOfficerType] = useState<'IAS' | 'IPS' | 'Other' | null>('IAS');
+  const [panelOfficerType, setPanelOfficerType] = useState<RecordType | null>('IAS');
 
   /* EDIT MODE — the officer being edited (a record with `id` + `type`) */
   const [editingOfficer, setEditingOfficer] = useState<any>(null);
@@ -218,9 +366,8 @@ export default function OfficersPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   /* Counts for each type */
-  const [iasCount, setIasCount] = useState(0);
-  const [ipsCount, setIpsCount] = useState(0);
-  const [otherCount, setOtherCount] = useState(0);
+  const [counts, setCounts] = useState<Record<RecordType, number>>({ IAS: 0, IPS: 0, IFS: 0, IRS: 0, Other: 0 });
+  const setCount = (type: RecordType, n: number) => setCounts((c) => ({ ...c, [type]: n }));
 
   /* Pagination state */
   const [currentPage, setCurrentPage] = useState(1);
@@ -240,6 +387,14 @@ export default function OfficersPage() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const loadToken = useRef(0);
 
+  /* FILTERS — cadre / state, batch year, status (officers only) */
+  const [filters, setFilters] = useState<OfficerFilters>(NO_FILTERS);
+  const filtersOn = Boolean(filters.cadre || filters.batch || filters.status);
+  const setFilter = (key: keyof OfficerFilters, value: string) => {
+    setFilters((f) => ({ ...f, [key]: value }));
+    setCurrentPage(1);
+  };
+
   useEffect(() => {
     const t = setTimeout(() => {
       setDebouncedSearch(searchQuery.trim());
@@ -250,7 +405,7 @@ export default function OfficersPage() {
 
   useEffect(() => {
     loadData(currentPage);
-  }, [currentPage, selectedType, perPage, debouncedSearch]);
+  }, [currentPage, selectedType, perPage, debouncedSearch, filters]);
 
   useEffect(() => {
     if (!loading && currentPage > 1 && officers.length === 0) {
@@ -275,22 +430,40 @@ export default function OfficersPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedOfficer, isPanelOpen, deleteTarget, deleteLoading]);
 
+  /** Opens an officer's record by "IAS:<id>" (deep links, the Key persons panel). */
+  function openRef(ref: string) {
+    const [kind, id] = ref.split(':');
+    const service = serviceOf(kind);
+    if (!service || !/^[a-z0-9]{15}$/i.test(id || '')) return;
+    pb.collection(OFFICER_COLLECTION[service]).getOne(id, { requestKey: null })
+      .then((rec) => setSelectedOfficer(toDirectoryOfficer(rec, service)))
+      .catch((err) => console.warn('[officers] could not open', ref, err));
+  }
+
+  /* DEEP LINK — /officers?open=IAS:<id> (from Occasions, notifications…) opens that officer's record */
+  useEffect(() => {
+    openRef(new URLSearchParams(window.location.search).get('open') || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /* ------------------------------ Data Loading ----------------------------- */
 
-  const SEARCHABLE_FIELDS: Record<string, string[]> = {
-    ias_officers:   ['name', 'officer_id', 'current_position', 'cadre', 'state', 'email'],
-    ips_officers:   ['name', 'officer_id', 'current_position', 'cadre', 'state', 'email'],
-    other_contacts: ['name', 'category', 'designation', 'organization', 'company_name', 'contact_number', 'email', 'address'],
-  };
+  const OTHER_SEARCH_FIELDS = ['name', 'category', 'designation', 'organization', 'company_name', 'contact_number', 'email', 'address'];
 
-  async function fetchPage(collection: string, page: number, per: number, query: string) {
-    if (!query) {
-      return pb.collection(collection).getList(page, per, { sort: 'name' });
+  /** One page of one record type, already in the shape the table shows. */
+  async function fetchPage(type: RecordType, page: number, per: number, query: string, f: OfficerFilters) {
+    const collection = COLLECTION_FOR[type];
+    const parts: string[] = [];
+    if (query) parts.push(type === 'Other' ? `(${OTHER_SEARCH_FIELDS.map((k) => `${k} ~ "${pbQuote(query)}"`).join(' || ')})` : officerSearchFilter(query));
+    if (type !== 'Other') {
+      if (f.cadre) parts.push(cadreFilter(f.cadre));
+      if (f.batch) parts.push(`batch = ${Number(f.batch)}`);
+      if (f.status) parts.push(`status = "${pbQuote(f.status)}"`);
     }
-    const q = query.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const fields = SEARCHABLE_FIELDS[collection] ?? ['name'];
-    const filter = `(${fields.map((f) => `${f} ~ "${q}"`).join(' || ')})`;
-    return pb.collection(collection).getList(page, per, { sort: 'name', filter });
+    const filter = parts.join(' && ');
+    const result = await pb.collection(collection).getList(page, per, { sort: 'name', ...(filter ? { filter } : {}) });
+    const items = result.items.map((o: any) => (type === 'Other' ? normalizeOther(o) : toDirectoryOfficer(o, type)));
+    return { items, totalItems: result.totalItems };
   }
 
   async function loadData(page: number) {
@@ -299,49 +472,18 @@ export default function OfficersPage() {
       setLoading(true);
 
       const query = debouncedSearch;
-      let officersData: any[] = [];
+      const f = filters;
+      const narrowed = Boolean(f.cadre || f.batch || f.status);
+      const types: RecordType[] = selectedType === 'all' ? [...OFFICER_SERVICES, ...(narrowed ? [] : ['Other' as const])] : [selectedType];
+      const results = await Promise.all(types.map((t) => fetchPage(t, page, perPage, query, f)));
 
-      if (selectedType === 'IAS') {
-        const result = await fetchPage('ias_officers', page, perPage, query);
-        officersData = result.items.map((o: any) => ({ ...o, type: 'IAS' }));
-        if (!query) setIasCount(result.totalItems);
-        setTotalItems(result.totalItems);
-        setTotalPages(Math.max(1, Math.ceil(result.totalItems / perPage)));
-      } else if (selectedType === 'IPS') {
-        const result = await fetchPage('ips_officers', page, perPage, query);
-        officersData = result.items.map((o: any) => ({ ...o, type: 'IPS' }));
-        if (!query) setIpsCount(result.totalItems);
-        setTotalItems(result.totalItems);
-        setTotalPages(Math.max(1, Math.ceil(result.totalItems / perPage)));
-      } else if (selectedType === 'Other') {
-        const result = await fetchPage('other_contacts', page, perPage, query);
-        officersData = result.items.map(normalizeOther);
-        if (!query) setOtherCount(result.totalItems);
-        setTotalItems(result.totalItems);
-        setTotalPages(Math.max(1, Math.ceil(result.totalItems / perPage)));
-      } else {
-        const [iasResult, ipsResult, otherResult] = await Promise.all([
-          fetchPage('ias_officers', page, perPage, query),
-          fetchPage('ips_officers', page, perPage, query),
-          fetchPage('other_contacts', page, perPage, query),
-        ]);
+      const officersData = results.flatMap((r) => r.items);
+      if (types.length > 1) officersData.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+      if (!query && !narrowed) types.forEach((t, i) => setCount(t, results[i].totalItems));
 
-        officersData = [
-          ...iasResult.items.map((o: any) => ({ ...o, type: 'IAS' })),
-          ...ipsResult.items.map((o: any) => ({ ...o, type: 'IPS' })),
-          ...otherResult.items.map(normalizeOther),
-        ].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-
-        if (!query) {
-          setIasCount(iasResult.totalItems);
-          setIpsCount(ipsResult.totalItems);
-          setOtherCount(otherResult.totalItems);
-        }
-
-        const total = iasResult.totalItems + ipsResult.totalItems + otherResult.totalItems;
-        setTotalItems(total);
-        setTotalPages(Math.max(1, Math.ceil(Math.max(iasResult.totalItems, ipsResult.totalItems, otherResult.totalItems) / perPage)));
-      }
+      const total = results.reduce((sum, r) => sum + r.totalItems, 0);
+      setTotalItems(total);
+      setTotalPages(Math.max(1, Math.ceil(Math.max(...results.map((r) => r.totalItems)) / perPage)));
 
       if (requestId !== loadToken.current) return;
 
@@ -358,14 +500,9 @@ export default function OfficersPage() {
 
   async function refreshCounts() {
     try {
-      const [ias, ips, other] = await Promise.all([
-        pb.collection('ias_officers').getList(1, 1),
-        pb.collection('ips_officers').getList(1, 1),
-        pb.collection('other_contacts').getList(1, 1),
-      ]);
-      setIasCount(ias.totalItems);
-      setIpsCount(ips.totalItems);
-      setOtherCount(other.totalItems);
+      const types: RecordType[] = [...OFFICER_SERVICES, 'Other'];
+      const res = await Promise.all(types.map((t) => pb.collection(COLLECTION_FOR[t]).getList(1, 1, { fields: 'id' })));
+      setCounts(Object.fromEntries(types.map((t, i) => [t, res[i].totalItems])) as Record<RecordType, number>);
     } catch { /* non-critical */ }
   }
 
@@ -381,25 +518,12 @@ export default function OfficersPage() {
     ].some((v) => (v || '').toLowerCase().includes(query));
   });
 
-  const formatLabel = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
-
-  const formatValue = (value: any) => {
-    if (value === null || value === undefined || value === '') return 'N/A';
-    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-    if (Array.isArray(value)) {
-      if (value.length === 0) return 'N/A';
-      return value.join(', ');
-    }
-    if (typeof value === 'object') return JSON.stringify(value, null, 2);
-    return String(value);
-  };
-
   const getInitials = (name: string) =>
     (name || '?').trim().split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 
   const getConfig = (type: string) => TYPE_CONFIG[type] || TYPE_CONFIG.Other;
 
-  const handleCardClick = (type: 'all' | 'IAS' | 'IPS' | 'Other') => {
+  const handleCardClick = (type: DirType) => {
     setSelectedType(type);
     setCurrentPage(1);
     setSearchQuery('');
@@ -412,7 +536,7 @@ export default function OfficersPage() {
     });
   };
 
-  const handleCreateNew = (type: 'IAS' | 'IPS' | 'Other' | null) => {
+  const handleCreateNew = (type: RecordType | null) => {
     setEditingOfficer(null);
     setPanelOfficerType(type);
     setIsPanelOpen(true);
@@ -453,6 +577,8 @@ export default function OfficersPage() {
 
       failedStep = 'delete';
       await pb.collection(collection).delete(deleteTarget.id);
+      logActivity('deleted', deleteTarget.type === 'Other' ? 'contact' : 'officer',
+        `${deleteTarget.type === 'Other' ? 'contact' : `${deleteTarget.type} officer`} ${deleteTarget.name || ''}`.trim(), deleteTarget.id);
 
       const deletedId = deleteTarget.id;
       setDeleteTarget(null);
@@ -470,7 +596,9 @@ export default function OfficersPage() {
 
       if (status === 401) message = 'Your session has expired — please sign in again.';
       else if (status === 403) {
-        message = `Permission denied — check the ${failedStep === 'archive' ? 'Create' : 'Delete'} rule on the "${targetCollection}" collection (PocketBase Admin → Collection → API Rules).`;
+        // for the developer: the ${failedStep === 'archive' ? 'Create' : 'Delete'} API rule on this collection rejected it
+        console.warn(`[delete] permission denied — check the ${failedStep === 'archive' ? 'Create' : 'Delete'} rule on the "${targetCollection}" collection (PocketBase Admin → Collection → API Rules)`);
+        message = 'You don’t have permission to do this. Please ask your administrator.';
       } else if (status === 404) message = 'This record was not found — it may have already been deleted.';
 
       setDeleteError(message);
@@ -494,20 +622,20 @@ export default function OfficersPage() {
 
   const listKey = `${selectedType}-${currentPage}-${debouncedSearch}-${perPage}`;
 
-  const totalCount = iasCount + ipsCount + otherCount;
+  const totalCount = Object.values(counts).reduce((a, b) => a + b, 0);
 
   /* ------------------------------ Skeleton View ----------------------------- */
 
   if (loading && officers.length === 0) {
     return (
-      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+      <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
         <AnimationStyles />
         <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
           <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
           <div className="absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" />
         </div>
 
-        <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+        <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
           {/* App bar skeleton */}
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5 sm:px-6">
             <div className="flex items-center gap-3">
@@ -520,10 +648,10 @@ export default function OfficersPage() {
             <div className="off-skeleton h-10 w-40 !rounded-full" />
           </div>
 
-          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+          <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
             {/* KPI cards skeleton */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 lg:gap-5">
-              {[...Array(4)].map((_, i) => (
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 lg:gap-5">
+              {[...Array(6)].map((_, i) => (
                 <div key={i} className="off-skeleton h-[196px] !rounded-3xl" />
               ))}
             </div>
@@ -560,7 +688,7 @@ export default function OfficersPage() {
   /* -------------------------------- Main View ------------------------------- */
 
   return (
-    <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+    <div className="relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
       <AnimationStyles />
 
       {/* --------------------- Decorative ambient background --------------------- */}
@@ -570,7 +698,7 @@ export default function OfficersPage() {
         <div className="off-blob-c absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" />
       </div>
 
-      <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+      <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
 
         {/* ------------------------------- App bar ------------------------------ */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
@@ -581,7 +709,7 @@ export default function OfficersPage() {
             </span>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <p className="truncate text-sm font-bold text-slate-900">Officers Directory</p>
+                <h1 className="truncate text-sm font-bold text-slate-900">Officers Directory</h1>
                 <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-bold tabular-nums text-violet-600 ring-1 ring-inset ring-violet-500/15">
                   {totalCount}
                 </span>
@@ -594,6 +722,17 @@ export default function OfficersPage() {
 
           <div className="flex items-center gap-2">
             <button
+              onClick={() => setKeyPeopleOpen(true)}
+              title="Your starred officers — last met, next meeting"
+              className="inline-flex items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700"
+            >
+              <Star className="h-4 w-4" />
+              <span className="hidden sm:inline">Key persons</span>
+              {keyPeopleCount > 0 && (
+                <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-slate-600">{keyPeopleCount}</span>
+              )}
+            </button>
+            <button
               onClick={() => handleCreateNew(selectedType === 'all' ? null : selectedType === 'Other' ? 'Other' : selectedType)}
               className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
             >
@@ -604,33 +743,14 @@ export default function OfficersPage() {
         </div>
 
         {/* ------------------------------- Content ------------------------------ */}
-        <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
-
-          {/* ------------------------------ Page Header ----------------------------- */}
-          <header className="off-fade-up flex flex-wrap items-end justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <div className={`flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br ${header.gradient} shadow-lg ${header.glow} ring-1 ring-inset ring-white/30`}>
-                <HeaderIcon className="h-6 w-6 text-white" />
-              </div>
-              <div>
-                <p className="mb-0.5 text-[11px] font-bold uppercase tracking-[0.14em] text-slate-400">
-                  Directory · Management
-                </p>
-                <h1 className="text-2xl font-extrabold tracking-tight text-slate-900 lg:text-[28px]">{header.title}</h1>
-                <p className="mt-0.5 text-sm text-slate-500">{header.subtitle}</p>
-              </div>
-            </div>
-          </header>
+        <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
 
           {/* ------------------------------ Type Stats ------------------------------ */}
-          <section className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:gap-5">
+          <section className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6 lg:gap-5">
             {STAT_CARDS.map((stat, i) => {
               const Icon = stat.icon;
               const active = selectedType === stat.key;
-              const count =
-                stat.key === 'all' ? totalCount :
-                stat.key === 'IAS' ? iasCount :
-                stat.key === 'IPS' ? ipsCount : otherCount;
+              const count = stat.key === 'all' ? totalCount : counts[stat.key];
               const pct = totalCount > 0 ? Math.round((count / totalCount) * 100) : 0;
 
               return (
@@ -684,7 +804,7 @@ export default function OfficersPage() {
                 <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <input
                   type="text"
-                  placeholder={`Search ${selectedType === 'all' ? 'all officers' : selectedType === 'Other' ? 'contacts' : `${selectedType} officers`} by name, ID, position, cadre, state or email...`}
+                  placeholder={`Search ${selectedType === 'all' ? 'all officers' : selectedType === 'Other' ? 'contacts' : `${selectedType} officers`} by name, ID, designation, department, cadre or email...`}
                   value={searchQuery}
                   onChange={(e) => { setSearchQuery(e.target.value); setCurrentPage(1); }}
                   className="w-full rounded-full border border-slate-200 bg-slate-50/80 py-2.5 pl-11 pr-10 text-sm text-slate-900 placeholder-slate-400 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10"
@@ -699,8 +819,42 @@ export default function OfficersPage() {
                 )}
               </div>
 
-
+              {/* officer filters — combine freely with the search box and the service cards */}
+              {selectedType !== 'Other' && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {([
+                    ['cadre', 'Cadre / State', 'All cadres & states', CADRES as readonly string[], MapPin],
+                    ['batch', 'Batch', 'All batches', BATCH_YEARS, CalendarDays],
+                    ['status', 'Status', 'All statuses', OFFICER_STATUSES, Shield],
+                  ] as const).map(([key, label, all, options, Icon]) => (
+                    <label key={key} className="relative">
+                      <span className="sr-only">{label}</span>
+                      <Icon className={`pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 ${filters[key] ? 'text-violet-600' : 'text-slate-400'}`} />
+                      <select
+                        value={filters[key]}
+                        onChange={(e) => setFilter(key, e.target.value)}
+                        aria-label={label}
+                        className={`cursor-pointer appearance-none rounded-full border py-2.5 pl-9 pr-9 text-sm font-medium outline-none transition-colors focus:ring-4 focus:ring-violet-500/10 ${
+                          filters[key]
+                            ? 'border-violet-300 bg-violet-50 text-violet-700'
+                            : 'border-slate-200 bg-slate-50/80 text-slate-600 hover:border-slate-300 hover:bg-white'
+                        }`}
+                      >
+                        <option value="">{all}</option>
+                        {options.map((o) => <option key={o} value={o}>{key === 'batch' ? `${o} batch` : o}</option>)}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
+            {filtersOn && selectedType === 'all' && (
+              <p className="mt-2.5 px-1 text-[11px] text-slate-400">Showing officers only — other contacts have no cadre, batch or status.{filters.cadre ? ' IRS officers have no cadre.' : ''}</p>
+            )}
+            {filters.cadre && selectedType === 'IRS' && (
+              <p className="mt-2.5 px-1 text-[11px] text-slate-400">IRS officers are not allotted to a cadre, so a cadre / state filter finds none.</p>
+            )}
           </section>
 
           {/* --------------------------------- Table -------------------------------- */}
@@ -710,23 +864,27 @@ export default function OfficersPage() {
               {/* Table header */}
               <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 lg:px-6">
                 <div className="flex min-w-0 items-center gap-2.5">
-                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
+                  {/* which list this is — follows the type cards above (All / IAS / IPS / Other contacts) */}
+                  <span className={`flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br text-white shadow-sm ${header.gradient}`}>
                     <HeaderIcon className="h-4 w-4" />
                   </span>
-                  <h3 className="truncate text-sm font-bold text-slate-900">{header.title}</h3>
+                  <h2 className="truncate text-sm font-bold text-slate-900">
+                    {selectedType === 'all' ? 'All records' : header.title}
+                    {(searchQuery || filtersOn) && <span className="font-medium text-slate-400"> · search results</span>}
+                  </h2>
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold tabular-nums text-slate-500">
                     {totalItems}
                   </span>
-                  {searchQuery && (
+                  {(searchQuery || filtersOn) && (
                     <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-bold text-violet-600 ring-1 ring-inset ring-violet-500/15">
                       filtered
                     </span>
                   )}
                   {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500" />}
                 </div>
-                {(searchQuery || selectedType !== 'all') && (
+                {(searchQuery || selectedType !== 'all' || filtersOn) && (
                   <button
-                    onClick={() => handleCardClick('all')}
+                    onClick={() => { setFilters(NO_FILTERS); handleCardClick('all'); }}
                     className="rounded-full bg-rose-50 px-3.5 py-1.5 text-xs font-semibold text-rose-600 transition-colors hover:bg-rose-100"
                   >
                     Clear filters
@@ -734,26 +892,28 @@ export default function OfficersPage() {
                 )}
               </div>
 
+              {/* header stays put; the rows scroll under it */}
+              <div className="nice-scroll max-h-[70vh] overflow-y-auto">
               {/* Column headers */}
               {selectedType === 'Other' ? (
-                <div className="hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/70 px-6 py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
-                  <div className="col-span-3">Name</div>
-                  <div className="col-span-2">Category</div>
-                  <div className="col-span-3">Designation</div>
-                  <div className="col-span-2">Organization</div>
-                  <div className="col-span-1">Contact</div>
-                  <div className="col-span-1 text-center">Actions</div>
+                <div className="sticky top-0 z-10 hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/95 px-6 backdrop-blur py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
+                  <ColumnHead label="Name" className="col-span-3" />
+                  <ColumnHead label="Category" className="col-span-2" />
+                  <ColumnHead label="Designation" className="col-span-3" />
+                  <ColumnHead label="Organization" className="col-span-2" />
+                  <ColumnHead label="Contact" className="col-span-1" />
+                  <ColumnHead label="Actions" className="col-span-1 text-center" />
                 </div>
               ) : (
-                <div className="hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/70 px-6 py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
-                  <div className={nameSpan}>Name</div>
-                  <div className="col-span-2">Officer ID</div>
-                  <div className="col-span-1 text-center">Batch</div>
-                  <div className="col-span-1">Cadre</div>
-                  <div className="col-span-1">State</div>
-                  <div className={positionSpan}>Current Position</div>
-                  {selectedType === 'all' && <div className="col-span-1 text-center">Type</div>}
-                  <div className="col-span-1 text-center">Actions</div>
+                <div className="sticky top-0 z-10 hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/95 px-6 backdrop-blur py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
+                  <ColumnHead label="Name" className={nameSpan} />
+                  <ColumnHead label="Officer ID" className="col-span-2" />
+                  <ColumnHead label="Batch" className="col-span-1 text-center" />
+                  <ColumnHead label="Cadre" className="col-span-1" />
+                  <ColumnHead label="Status" className="col-span-1" />
+                  <ColumnHead label="Current Position" className={positionSpan} />
+                  {selectedType === 'all' && <ColumnHead label="Type" className="col-span-1 text-center" />}
+                  <ColumnHead label="Actions" className="col-span-1 text-center" />
                 </div>
               )}
 
@@ -800,30 +960,48 @@ export default function OfficersPage() {
                                     {getInitials(officer.name)}
                                   </div>
                                   <div className="min-w-0">
-                                    <p className={`truncate text-sm font-semibold text-slate-900 transition-colors ${config.nameHover}`}>
-                                      {officer.name || 'N/A'}
-                                    </p>
+                                    <Tooltip
+                                      wide
+                                      content={<OfficerCardTip officer={officer} label={config.label} initials={getInitials(officer.name)} avatar={config.avatar} />}
+                                      className="block min-w-0"
+                                    >
+                                      <p className={`truncate text-sm font-semibold text-slate-900 transition-colors ${config.nameHover}`}>
+                                        {officer.name || 'N/A'}
+                                      </p>
+                                    </Tooltip>
                                     <p className={`flex items-center gap-1 text-[11px] opacity-0 transition-opacity duration-200 group-hover:opacity-100 ${config.accentText}`}>
                                       View Profile <ArrowRight className="h-3 w-3" />
                                     </p>
                                   </div>
                                 </div>
                               </div>
-                              <div className="col-span-2 truncate text-xs text-slate-600" title={officer.category}>{officer.category || '—'}</div>
-                              <div className="col-span-3 truncate text-sm font-medium text-slate-800" title={officer.designation}>{officer.designation || '—'}</div>
-                              <div className="col-span-2 truncate text-sm text-slate-600" title={officer.organization || officer.company_name}>
-                                {officer.organization || officer.company_name || '—'}
+                              <div className="col-span-2 min-w-0 text-xs text-slate-600">
+                                <Tooltip content={cellTip('Category', officer.category)} className="block truncate">{officer.category || '—'}</Tooltip>
                               </div>
-                              <div className="col-span-1 truncate text-xs text-slate-600">{officer.contact_number || '—'}</div>
+                              <div className="col-span-3 min-w-0 text-sm font-medium text-slate-800">
+                                <Tooltip content={cellTip('Designation', officer.designation)} className="block truncate">{officer.designation || '—'}</Tooltip>
+                              </div>
+                              <div className="col-span-2 min-w-0 text-sm text-slate-600">
+                                <Tooltip content={cellTip('Organization', officer.organization || officer.company_name)} className="block truncate">
+                                  {officer.organization || officer.company_name || '—'}
+                                </Tooltip>
+                              </div>
+                              <div className="col-span-1 min-w-0 text-xs text-slate-600">
+                                <Tooltip content={cellTip('Phone', officer.contact_number)} className="block truncate">{officer.contact_number || '—'}</Tooltip>
+                              </div>
                               <div className="col-span-1 flex items-center justify-center gap-1">
-                                <button onClick={(e) => { e.stopPropagation(); handleEdit(officer); }} title="Edit contact"
-                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
-                                  <Pencil className="h-4 w-4" />
-                                </button>
-                                <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} title="Move to trash"
-                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
+                                <Tooltip content={`Edit ${officer.name || 'contact'}`}>
+                                  <button onClick={(e) => { e.stopPropagation(); handleEdit(officer); }} aria-label="Edit contact"
+                                    className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
+                                    <Pencil className="h-4 w-4" />
+                                  </button>
+                                </Tooltip>
+                                <Tooltip content="Delete permanently (you’ll be asked to confirm)">
+                                  <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} aria-label="Delete record"
+                                    className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </Tooltip>
                               </div>
                             </div>
                           ) : (
@@ -836,49 +1014,72 @@ export default function OfficersPage() {
                                     {getInitials(officer.name)}
                                   </div>
                                   <div className="min-w-0">
-                                    <p className={`truncate text-sm font-semibold text-slate-900 transition-colors ${config.nameHover}`}>
-                                      {officer.name || 'N/A'}
-                                    </p>
+                                    <Tooltip
+                                      wide
+                                      content={<OfficerCardTip officer={officer} label={config.label} initials={getInitials(officer.name)} avatar={config.avatar} />}
+                                      className="block min-w-0"
+                                    >
+                                      <p className={`truncate text-sm font-semibold text-slate-900 transition-colors ${config.nameHover}`}>
+                                        {officer.name || 'N/A'}
+                                      </p>
+                                    </Tooltip>
                                     <p className={`flex items-center gap-1 text-[11px] opacity-0 transition-opacity duration-200 group-hover:opacity-100 ${config.accentText}`}>
                                       View Profile <ArrowRight className="h-3 w-3" />
                                     </p>
                                   </div>
                                 </div>
                               </div>
-                              <div className="col-span-2 truncate font-mono text-xs text-slate-500">
-                                {officer.officer_id || '—'}
+                              <div className="col-span-2 min-w-0 font-mono text-xs text-slate-500">
+                                <Tooltip content={cellTip('Officer ID', officer.officer_id)} className="block truncate">
+                                  {officer.officer_id || '—'}
+                                </Tooltip>
                               </div>
                               <div className="col-span-1 text-center text-sm tabular-nums text-slate-600">
-                                {officer.batch_year || '—'}
+                                <Tooltip content={cellTip('Batch (year joined)', officer.batch_year)}>
+                                  {officer.batch_year || '—'}
+                                </Tooltip>
                               </div>
-                              <div className="col-span-1 truncate text-sm text-slate-600" title={officer.cadre}>
-                                {officer.cadre || '—'}
+                              <div className="col-span-1 min-w-0 text-sm text-slate-600">
+                                <Tooltip content={cellTip('Cadre', officer.cadre)} className="block truncate">
+                                  {officer.cadre || '—'}
+                                </Tooltip>
                               </div>
-                              <div className="col-span-1 truncate text-sm text-slate-600" title={officer.state}>
-                                {officer.state || '—'}
+                              <div className="col-span-1 min-w-0 text-sm text-slate-600">
+                                <Tooltip content={cellTip('Status', officer.status)} className="block truncate">
+                                  {officer.status || '—'}
+                                </Tooltip>
                               </div>
                               <div className={`${positionSpan} min-w-0`}>
-                                <p className="truncate text-sm font-medium text-slate-800" title={officer.current_position}>
-                                  {officer.current_position || '—'}
-                                </p>
+                                <Tooltip content={cellTip('Current position', officer.current_position)} className="block min-w-0">
+                                  <p className="truncate text-sm font-medium text-slate-800">
+                                    {officer.current_position || '—'}
+                                  </p>
+                                </Tooltip>
                               </div>
                               {selectedType === 'all' && (
                                 <div className="col-span-1 flex justify-center">
-                                  <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${config.badge}`}>
-                                    <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} />
-                                    {config.label}
-                                  </span>
+                                  <Tooltip content={SERVICE_NAME[officer.type] || config.label}>
+                                    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${config.badge}`}>
+                                      <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} />
+                                      {config.label}
+                                    </span>
+                                  </Tooltip>
                                 </div>
                               )}
-                              <div className="col-span-1 flex items-center justify-center gap-1">
-                                <button onClick={(e) => { e.stopPropagation(); handleEdit(officer); }} title="Edit officer"
-                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
-                                  <Pencil className="h-4 w-4" />
-                                </button>
-                                <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} title="Move to trash"
-                                  className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
+                              <div className="col-span-1 flex items-center justify-center gap-0.5">
+                                <KeyPersonToggle refId={`${officer.type}:${officer.id}`} name={officer.name || ''} role={officer.current_position || officer.designation || ''} />
+                                <Tooltip content={`Edit ${officer.name || 'officer'}`}>
+                                  <button onClick={(e) => { e.stopPropagation(); handleEdit(officer); }} aria-label="Edit officer"
+                                    className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-sky-50 hover:text-sky-600">
+                                    <Pencil className="h-4 w-4" />
+                                  </button>
+                                </Tooltip>
+                                <Tooltip content="Delete permanently (you’ll be asked to confirm)">
+                                  <button onClick={(e) => { e.stopPropagation(); handleDelete(officer); }} aria-label="Delete record"
+                                    className="rounded-lg p-1.5 text-slate-400 transition-all duration-200 hover:scale-110 hover:bg-rose-50/60 hover:text-rose-500">
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </Tooltip>
                               </div>
                             </div>
                           )}
@@ -940,9 +1141,10 @@ export default function OfficersPage() {
                                     {officer.officer_id && <span className="font-mono">{officer.officer_id}</span>}
                                     {officer.batch_year && <span>{officer.batch_year}</span>}
                                     {officer.cadre && <span>{officer.cadre}</span>}
-                                    {officer.state && <span>{officer.state}</span>}
+                                    {officer.status && <span>{officer.status}</span>}
                                   </div>
                                   <div className="mt-2.5 flex items-center gap-2">
+                                    <KeyPersonToggle refId={`${officer.type}:${officer.id}`} name={officer.name || ''} role={officer.current_position || officer.designation || ''} />
                                     <button onClick={(e) => { e.stopPropagation(); handleEdit(officer); }}
                                       className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-3 py-1.5 text-[11px] font-semibold text-sky-700 transition-colors hover:bg-sky-100 active:scale-95">
                                       <Pencil className="h-3 w-3" /> Edit
@@ -962,6 +1164,7 @@ export default function OfficersPage() {
                     })}
                   </div>
                 )}
+              </div>
               </div>
 
               {/* ------------------------------ Pagination ------------------------------ */}
@@ -1040,11 +1243,6 @@ export default function OfficersPage() {
       {/* ------------------------- Details off-canvas ------------------------- */}
       {selectedOfficer && (() => {
         const config = getConfig(selectedOfficer.type);
-        const detailFields = Object.keys(selectedOfficer).filter((key) => {
-          if (HIDDEN_DETAIL_FIELDS.has(key)) return false;
-          if (typeof selectedOfficer[key] === 'object' && selectedOfficer[key] !== null && !Array.isArray(selectedOfficer[key])) return false;
-          return formatValue(selectedOfficer[key]) !== 'N/A';
-        });
 
         return (
           <>
@@ -1061,6 +1259,14 @@ export default function OfficersPage() {
                       <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} />
                       {config.label}
                     </span>
+                    <div className="flex items-center gap-2">
+                    {selectedOfficer.type !== 'Other' && selectedOfficer.id && (
+                      <KeyPersonStar
+                        refId={`${selectedOfficer.type}:${selectedOfficer.id}`}
+                        name={selectedOfficer.name || ''}
+                        role={selectedOfficer.current_position || selectedOfficer.designation || ''}
+                      />
+                    )}
                     <button
                       type="button"
                       onClick={() => setSelectedOfficer(null)}
@@ -1068,6 +1274,7 @@ export default function OfficersPage() {
                     >
                       <X className="h-5 w-5" />
                     </button>
+                    </div>
                   </div>
 
                   <div className="mt-4 flex items-center gap-3.5">
@@ -1088,23 +1295,9 @@ export default function OfficersPage() {
 
               {/* Scrollable body */}
               <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-slate-50 p-5">
-                <div className="grid grid-cols-2 gap-3">
-                  {detailFields.map((key) => (
-                    <div
-                      key={key}
-                      className={`rounded-2xl border border-slate-200/80 bg-white p-4 ${
-                        formatValue(selectedOfficer[key]).length > 24 ? 'col-span-2' : ''
-                      }`}
-                    >
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                        {formatLabel(key)}
-                      </p>
-                      <p className="mt-1.5 break-words text-sm font-semibold text-slate-900">
-                        {formatValue(selectedOfficer[key])}
-                      </p>
-                    </div>
-                  ))}
-                </div>
+                {selectedOfficer.type !== 'Other' && <OfficerOccasions officer={selectedOfficer} />}
+                {selectedOfficer.type !== 'Other' && <OfficerMeetings key={selectedOfficer.id} officer={selectedOfficer} />}
+                <OfficerDetailsGrid officer={selectedOfficer} />
 
                 {(selectedOfficer.created || selectedOfficer.updated) && (
                   <div className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-white px-4 py-3 text-[11px] text-slate-400">
@@ -1151,6 +1344,16 @@ export default function OfficersPage() {
           </>
         );
       })()}
+
+      {/* ------------------------- Key persons ------------------------- */}
+      {keyPeopleOpen && (
+        <KeyPeoplePanel
+          editable={canEdit(user)}
+          onClose={() => setKeyPeopleOpen(false)}
+          onOpenOfficer={(ref) => { setKeyPeopleOpen(false); openRef(ref); }}
+        />
+      )}
+
 
       {/* ------------------------- Delete confirmation ------------------------- */}
       {deleteTarget && (

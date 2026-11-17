@@ -8,9 +8,10 @@ import {
   useEffect, useRef, useState, type ReactNode,
 } from 'react';
 import {
-  Calendar, CalendarClock, CheckCircle2, RotateCcw, XCircle, Clock, Search, Plus, Trash2, X, ChevronRight, ChevronLeft, FileText, Loader2, CalendarDays, Building2, Globe, StickyNote, Upload, Check, Timer, Paperclip,
+  Calendar, CalendarClock, CheckCircle2, RotateCcw, XCircle, Clock, Search, Plus, Trash2, X, ChevronRight, ChevronLeft, FileText, Loader2, CalendarDays, Building2, Globe, StickyNote, Upload, Check, Timer, Paperclip, Sparkles,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
+import { logActivity, meetingLabel } from '@/lib/activity';
 import MeetingPhotos from '@/components/memories/MeetingPhotos';
 import {
   WeekStrip, TimeSlotPicker, clampInt,
@@ -26,9 +27,8 @@ import ConflictCard from '@/components/ConflictCard';
 
 
 
-import {
-  apiJSON, removeGoogleEvent,
-} from '@/lib/apiClient';
+import { syncStatusChange } from '@/lib/meetingStatusSync';
+import { videoLabel } from '@/lib/videoCall';
 import {
   completedTooEarly,
 } from '@/lib/meetingRules';
@@ -60,7 +60,7 @@ export const CUSTOM_CSS = `
 .nice-scroll::-webkit-scrollbar-track { background: transparent; }
 .nice-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 999px; }
 .nice-scroll::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
-.progress-shimmer { background: linear-gradient(90deg,#a78bfa 25%,#7c3aed 40%,#a78bfa 55%); background-size: 200% 100%; animation: mShimmer 1.2s linear infinite; }
+.progress-shimmer { background: linear-gradient(90deg,var(--color-violet-400) 25%,var(--color-violet-600) 40%,var(--color-violet-400) 55%); background-size: 200% 100%; animation: mShimmer 1.2s linear infinite; }
 `;
 
 export function CustomStyles() {
@@ -97,7 +97,7 @@ export function whatsappLink(phone: string, m: any): string | null {
   const text = [
     `Namaste${m?.officer_name ? ` ${m.officer_name}` : ''},`,
     `A gentle reminder of our meeting${m?.agenda ? ` on “${m.agenda}”` : ''}${when ? ` on ${when}` : ''}${time ? ` at ${time} hrs` : ''}${m?.location ? `, ${m.location}` : ''}.`,
-    m?.meet_link ? `Join: ${m.meet_link}` : '',
+    m?.meet_link ? `Join on ${videoLabel(m.meet_link)}: ${m.meet_link}` : '',
     'Kindly confirm your availability.',
   ].filter(Boolean).join('\n');
   return `https://wa.me/${digits}?text=${encodeURIComponent(text)}`;
@@ -540,11 +540,13 @@ async function save() {
   setSaving(true);
   try {
     const rec: any = await pb.collection('meetings').update(meeting.id, { minutes: value });
+    if (rec && 'minutes' in rec) logActivity('minutes added', 'meeting', meetingLabel(meeting), meeting.id);
 
     /* field missing → PocketBase dropped it silently */
     if (!rec || !('minutes' in rec)) {
       console.error('[minutes] no "minutes" field on meetings. Fields on this record:', Object.keys(rec || {}));
-      showToast('Minutes were not saved — add a "Plain text" field named minutes to the meetings collection in PocketBase.', 'error');
+      console.warn('[minutes] add a "Plain text" field named minutes to the meetings collection in PocketBase');
+      showToast('The minutes couldn’t be saved. Please ask your administrator.', 'error');
       return;
     }
 
@@ -558,7 +560,7 @@ async function save() {
     showToast('Minutes saved', 'success');
   } catch (e: any) {
     console.error('[minutes] save failed:', e?.response || e);
-    showToast(e?.response?.message || e?.message || 'Failed to save minutes. Please try again.', 'error');
+    showToast('Couldn’t save the minutes — please try again.', 'error');
   } finally {
     setSaving(false);
   }
@@ -583,7 +585,8 @@ async function save() {
       onPatched({ documents: rec?.documents ?? docs });
       showToast(ok.length === 1 ? 'File attached' : `${ok.length} files attached`, 'success');
     } catch (e: any) {
-      showToast(e?.message || 'Upload failed. Please try again.', 'error');
+      console.error('[documents] upload failed:', e);
+      showToast('Couldn’t attach the file — please try again.', 'error');
     } finally {
       setUploading(false);
     }
@@ -603,6 +606,17 @@ async function save() {
           <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 ring-1 ring-inset ring-emerald-500/20">
             <Check className="h-3 w-3" /> Saved
           </span>
+        )}
+        {meeting?.id && (
+          <a
+            href={`/minutes/${meeting.id}`}
+            target="_blank"
+            rel="noopener"
+            data-tooltip={dirty ? 'Save your changes first — the PDF uses the saved minutes' : 'Open the formal minutes to print or save as PDF'}
+            className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-violet-700 transition hover:bg-violet-50"
+          >
+            <FileText className="h-3 w-3" /> PDF
+          </a>
         )}
       </div>
 
@@ -712,13 +726,18 @@ export function QuickStatusPopover({ pos, current, onPick, onClose }: {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     }
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onClose(); }
+    // Close when the page scrolls, but not when the popover itself is scrolled.
+    function onScroll(e: Event) {
+      if (ref.current && ref.current.contains(e.target as Node)) return;
+      onClose();
+    }
     document.addEventListener('mousedown', onDocClick);
     window.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', onClose, true);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('mousedown', onDocClick);
       window.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', onClose, true);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [onClose]);
 
@@ -766,13 +785,18 @@ export function NotesPopover({ pos, text, onOpenFull, onClose }: {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     }
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onClose(); }
+    // Close when the page scrolls, but not when the popover itself is scrolled.
+    function onScroll(e: Event) {
+      if (ref.current && ref.current.contains(e.target as Node)) return;
+      onClose();
+    }
     document.addEventListener('mousedown', onDocClick);
     window.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', onClose, true);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('mousedown', onDocClick);
       window.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', onClose, true);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [onClose]);
 
@@ -805,11 +829,13 @@ export function NotesPopover({ pos, text, onOpenFull, onClose }: {
    CommandPalette — Cmd/Ctrl+K.
 ================================================================================= */
 
-export function CommandPalette({ meetings, onClose, onSelectMeeting, onNewMeeting, getStatusStyle, getStatusKey, getMeetingTitle, formatDateShort }: {
+export function CommandPalette({ meetings, onClose, onSelectMeeting, onNewMeeting, onAskAI, getStatusStyle, getStatusKey, getMeetingTitle, formatDateShort }: {
   meetings: any[];
   onClose: () => void;
   onSelectMeeting: (m: any) => void;
   onNewMeeting: () => void;
+  /* "Ask AI" — hands the typed text to the assistant (omitted when AI isn't available) */
+  onAskAI?: (question: string) => void;
   getStatusStyle: (key: string) => { label: string; dot: string; badge: string };
   getStatusKey: (m: any) => string;
   getMeetingTitle: (m: any) => string;
@@ -856,6 +882,20 @@ export function CommandPalette({ meetings, onClose, onSelectMeeting, onNewMeetin
             <span className="text-sm font-semibold text-slate-800">New meeting</span>
             <kbd className="ml-auto rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">N</kbd>
           </button>
+
+          {onAskAI && (
+            <button
+              onClick={() => onAskAI(query.trim())}
+              className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors hover:bg-violet-50"
+            >
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 text-white">
+                <Sparkles className="h-4 w-4" />
+              </span>
+              <span className="min-w-0 truncate text-sm font-semibold text-slate-800">
+                {q ? <>Ask AI: <span className="font-normal text-slate-600">“{query.trim()}”</span></> : 'Ask AI'}
+              </span>
+            </button>
+          )}
 
           {results.length > 0 && (
             <p className="mb-1 mt-2 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
@@ -1028,11 +1068,9 @@ export function InlineUpdateStatusPanel({ meeting, onClose, onSaved }: { meeting
   const removeExistingDoc = (name: string) =>
     setExistingDocs((prev) => prev.filter((n) => n !== name));
 
-  const docsDirty =
-    pendingDocs.length > 0 ||
-    existingDocs.join('||') !== initialDocsRef.current.join('||');
-
   async function syncDocuments(recordId: string) {
+    // read the ref here (on save), not during render
+    const docsDirty = pendingDocs.length > 0 || existingDocs.join('||') !== initialDocsRef.current.join('||');
     if (!docsDirty) return;
     const fd = new FormData();
     if (!existingDocs.length && !pendingDocs.length) {
@@ -1098,16 +1136,12 @@ export function InlineUpdateStatusPanel({ meeting, onClose, onSaved }: { meeting
 
       appendStatusHistory(meeting.id, meeting.status_history, statusLabel).catch(() => {});
 
-      /* keep Google Calendar in step: cancelled → remove the event, rescheduled → move it.
-         (Emailed .ics invites update themselves only when the organiser re-sends them.) */
-      if (status === 'cancelled') removeGoogleEvent(meeting);
-      else if (status === 'rescheduled' && meeting.gcal_event_id) {
-        apiJSON('/api/google', {
-          meetingId: meeting.id, agenda: meeting.agenda, date: newDate, time: newTime,
-          duration: Number(newDuration) || 30, location: meeting.location, officerName: meeting.officer_name,
-          gcalEventId: meeting.gcal_event_id, existingMeetLink: meeting.meet_link || '',
-          syncCalendar: true, includeMeet: false, sendInvite: false,
-        }, { timeoutMs: 30_000 }).catch((e) => console.warn('[reschedule] calendar update failed:', e));
+      /* keep everything in step (lib/meetingStatusSync): rescheduled → move the Zoom meeting and the
+         Google Calendar event, then email the new time; cancelled → remove them and email; completed → thank-you */
+      if (status === 'rescheduled') {
+        void syncStatusChange(meeting, { status: 'rescheduled', date: newDate, time: newTime, duration: Number(newDuration) || 30 }, showToast);
+      } else if (status === 'cancelled' || status === 'completed') {
+        void syncStatusChange(meeting, { status }, showToast);
       }
 
       await syncDocuments(meeting.id);
@@ -1117,7 +1151,7 @@ export function InlineUpdateStatusPanel({ meeting, onClose, onSaved }: { meeting
         const savedField = await saveFollowUpNote(meeting.id, trimmedNote);
         if (!savedField) {
           showToast(
-            'Status saved, but the note wasn’t stored — your "meetings" collection needs a text field named follow_up_notes. See the browser console for the field names actually on this record.',
+            'The status is saved, but the note couldn’t be stored. Please ask your administrator.',
             'error'
           );
         }

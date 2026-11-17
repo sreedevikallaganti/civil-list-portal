@@ -69,14 +69,18 @@ function assertNoConflict(app, rec, isUpdate) {
   if (!me) return; // incomplete data — let normal validation handle it
 
   const d = dayNum(me.date);
+  // multi-tenancy: only meetings of the same organisation can clash
+  let org = "";
+  try { org = rec.getString("org"); } catch (_) {}
   const rows = app.findRecordsByFilter(
     "meetings",
-    "meeting_date >= {:from} && meeting_date < {:to} && id != {:id}",
+    "meeting_date >= {:from} && meeting_date < {:to} && id != {:id}" + (org ? " && org = {:org}" : ""),
     "", 0, 0,
     {
       from: isoFromDayNum(d - 1) + " 00:00:00.000Z",
       to: isoFromDayNum(d + 2) + " 00:00:00.000Z",
       id: rec.id || "",
+      org: org,
     }
   );
 

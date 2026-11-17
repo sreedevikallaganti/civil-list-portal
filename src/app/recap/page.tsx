@@ -77,7 +77,7 @@ function RecapView() {
   }
 
   return (
-    <div className="mem-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+    <div className="mem-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
       <MemoryStyles />
 
       <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
@@ -86,7 +86,7 @@ function RecapView() {
         <div className="mem-blob absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" style={{ animationDelay: "-6s" }} />
       </div>
 
-      <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+      <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
         {/* App bar */}
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 bg-white px-4 py-5 sm:px-6 sm:py-6">
           <div className="flex min-w-0 items-center gap-4">
@@ -144,7 +144,7 @@ function RecapView() {
         </div>
 
         {/* Content */}
-        <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+        <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
           {error && (
             <div className="mem-fade-up flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 shadow-sm">
               <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -188,7 +188,7 @@ function RecapView() {
           </section>
 
           {/* KPIs */}
-          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <section className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
             <Kpi accent="blue" icon={<CalendarDays className="h-5 w-5" />} label="Meetings held" value={recap.total} loading={loading} delay={80} down={change !== null && change < 0}
               sub={change === null ? `${recap.completed} completed` : `${change >= 0 ? "+" : ""}${change}% vs ${year - 1}`} />
             <Kpi accent="violet" icon={<Users className="h-5 w-5" />} label={service === "all" ? "People met" : `${service} officers met`} value={recap.officers} loading={loading} delay={150}
@@ -199,8 +199,8 @@ function RecapView() {
               sub={recap.topPlace ? `Mostly ${recap.topPlace.name}` : "—"} />
           </section>
 
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <div className="space-y-6 xl:col-span-2">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-5 xl:grid-cols-3">
+            <div className="space-y-6 lg:col-span-3 xl:col-span-2">
               {/* Month by month */}
               <Card title="Month by month" subtitle={recap.total ? `Busiest: ${MONTHS[recap.busiestMonth]} (${recap.byMonth[recap.busiestMonth]})` : "No meetings yet"} delay={200}>
                 {loading ? (
@@ -264,7 +264,7 @@ function RecapView() {
               </Card>
             </div>
 
-            <div className="space-y-6">
+            <div className="space-y-6 lg:col-span-2 xl:col-span-1">
               {/* Most met */}
               <Card
                 title={service === "all" ? "Most met people" : `Most met ${service} officers`}

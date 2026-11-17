@@ -28,8 +28,13 @@ const who = (m: any) => (m?.officer_name ? ` with ${m.officer_name}` : '');
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 const openMeeting = (m: any) => `/meetings?open=${encodeURIComponent(m.id)}`;
 
-export function buildNotifications(meetings: any[], people: Map<string, LivePerson>, now = new Date()): AppNotification[] {
+/* follow-up work (follow-ups, status, minutes) goes to whoever created the meeting (owner_email);
+   meetings without an owner, or no signed-in email, show for everyone */
+const isMine = (m: any, me: string) => !me || !m?.owner_email || String(m.owner_email).toLowerCase() === me;
+
+export function buildNotifications(meetings: any[], people: Map<string, LivePerson>, now = new Date(), myEmail = ''): AppNotification[] {
   const out: AppNotification[] = [];
+  const me = myEmail.trim().toLowerCase();
   const today = isoDay(now);
   const live = meetings.filter((m) => !isOff(m));
 
@@ -91,7 +96,7 @@ export function buildNotifications(meetings: any[], people: Map<string, LivePers
   }
   for (const m of latestByPerson.values()) {
     const fu = String(m.follow_up_date || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(fu) || fu > today) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fu) || fu > today || !isMine(m, me)) continue;
     const overdue = fu < today;
     out.push({
       id: `followup:${m.id}:${fu}`, kind: 'followup', urgent: overdue, at: Date.parse(`${fu}T09:00:00`),
@@ -104,7 +109,7 @@ export function buildNotifications(meetings: any[], people: Map<string, LivePers
   /* 5. past meetings still marked Scheduled */
   const overdue = live.filter((m) => {
     const start = meetingStartsAt(m);
-    return start && isScheduled(m) && +start + (Number(m.duration) || 30) * 60_000 < +now;
+    return start && isScheduled(m) && isMine(m, me) && +start + (Number(m.duration) || 30) * 60_000 < +now;
   });
   if (overdue.length) {
     out.push({
@@ -118,7 +123,7 @@ export function buildNotifications(meetings: any[], people: Map<string, LivePers
   /* 6. completed in the last 14 days without minutes */
   for (const m of live) {
     const start = meetingStartsAt(m);
-    if (!start || !/complete/i.test(m.status || '') || String(m.minutes || '').trim()) continue;
+    if (!start || !/complete/i.test(m.status || '') || String(m.minutes || '').trim() || !isMine(m, me)) continue;
     const ageDays = (+now - +start) / 86_400_000;
     if (ageDays < 0 || ageDays > 14) continue;
     out.push({

@@ -1,5 +1,6 @@
 // src/lib/pocketbase.ts
 import PocketBase, { ClientResponseError } from 'pocketbase';
+import { installTenancy } from './tenancy';
 
 /* ================================================================== */
 /*  Configuration                                                      */
@@ -13,11 +14,8 @@ import PocketBase, { ClientResponseError } from 'pocketbase';
 export const AUTH_COLLECTION = 'users';
 
 /**
- * PocketBase URL — read from .env.local (NEXT_PUBLIC_POCKETBASE_URL).
- *
- * Your previous file hardcoded http://172.30.0.200:8091; this version
- * reads the identical value you already have in .env.local, so the URL
- * now lives in exactly one place.
+ * PocketBase URL — read from .env.local (POCKETBASE_URL or NEXT_PUBLIC_POCKETBASE_URL),
+ * so the address lives in exactly one place.
  * Note: restart the dev server after changing .env.local —
  * NEXT_PUBLIC_* values are inlined at startup/build time.
  */
@@ -34,8 +32,8 @@ export function getPocketBaseURL(): string {
   const url = process.env.POCKETBASE_URL || process.env.NEXT_PUBLIC_POCKETBASE_URL;
   if (!url) {
     throw new Error(
-      'POCKETBASE_URL is not set. Add it to your .env.local file:\n' +
-        'POCKETBASE_URL=http://172.30.0.200:8091'
+      'POCKETBASE_URL is not set. Add it to your .env.local file, e.g.:\n' +
+        'POCKETBASE_URL=http://<pocketbase-host>:<port>'
     );
   }
   return url.replace(/\/+$/, '');
@@ -59,11 +57,13 @@ export interface PortalUser {
   // Custom fields from your "users" collection (visible in your
   // PocketBase admin screenshots)
   name?: string;
-  permissions?: string;
+  permissions?: string | string[]; // text or a PocketBase list field
+  role?: string;               // "Admin", "Super Admin", "Editor", "Viewer"
   department?: string;
   phone?: string;
   status?: string;
   avatar?: string;
+  org?: string;                // id of the organisation the user belongs to (lib/tenancy)
 }
 
 /** Safely casts a PocketBase auth record to our PortalUser type. */
@@ -84,6 +84,9 @@ export function getPB(): PocketBase {
 
     // Same setting your current file already uses — kept.
     pbInstance.autoCancellation(false);
+
+    // multi-tenancy: stamp new records with the org, scope superuser lists (lib/tenancy)
+    installTenancy(pbInstance);
   }
   return pbInstance;
 }
@@ -126,7 +129,7 @@ export function getAuthErrorMessage(error: unknown): string {
   if (error instanceof ClientResponseError) {
     switch (error.status) {
       case 0:
-        // Network failure — PocketBase unreachable at 172.30.0.200:8091
+        // Network failure — PocketBase unreachable at the POCKETBASE_URL address
         return 'Cannot connect to the server. Please make sure PocketBase is running and reachable, then try again.';
 
       case 400:

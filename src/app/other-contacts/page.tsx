@@ -316,9 +316,9 @@ export default function OtherContactsPage() {
 
       {/* Table */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="max-h-[70vh] overflow-auto">
           <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200 shadow-[0_1px_0_0_rgb(229_231_235)]">
               <tr>
                 <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase">Name</th>
                 <th className="px-6 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase">Category</th>
@@ -469,7 +469,7 @@ export default function OtherContactsPage() {
       {selectedContact && (
         <>
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40 transition-opacity" onClick={() => setSelectedContact(null)} />
-          <div className="fixed inset-y-0 right-0 w-full max-w-md bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
+          <div className="fixed inset-y-0 right-0 w-full sm:max-w-xl lg:max-w-2xl bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
             <div className="sticky top-0 bg-white border-b border-gray-200 p-5 z-10">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-3">

@@ -4,6 +4,8 @@ import { useState, useEffect } from 'react';
 import { X, Save, Loader2 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
 import { showToast } from '@/components/Toaster';
+import { cleanName, nameError, phoneError } from '@/lib/validation';
+import PhoneInput from '@/components/PhoneInput';
 
 interface CreateContactPanelProps {
   isOpen: boolean;
@@ -79,8 +81,10 @@ export default function CreateContactPanel({ isOpen, onClose, onSuccess, contact
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!formData.name) {
-      showToast('Please fill in the required Name field', 'error');
+    const problem = nameError(formData.name || '', { label: 'Full name' })
+      || phoneError(formData.contact_number || '', { label: 'Contact number' });
+    if (problem) {
+      showToast(problem, 'error');
       return;
     }
 
@@ -99,7 +103,7 @@ export default function CreateContactPanel({ isOpen, onClose, onSuccess, contact
     } catch (error: any) {
       console.error('Error saving contact:', error);
       setLoading(false);
-      showToast(error?.response?.message || 'Failed to save contact. Please check the fields.', 'error');
+      showToast('Couldn’t save the contact — please check the details and try again.', 'error');
     }
   };
 
@@ -109,14 +113,14 @@ export default function CreateContactPanel({ isOpen, onClose, onSuccess, contact
     <>
       <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40 transition-opacity" onClick={onClose} />
       
-      <div className="fixed inset-y-0 right-0 w-full max-w-2xl bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
+      <div className="fixed inset-y-0 right-0 w-full sm:max-w-xl lg:max-w-2xl bg-white shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
         
         <div className="flex items-center justify-between p-5 border-b border-gray-200 bg-gradient-to-r from-teal-50 to-emerald-50">
           <div>
             <h2 className="text-lg font-bold text-gray-900">{isEditMode ? 'Edit Contact' : 'Create New Contact'}</h2>
             <p className="text-xs text-gray-600 mt-0.5">Fill in all contact details</p>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-white rounded-lg transition-colors">
+          <button onClick={onClose} aria-label="Close" className="p-2 hover:bg-white rounded-lg transition-colors">
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
@@ -133,7 +137,7 @@ export default function CreateContactPanel({ isOpen, onClose, onSuccess, contact
               <input 
                 type="text" 
                 value={formData.name} 
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })} 
+                onChange={(e) => setFormData({ ...formData, name: cleanName(e.target.value) })} 
                 placeholder="e.g., Ramesh Reddy" 
                 className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
                 required
@@ -207,12 +211,10 @@ export default function CreateContactPanel({ isOpen, onClose, onSuccess, contact
 
             <div>
               <label className="block text-xs font-semibold text-gray-700 mb-1.5">Contact Number</label>
-              <input 
-                type="tel" 
-                value={formData.contact_number} 
-                onChange={(e) => setFormData({ ...formData, contact_number: e.target.value })} 
-                placeholder="+91 98765 43210" 
-                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+              <PhoneInput
+                value={formData.contact_number || ''}
+                onChange={(v) => setFormData((f) => ({ ...f, contact_number: v }))}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg"
               />
             </div>
 

@@ -47,4 +47,9 @@ venv/
 __pycache__/
 *.pyc
 # Google OAuth refresh token (written by /api/google/callback)
-.google-token.json
+.google-token*.json
+.alerts-sent.json
+.participant-mails-sent.json
+
+# Meeting Map place lookups (OpenStreetMap)
+.geocode-cache.json

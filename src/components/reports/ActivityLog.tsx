@@ -47,8 +47,24 @@ interface ActivityLogProps {
 
 const PRIMARY_COLLECTION = 'activity_logs';
 const FALLBACK_COLLECTION = 'update_logs';
-/* only the last 90 days are loaded — the log has thousands of rows and keeps growing */
+/* only the last 90 days are loaded by default — the log has thousands of rows and keeps growing */
 const RECENT_DAYS = 90;
+const RANGES = {
+  '90': { days: RECENT_DAYS, label: 'Last 90 days' },
+  '365': { days: 365, label: 'Last year' },
+  all: { days: 0, label: 'All history' },
+} as const;
+type RangeKey = keyof typeof RANGES;
+const ALL_CAP = 2000;      // "All history" loads at most this many newest entries
+const FALLBACK_CAP = 300;  // shown when the chosen period is empty
+
+/* Entries imported from the old system carry the real event time in `timestamp`
+   (their `created` is the import date) — show and sort by the event time. */
+function withEventTime(rows: RecordItem[]): RecordItem[] {
+  return rows
+    .map((r) => (r.timestamp ? { ...r, created: String(r.timestamp) } : r))
+    .sort((a, b) => String(b.created || '').localeCompare(String(a.created || '')));
+}
 const CLEANUP_OPTIONS = [90, 180, 365];
 type ViewMode = 'timeline' | 'table';
 
@@ -110,27 +126,61 @@ const ActivityLog = forwardRef<ActivityLogHandle, ActivityLogProps>(function Act
   const latest = useRef<RecordItem[]>([]);
   useEffect(() => { latest.current = logs; }, [logs]);
 
+  /* period shown: last 90 days (default), last year, or all history (newest ALL_CAP entries) */
+  const [range, setRange] = useState<RangeKey>('90');
+  /* true when the chosen period was empty and the newest older entries are shown instead */
+  const [fellBack, setFellBack] = useState(false);
+
   /* ── Load: prefer activity_logs, fall back to update_logs ── */
   const load = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true); else setLoading(true);
+    const days = RANGES[range].days;
     let items: RecordItem[] = [];
     let missing = false;
+    let older = false;
+    const fetchFrom = async (col: string) => {
+      let rows = await fetchRecentRecords(col, days, days > 0 ? 2000 : ALL_CAP);
+      // nothing in this period → show the newest history rather than an empty page
+      if (!rows.length && days > 0) {
+        rows = await fetchRecentRecords(col, 0, FALLBACK_CAP);
+        older = rows.length > 0;
+      }
+      return rows;
+    };
     try {
-      items = await fetchRecentRecords(PRIMARY_COLLECTION, RECENT_DAYS);
+      items = await fetchFrom(PRIMARY_COLLECTION);
       colRef.current = PRIMARY_COLLECTION;
     } catch {
       try {
-        items = await fetchRecentRecords(FALLBACK_COLLECTION, RECENT_DAYS);
+        items = await fetchFrom(FALLBACK_COLLECTION);
         colRef.current = FALLBACK_COLLECTION;
       } catch { missing = true; }
     }
-    setLogs(items);
+    setLogs(withEventTime(items));
+    setFellBack(older);
     setNoCollection(missing);
     setLoading(false);
     setRefreshing(false);
-  }, []);
+  }, [range]);
 
   useEffect(() => { load(); }, [load]);
+
+  /* ── Live updates: new / changed log entries show up without pressing refresh ── */
+  useEffect(() => {
+    if (loading || noCollection) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+    let unsub: (() => void) | null = null;
+    pb.collection(colRef.current)
+      .subscribe('*', () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => load(true), 400); // one reload per burst
+      })
+      .then((fn) => { if (cancelled) fn(); else unsub = fn; })
+      // status 0 = the attempt was cancelled (dev mode mounts twice) — not a real failure
+      .catch((e) => { if (e?.status !== 0 && !e?.isAbort) console.warn('[activity] live updates unavailable:', e); });
+    return () => { cancelled = true; if (timer) clearTimeout(timer); unsub?.(); };
+  }, [loading, noCollection, load]);
 
   /* ── Admin clean-up: delete entries older than N days (count first, then confirm) ── */
   const { user } = useAuth();
@@ -341,6 +391,8 @@ const ActivityLog = forwardRef<ActivityLogHandle, ActivityLogProps>(function Act
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
+          <FilterSelect value={range} onChange={(v) => setRange(v as RangeKey)} label="Period"
+            options={(Object.keys(RANGES) as RangeKey[]).map((k) => ({ value: k, label: RANGES[k].label }))} />
           <SearchInput value={q} onChange={setQ} placeholder="Search activity…" />
           <FilterSelect value={statusFilter} onChange={setStatusFilter} label="Status" options={[
             { value: 'all', label: 'All statuses' },
@@ -432,7 +484,14 @@ const ActivityLog = forwardRef<ActivityLogHandle, ActivityLogProps>(function Act
             </div>
           ))}
         </div>
-      ) : noCollection ? (
+      ) : (fellBack || range === 'all') && !noCollection && logs.length > 0 && (
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-amber-100 bg-amber-50/70 px-5 py-2.5 text-[12px] text-amber-800">
+          {fellBack
+            ? <>Nothing was logged in the {RANGES[range].label.toLowerCase()}. Showing the latest history instead — newest entry {fmtDateTime(logs[0].created)}.</>
+            : <>Showing the newest {logs.length.toLocaleString('en-IN')} entries.</>}
+        </p>
+      )}
+      {loading ? null : noCollection ? (
         <EmptyState icon={History} title="No activity collection"
           hint={<>Create an <b>activity_logs</b> collection (or keep <b>update_logs</b>) in PocketBase.</>} />
       ) : filtered.length === 0 ? (
@@ -494,9 +553,9 @@ const ActivityLog = forwardRef<ActivityLogHandle, ActivityLogProps>(function Act
           ))}
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="max-h-[70vh] overflow-auto">
           <table className="w-full min-w-[640px]">
-            <thead>
+            <thead className="sticky top-0 z-10 bg-slate-50 shadow-[0_1px_0_0_rgb(241_245_249)]">
               <tr className="border-b border-slate-100 bg-slate-50/70">
                 {columns.map(c => (
                   <th key={c.key} className="whitespace-nowrap px-4 py-2.5 text-left">

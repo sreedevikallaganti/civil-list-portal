@@ -31,19 +31,32 @@
 ================================================================ */
 
 import {
-  Suspense, useEffect, useRef, useState,
+  Suspense, useEffect, useMemo, useRef, useState,
 } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  Calendar, CalendarClock, CheckCircle2, RotateCcw, XCircle, Clock, MapPin, Search, Plus, Edit2, Trash2, X, ChevronRight, ChevronLeft, ChevronDown, User, Briefcase, Tag, AlignLeft, FileText, Phone, Mail, ArrowUpDown, Loader2, RefreshCw, CalendarDays, StickyNote, Check, AlertTriangle, Command, History, Copy, MessageCircle,
+  CalendarClock, CheckCircle2, XCircle, Clock, MapPin, Search, Plus, Trash2, X, ChevronRight, ChevronLeft, ChevronDown, Briefcase, Tag, FileText, ArrowUpDown, Loader2, CalendarDays, StickyNote, Check, AlertTriangle, Route, Command, Star,
 } from 'lucide-react';
+import { useAssistantEnabled } from '@/components/meetings/AssistantDrawer';
+import { askAI } from '@/components/AssistantLauncher';
 import pb from '@/lib/pocketbase';
+import { collectionOf, serviceOf, toDirectoryOfficer } from '@/lib/officerDirectory';
+import { logActivity, meetingLabel } from '@/lib/activity';
+import SavedViews, { WHEN_OPTIONS, matchesWhen, type ViewFilters, type When } from '@/components/meetings/SavedViews';
 import CreateMeetingPanel from '@/components/CreateMeetingPanel';
 import {
   showToast,
 } from '@/components/Toaster';
 
 import ParticipantHistory from '@/components/meetings/ParticipantHistory';
+import { loadDirectoryEmployees } from '@/components/employees/employee-api';
+import { listFields } from '@/lib/associatesApi';
+import { meetingWithAssociate } from '@/lib/associates';
+import KeyPeoplePanel, { useKeyPeopleCount } from '@/components/meetings/KeyPeoplePanel';
+import ParticipantsLine from '@/components/meetings/ParticipantsLine';
+import { meetingParticipants, unnamedEmails, type Participant } from '@/lib/participants';
+import { useEmailNames } from '@/lib/emailNames';
+import MeetingDetailsPanel from '@/components/MeetingDetailsPanel';
 import UndoBar, { UNDO_MS } from '@/components/meetings/UndoBar';
 import RevisitPopup from '@/components/meetings/RevisitPopup';
 import {
@@ -59,17 +72,19 @@ import {
   canEdit, canManageIntegrations,
 } from '@/lib/roles';
 import {
-  reconnectGoogle, removeGoogleEvent,
+  removeCalendarAndVideo,
 } from '@/lib/apiClient';
 import {
   completedTooEarly,
 } from '@/lib/meetingRules';
 import DayBriefPanel from '@/components/meetings/DayBriefPanel';
+import { syncStatusChange } from '@/lib/meetingStatusSync';
+import { travelIssues, type TravelIssue } from '@/lib/travelTime';
 
 /* ----------------------------- Global CSS / Animations ----------------------------- */
 
 import {
-  CustomStyles, STATUS_STYLES, STATUS_ORDER, whatsappLink, getTypeConfig, PRIORITY_BADGE, STAT_CARDS, DIST_SEGMENTS, PER_PAGE_OPTIONS, ARCHIVE_COLLECTION, DEFAULT_SORT, SORT_GROUPS, ALL_SORT_OPTIONS, PRIORITY_WEIGHT, getPaginationRange, dayTag, parseHistory, appendStatusHistory, saveFollowUpNote, AnimatedNumber, InfoTile, MinutesOfMeetingCard, PopoverPos, popoverPosition, QuickStatusPopover, NotesPopover, CommandPalette, InlineUpdateStatusPanel,
+  CustomStyles, STATUS_STYLES, STATUS_ORDER, getTypeConfig, PRIORITY_BADGE, STAT_CARDS, DIST_SEGMENTS, PER_PAGE_OPTIONS, ARCHIVE_COLLECTION, DEFAULT_SORT, SORT_GROUPS, ALL_SORT_OPTIONS, PRIORITY_WEIGHT, getPaginationRange, dayTag, appendStatusHistory, AnimatedNumber, PopoverPos, popoverPosition, QuickStatusPopover, NotesPopover, CommandPalette, InlineUpdateStatusPanel,
 } from '@/components/meetings/meetingsPageParts';
 
 
@@ -86,6 +101,8 @@ function MeetingsPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const [meetings, setMeetings] = useState<any[]>([]);
+  /* names for participants saved as an e-mail only — so search finds them by name */
+  const emailNames = useEmailNames(useMemo(() => [...new Set(meetings.flatMap(unnamedEmails))], [meetings]));
   const [selectedMeeting, setSelectedMeeting] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -95,6 +112,8 @@ function MeetingsPageContent() {
   const [priorityFilter, setPriorityFilter] = useState<string>('all');
 
   const [sortBy, setSortBy] = useState<string>(DEFAULT_SORT);
+  /* date / follow-up condition used by saved views (Today, This week, Follow-ups due…) */
+  const [whenFilter, setWhenFilter] = useState<When>('all');
 
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingMeeting, setEditingMeeting] = useState<any>(null);
@@ -105,12 +124,10 @@ function MeetingsPageContent() {
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
 
   const [updateMeeting, setUpdateMeeting] = useState<any>(null);
-
-  /* Follow-up notes expand / inline edit state (detail panel) */
-  const [followUpOpen, setFollowUpOpen] = useState(false);
-  const [followUpEditing, setFollowUpEditing] = useState(false);
-  const [followUpDraft, setFollowUpDraft] = useState('');
-  const [followUpSaving, setFollowUpSaving] = useState(false);
+  /* open the detail panel with its follow-up notes expanded (from the notes popover) */
+  const [openNotesOnPanel, setOpenNotesOnPanel] = useState(false);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- reset once the panel is closed (any way)
+  useEffect(() => { if (!selectedMeeting) setOpenNotesOnPanel(false); }, [selectedMeeting]);
 
   /* Pagination */
   const [page, setPage] = useState(1);
@@ -137,7 +154,9 @@ const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; 
   const tableRef = useRef<HTMLDivElement>(null);
 
   /* participant history / duplicate / undo delete */
-  const [historyPerson, setHistoryPerson] = useState<{ id?: string; name: string } | null>(null);
+  const [historyPerson, setHistoryPerson] = useState<Participant | null>(null);
+  const [keyPeopleOpen, setKeyPeopleOpen] = useState(false);
+  const keyPeopleCount = useKeyPeopleCount();
   const [duplicateSource, setDuplicateSource] = useState<any>(null);
   const [pendingDelete, setPendingDelete] = useState<{ records: any[]; message: string; startedAt: number } | null>(null);
   const pendingDeleteRef = useRef<{ records: any[]; timer: ReturnType<typeof setTimeout> } | null>(null);
@@ -153,7 +172,12 @@ const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; 
   /* roles — viewers get a read-only page (PocketBase rules enforce the same on the server) */
   const { user } = useAuth();
   const editable = canEdit(user);
+
+  /* "Ask AI" lives in the bottom-right corner of every page (AssistantLauncher in AppShell);
+     here it is only offered in the Ctrl/Cmd+K palette, when it is available */
   const isAdmin = canManageIntegrations(user);
+  const aiEnabled = useAssistantEnabled(editable);
+  const showAi = editable && (aiEnabled === true || (aiEnabled === false && isAdmin));
   const viewOnly = () => { showToast('Your account is view-only — ask an admin for edit access.', 'error'); return false; };
 
   const [distMounted, setDistMounted] = useState(false);
@@ -168,6 +192,9 @@ const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; 
        ?open=<meetingId>                         → open that meeting's details
        ?schedule=<meetingId>&date=&city=         → new meeting with that person, on that visit
        ?person=<IAS|IPS|Contact>:<id>&date=&city= → new meeting with a directory person
+       ?followup=<meetingId>                     → follow-up meeting for that meeting
+       ?batch=<IAS:id,IPS:id…>&year=&mode=online|offline&city= → one batch meet with all of them
+       ?aidraft=<JSON MeetingDraft>              → a meeting drafted by the AI assistant (any page)
        ?filter=<status>                          → filter the list */
   useEffect(() => {
     if (loading || !searchParams.toString()) return;
@@ -184,21 +211,75 @@ const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; 
       const m = byId(id);
       if (m) setSelectedMeeting(m);
       else fetchFreshMeeting(id).then((r) => r && setSelectedMeeting(r));
+    } else if (q.get('followup')) {
+      const id = q.get('followup')!;
+      const m = byId(id);
+      if (m) scheduleFollowUp(m);
+      else fetchFreshMeeting(id).then((r) => r && scheduleFollowUp(r));
+    } else if (q.get('duplicate')) {
+      const id = q.get('duplicate')!;
+      const m = byId(id);
+      if (m) openDuplicate(m);
+      else fetchFreshMeeting(id).then((r) => r && openDuplicate(r));
+    } else if (q.get('history')) {
+      setHistoryPerson({ id: q.get('hid') || undefined, name: q.get('history')! });
     } else if (q.get('schedule')) {
       const m = byId(q.get('schedule')!);
       if (m) openDuplicate(m, { __prefill: prefill });
+    } else if (q.get('person') && q.get('person')!.startsWith('Associate:')) {
+      const id = q.get('person')!.slice('Associate:'.length);
+      Promise.all([listFields(), pb.collection('associates').getOne(id)]).then(([fields, a]: any) => {
+        openDuplicate(meetingWithAssociate(a, fields), { __prefill: prefill });
+      }).catch(() => showToast('Couldn’t load that associate.', 'error'));
+    } else if (q.get('person') && q.get('person')!.startsWith('Employee:')) {
+      // an employee (HRMS list + employees added in the app): an internal meeting with them
+      const id = q.get('person')!.slice('Employee:'.length);
+      loadDirectoryEmployees().then(({ employees }) => {
+        const e: any = employees.find((x: any) => x.id === id);
+        if (!e) { showToast('Couldn’t find that employee.', 'error'); return; }
+        openDuplicate({
+          meeting_type: 'Internal', officer_type: 'Other', officer_id: e.id, officer_name: e.name || '',
+          designation: e.designation || '', current_position: e.designation || '', department: e.department || '',
+          email: e.email || '', contact_number: e.contact_number || '',
+        }, { __prefill: prefill });
+      }).catch(() => showToast('Couldn’t load the employees.', 'error'));
     } else if (q.get('person')) {
       const [kind, id] = q.get('person')!.split(':');
-      const col = kind === 'IAS' ? 'ias_officers' : kind === 'IPS' ? 'ips_officers' : 'other_contacts';
-      pb.collection(col).getOne(id).then((o: any) => {
+      const service = serviceOf(kind);
+      const col = collectionOf(kind) || 'other_contacts';
+      pb.collection(col).getOne(id).then((rec: any) => {
+        const o: any = service ? toDirectoryOfficer(rec, service) : rec;
         openDuplicate({
-          officer_name: o.name, officer_id: o.id, officer_type: kind === 'Contact' ? 'Other' : kind,
+          officer_name: o.name, officer_id: o.id, officer_type: service ?? 'Other',
           designation: o.current_position || o.designation || '', current_position: o.current_position || o.designation || '',
           email: o.email || '', contact_number: o.contact_number || o.mobile_no || '',
           cadre: o.cadre || '', state: o.state || '', batch_year: o.batch_year || '', department: o.department || '',
           meeting_type: 'External',
         }, { __prefill: prefill });
       }).catch(() => showToast('Couldn’t load that person from the directory.', 'error'));
+    } else if (q.get('aidraft')) {
+      // the draft only pre-fills the form — the MD reviews it and saves (or not)
+      let d: any = null;
+      try { d = JSON.parse(q.get('aidraft')!); } catch { /* ignore a broken link */ }
+      if (d && typeof d === 'object') {
+        const list = (v: unknown) => (Array.isArray(v) ? v.map(String).slice(0, 25) : []);
+        openGroupMeeting(list(d.refs), {
+          agenda: String(d.title || 'Meeting').slice(0, 120),
+          mode: d.mode === 'offline' ? 'offline' : 'online',
+          date: /^\d{4}-\d{2}-\d{2}$/.test(d.date || '') ? d.date : '',
+          time: /^\d{2}:\d{2}$/.test(d.time || '') ? d.time : '',
+          duration: Math.max(0, Math.min(600, Number(d.duration) || 0)),
+          city: String(d.city || '').slice(0, 60), venue: String(d.venue || '').slice(0, 200),
+          names: list(d.names),
+        });
+      }
+    } else if (q.get('batch')) {
+      const year = q.get('year') || '';
+      openGroupMeeting(q.get('batch')!.split(','), {
+        agenda: year ? `${year} Batch Meet` : 'Batch Meet',
+        mode: q.get('mode') === 'offline' ? 'offline' : 'online',
+        date: q.get('date') || '', city: q.get('city') || '',
+      });
     } else if (q.get('filter')) {
       setStatusFilter(q.get('filter')!);
       requestAnimationFrame(() => tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
@@ -223,15 +304,9 @@ const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => { setPage(1); }, [searchQuery, statusFilter, typeFilter, priorityFilter, sortBy, perPage]);
+  useEffect(() => { setPage(1); }, [searchQuery, statusFilter, typeFilter, priorityFilter, whenFilter, sortBy, perPage]);
 
-  useEffect(() => {
-    setFollowUpOpen(false);
-    setFollowUpEditing(false);
-    setFollowUpDraft('');
-  }, [selectedMeeting?.id]);
-
-  const anyModalOpen = isPanelOpen || !!updateMeeting || !!selectedMeeting || showDeleteConfirm || showBulkDeleteConfirm || commandPaletteOpen || !!historyPerson || !!revisit || dayBriefOpen;
+  const anyModalOpen = isPanelOpen || !!updateMeeting || !!selectedMeeting || showDeleteConfirm || showBulkDeleteConfirm || commandPaletteOpen || !!historyPerson || !!revisit || dayBriefOpen || keyPeopleOpen;
 
   /* Esc closes the day brief */
   useEffect(() => {
@@ -240,11 +315,6 @@ const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [dayBriefOpen]);
-
-  async function handleReconnectGoogle() {
-    try { await reconnectGoogle(); }
-    catch (e: any) { showToast(e?.message || 'Could not start the Google connection', 'error'); }
-  }
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -332,6 +402,73 @@ const [notesPopover, setNotesPopover] = useState<{ id: string; pos: PopoverPos; 
     setDuplicateSource({ ...(fresh || source), ...overrides });
     setIsPanelOpen(true);
   };
+
+  /* ONE new meeting with several directory people (a batch meet, or an AI assistant draft):
+     the first person is the main participant, the rest go into `participants`.
+     refs: "IAS:<id>" / "IPS:<id>" / "Contact:<id>". Online → video link; offline → no link, venue.
+     Nothing is saved here — the form opens pre-filled and the MD reviews and saves it. */
+  async function openGroupMeeting(refs: string[], plan: {
+    agenda: string; mode: 'online' | 'offline'; date?: string; time?: string; duration?: number;
+    city?: string; venue?: string; names?: string[];
+  }) {
+    const colOf = (kind: string) => collectionOf(kind) || 'other_contacts';
+    const people = (await Promise.all(refs.slice(0, 25).map(async (ref) => {
+      const [kind, id] = ref.split(':');
+      if (!id || !/^[a-z0-9]{15}$/i.test(id)) return null;
+      const service = serviceOf(kind);
+      const rec: any = await pb.collection(colOf(kind)).getOne(id).catch(() => null);
+      return rec ? { kind: service ?? 'Other', o: service ? toDirectoryOfficer(rec, service) : rec } : null;
+    }))).filter(Boolean) as { kind: string; o: any }[];
+    // people named without a directory record (e.g. by the assistant) are kept by name
+    const walkIns = (plan.names || []).map((name) => name.trim()).filter(Boolean)
+      .filter((name) => !people.some((p) => String(p.o.name || '').toLowerCase() === name.toLowerCase()));
+    if (!people.length && !walkIns.length) {
+      showToast('Couldn’t load those people from the directory.', 'error');
+      return;
+    }
+    const [main, ...rest] = people;
+    const position = (o: any) => o.current_position || o.designation || '';
+    openDuplicate({
+      ...(main ? {
+        officer_name: main.o.name, officer_id: main.o.id, officer_type: main.kind,
+        designation: position(main.o), current_position: position(main.o),
+        email: main.o.email || '', contact_number: main.o.contact_number || main.o.mobile_no || '',
+        cadre: main.o.cadre || '', state: main.o.state || '', batch_year: main.o.batch_year || '', department: main.o.department || '',
+      } : { officer_name: walkIns.shift() || '', officer_type: 'Other' }),
+      participants: [
+        ...rest.map(({ kind, o }) => ({ id: o.id, name: o.name, type: kind, email: o.email || '', designation: position(o) })),
+        ...walkIns.map((name) => ({ id: '', name, type: 'Other' })),
+      ],
+      meeting_type: 'External',
+      meeting_time: plan.time || '',
+      duration: plan.duration || '',
+    }, {
+      __prefill: {
+        agenda: plan.agenda, meeting_date: plan.date || '', meeting_time: plan.time || '',
+        city: plan.city || '', location: plan.venue || '',
+        meeting_place: plan.mode === 'offline' ? 'Outside' : '',
+        video_call: plan.mode === 'online' ? 'meet' : 'none',
+        follow_up_date: '', follow_up_notes: '',
+      },
+    });
+  }
+
+  /* Follow-up meeting: same person, place and attendees; agenda "Follow-up: …"; the planned
+     follow-up date when it's still ahead (otherwise the date is left for the person to pick). */
+  function scheduleFollowUp(source: any) {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const planned = String(source?.follow_up_date || '').slice(0, 10);
+    const base = String(source?.agenda || '').replace(/^(follow-up:\s*)+/i, '').trim();
+    openDuplicate(source, {
+      __prefill: {
+        agenda: base ? `Follow-up: ${base}` : 'Follow-up meeting',
+        meeting_date: /^\d{4}-\d{2}-\d{2}$/.test(planned) && planned >= today ? planned : '',
+        meeting_time: '',
+        follow_up_date: '', follow_up_notes: '',
+      },
+    });
+  }
 
 async function loadData({ silent = false }: { silent?: boolean } = {}) {
   try {
@@ -467,6 +604,7 @@ function handleMeetingSaved(rec: any) {
       deleted_at: deletedAt,
     });
     await pb.collection('meetings').delete(originalId);
+    logActivity('deleted', 'meeting', meetingLabel(record as any), originalId);
   }
 
   /* delete with Undo — real archive + delete runs after UNDO_MS */
@@ -479,7 +617,7 @@ function handleMeetingSaved(rec: any) {
     const deletedAt = new Date().toISOString();
     const results = await Promise.allSettled(pending.records.map(async (r) => {
       await archiveAndDelete(r, deletedAt);
-      removeGoogleEvent(r, { clearRecord: false }); // record is gone — just drop the calendar event
+      removeCalendarAndVideo(r, { clearRecord: false }); // record is gone — just drop the calendar event + Zoom meeting
     }));
     const failed = results.filter((r) => r.status === 'rejected').length;
     if (failed) {
@@ -537,13 +675,6 @@ function handleMeetingSaved(rec: any) {
     const normalized = String(value).trim().replace(' ', 'T');
     const time = new Date(normalized).getTime();
     return Number.isNaN(time) ? 0 : time;
-  };
-
-  const formatDateTime = (value: any): string => {
-    const ts = dateToTime(value);
-    if (!ts) return '—';
-    const date = new Date(ts);
-    return `${date.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })} · ${date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })}`;
   };
 
   const formatDateShort = (value: any): string => {
@@ -635,8 +766,10 @@ const createdTs = (m: any) => dateToTime(createdRaw(m));
     setMeetings((prev) => prev.map((m) => (m.id === meeting.id ? { ...m, status: label, status_flag: label } : m)));
     try {
       await pb.collection('meetings').update(meeting.id, { status: label, status_flag: label });
+      logActivity('status changed', 'meeting', `${meetingLabel(meeting)} → ${label}`, meeting.id);
       appendStatusHistory(meeting.id, meeting.status_history, label).catch(() => {});
-      if (key === 'cancelled') removeGoogleEvent(meeting); // attendees get Google's cancellation notice
+      // cancelled → remove the calendar event / Zoom meeting + cancellation email; completed → thank-you (lib/meetingStatusSync)
+      if (key === 'cancelled' || key === 'completed') void syncStatusChange(meeting, { status: key }, showToast);
     } catch {
       setMeetings(prevSnapshot);
       showToast('Failed to update status. Please try again.', 'error');
@@ -683,8 +816,9 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
       await Promise.all(ids.map((id) => pb.collection('meetings').update(id, { status: label, status_flag: label })));
       ids.forEach((id) => {
         const m = prevSnapshot.find((mm) => mm.id === id);
+        logActivity('status changed', 'meeting', `${meetingLabel(m)} → ${label} (bulk)`, id);
         appendStatusHistory(id, m?.status_history, label).catch(() => {});
-        if (key === 'cancelled' && m) removeGoogleEvent(m);
+        if (m && (key === 'cancelled' || key === 'completed')) void syncStatusChange(m, { status: key }, showToast);
       });
       clearSelection();
       showToast(`Marked ${count} meeting${count > 1 ? 's' : ''} as ${label}`, 'success');
@@ -704,59 +838,38 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
     setShowBulkDeleteConfirm(false);
   }
 
-  /* ------------------------------- inline follow-up note edit ------------------------------- */
-
-  function startFollowUpEdit(currentText: string) {
-    setFollowUpDraft(currentText);
-    setFollowUpEditing(true);
-    setFollowUpOpen(true);
-  }
-
-  async function saveFollowUpEdit() {
-    if (!selectedMeeting?.id || followUpSaving) return;
-    const trimmed = followUpDraft.trim();
-    setFollowUpSaving(true);
-    try {
-      const savedField = await saveFollowUpNote(selectedMeeting.id, trimmed);
-      if (!savedField) {
-        showToast(
-          'Couldn’t save the note — your "meetings" collection needs a text field named follow_up_notes. See the browser console for the field names actually on this record.',
-          'error'
-        );
-        return;
-      }
-      setSelectedMeeting((prev: any) => (prev ? { ...prev, [savedField]: trimmed } : prev));
-      setMeetings((prev) => prev.map((m) => (m.id === selectedMeeting.id ? { ...m, [savedField]: trimmed } : m)));
-      setFollowUpEditing(false);
-      showToast('Follow-up note saved', 'success');
-    } catch {
-      showToast('Failed to save the note. Please try again.', 'error');
-    } finally {
-      setFollowUpSaving(false);
-    }
-  }
-
   /* ------------------------------- Filtering ------------------------------- */
 
+  /* one matcher for the list and for the saved-view count badges */
+  const matchesFilters = (meeting: any, f: ViewFilters) => {
+    const q = f.search.trim().toLowerCase();
+    const matchesSearch =
+      q === '' ||
+      getMeetingTitle(meeting).toLowerCase().includes(q) ||
+      (meeting.location || '').toLowerCase().includes(q) ||
+      meetingParticipants(meeting, emailNames).some((p) => p.name.toLowerCase().includes(q));
+    const matchesStatus = f.status === 'all' || getStatusKey(meeting) === f.status;
+    const matchesType = f.type === 'all' || String(meeting.meeting_type || '').toLowerCase() === f.type;
+    const matchesPriority = f.priority === 'all' || String(meeting.priority || '').toLowerCase() === f.priority;
+    return matchesSearch && matchesStatus && matchesType && matchesPriority && matchesWhen(meeting, f.when);
+  };
+  const currentFilters: ViewFilters = {
+    search: searchQuery, status: statusFilter, type: typeFilter, priority: priorityFilter, sort: sortBy, when: whenFilter,
+  };
+  const applyView = (v: ViewFilters) => {
+    setSearchQuery(v.search); setStatusFilter(v.status); setTypeFilter(v.type);
+    setPriorityFilter(v.priority); setSortBy(v.sort || DEFAULT_SORT); setWhenFilter(v.when);
+  };
+
+  // meetings you can't reach in time from the one before (same day, different place)
+  const tightTravel = useMemo(() => {
+    const map = new Map<string, TravelIssue>();
+    for (const t of travelIssues(meetings)) if (!map.has(t.to.id) || t.level === 'too-tight') map.set(t.to.id, t);
+    return map;
+  }, [meetings]);
+
   const filteredMeetings = meetings
-    .filter((meeting) => {
-      const title = getMeetingTitle(meeting).toLowerCase();
-      const matchesSearch =
-        searchQuery === '' ||
-        title.includes(searchQuery.toLowerCase()) ||
-        (meeting.location || '').toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesStatus = statusFilter === 'all' || getStatusKey(meeting) === statusFilter;
-
-      const matchesType =
-        typeFilter === 'all' ||
-        String(meeting.meeting_type || '').toLowerCase() === typeFilter;
-
-      const matchesPriority =
-        priorityFilter === 'all' ||
-        String(meeting.priority || '').toLowerCase() === priorityFilter;
-
-      return matchesSearch && matchesStatus && matchesType && matchesPriority;
-    })
+    .filter((meeting) => matchesFilters(meeting, currentFilters))
     .sort((a: any, b: any) => {
       switch (sortBy) {
         case 'created-asc': return createdTs(a) - createdTs(b);
@@ -817,14 +930,14 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
 
   if (loading) {
     return (
-      <div className="meetings-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+      <div className="meetings-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
         <CustomStyles />
         <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
           <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-violet-300/40 blur-3xl" />
           <div className="absolute -right-32 top-1/4 h-96 w-96 rounded-full bg-sky-300/30 blur-3xl" />
         </div>
 
-        <div className="anim-fade-in relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+        <div className="anim-fade-in relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5 sm:px-6">
             <div className="flex items-center gap-3">
               <div className="skeleton h-9 w-9 rounded-xl" />
@@ -836,7 +949,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
             <div className="skeleton h-10 w-36 rounded-full" />
           </div>
 
-          <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+          <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
             <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
               {[...Array(5)].map((_, i) => (
                 <div key={i} className="skeleton h-[126px] rounded-3xl" style={{ animationDelay: `${i * 80}ms` }} />
@@ -871,7 +984,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
   /* -------------------------------- Main View ------------------------------- */
 
   return (
-    <div className="meetings-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-2.5 sm:p-5 lg:p-8">
+    <div className="meetings-root relative min-h-screen bg-gradient-to-br from-indigo-200 via-violet-100 to-purple-200 p-0 sm:p-5 lg:p-8">
       <CustomStyles />
 
       <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
@@ -880,7 +993,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
         <div className="anim-blob absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-fuchsia-300/25 blur-3xl" style={{ animationDelay: '-6s' }} />
       </div>
 
-      <div className="relative mx-auto max-w-[1500px] overflow-hidden rounded-[1.75rem] bg-white shadow-2xl shadow-violet-300/40 ring-1 ring-white/70">
+      <div className="relative mx-auto max-w-[1500px] overflow-hidden bg-white sm:rounded-[1.75rem] sm:shadow-2xl sm:shadow-violet-300/40 sm:ring-1 sm:ring-white/70">
 
         {/* ------------------------------- App bar ------------------------------ */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-6">
@@ -902,15 +1015,17 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {isAdmin && (
-              <button
-                onClick={handleReconnectGoogle}
-                title="Re-authorise the Google account used for Calendar, Meet and invites"
-                className="hidden items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 lg:inline-flex"
-              >
-                <RefreshCw className="h-3.5 w-3.5" /> Reconnect Google
-              </button>
-            )}
+
+            <button
+              onClick={() => setKeyPeopleOpen(true)}
+              data-tooltip="Your starred officers — last met, next meeting, history"
+              className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-600 transition-colors hover:border-violet-200 hover:text-violet-600"
+            >
+              <Star className="h-3.5 w-3.5" /> Key persons
+              {keyPeopleCount > 0 && (
+                <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-slate-600">{keyPeopleCount}</span>
+              )}
+            </button>
 
             <button
               onClick={() => setDayBriefOpen(true)}
@@ -922,6 +1037,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
 
             <button
               onClick={() => setCommandPaletteOpen(true)}
+              data-tooltip="Search meetings and run commands  ·  Ctrl + K"
               className="hidden items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 transition-colors hover:border-violet-200 hover:text-violet-600 sm:inline-flex"
             >
               <Command className="h-3.5 w-3.5" />
@@ -929,9 +1045,11 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
               <kbd className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">⌘K</kbd>
             </button>
 
+
             {editable ? (
               <button
                 onClick={openCreate}
+                data-tooltip="Schedule a new meeting  ·  shortcut N"
                 className="group inline-flex items-center justify-center gap-2 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
               >
                 <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" />
@@ -939,13 +1057,13 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                 <kbd className="ml-1 hidden rounded-md bg-white/20 px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ring-white/30 sm:inline">N</kbd>
               </button>
             ) : (
-              <span className="rounded-full bg-slate-100 px-3.5 py-2 text-xs font-semibold text-slate-500">View only</span>
+              <span data-tooltip="Your role is Viewer — ask an Admin for edit access" className="rounded-full bg-slate-100 px-3.5 py-2 text-xs font-semibold text-slate-500">View only</span>
             )}
           </div>
         </div>
 
         {/* ------------------------------- Content ------------------------------ */}
-        <div className="space-y-6 bg-[#f7f6fd] p-4 sm:p-6 lg:p-7">
+        <div className="space-y-6 bg-[#f7f6fd] p-3 sm:p-6 lg:p-7">
 
           {/* ------------------------- Overdue banner ------------------------ */}
           {overdueMeetings.length > 0 && !overdueDismissed && (
@@ -958,8 +1076,8 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
               </p>
               <button
                 onClick={() => {
-                  setStatusFilter('scheduled');
-                  setSortBy('date-asc');
+                  // exactly the overdue ones: past date AND still Scheduled (not every scheduled meeting)
+                  applyView({ search: '', status: 'all', type: 'all', priority: 'all', sort: 'date-asc', when: 'needs-status' });
                   requestAnimationFrame(() => {
                     tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                   });
@@ -1101,6 +1219,19 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
               </div>
 
               <div className="relative">
+                <CalendarClock className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <select
+                  value={whenFilter}
+                  onChange={(e) => setWhenFilter(e.target.value as When)}
+                  aria-label="When"
+                  className="w-full cursor-pointer appearance-none rounded-full border border-slate-200 bg-slate-50/80 py-2.5 pl-11 pr-9 text-sm font-medium text-slate-700 transition-all duration-200 hover:border-slate-300 hover:bg-white focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-violet-500/10 sm:w-44"
+                >
+                  {WHEN_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              </div>
+
+              <div className="relative">
                 <ArrowUpDown className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <select
                   value={sortBy}
@@ -1117,6 +1248,16 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                 </select>
                 <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               </div>
+            </div>
+
+            {/* one-click views (built-in + your own) */}
+            <div className="mt-3">
+              <SavedViews
+                current={currentFilters}
+                defaultSort={DEFAULT_SORT}
+                onApply={(v) => { applyView(v); setPage(1); }}
+                countFor={(v) => meetings.filter((m) => matchesFilters(m, v)).length}
+              />
             </div>
           </div>
 
@@ -1150,9 +1291,9 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                   </span>
                 </span>
               </div>
-              {(searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all' || sortBy !== DEFAULT_SORT) && (
+              {(searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all' || whenFilter !== 'all' || sortBy !== DEFAULT_SORT) && (
                 <button
-                  onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); setSortBy(DEFAULT_SORT); }}
+                  onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); setSortBy(DEFAULT_SORT); setWhenFilter('all'); }}
                   className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-3.5 py-1.5 text-xs font-semibold text-rose-600 transition-all duration-200 hover:bg-rose-100 active:scale-95"
                 >
                   <X className="h-3.5 w-3.5" />
@@ -1161,7 +1302,9 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
               )}
             </div>
 
-            <div className="hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/70 px-6 py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
+            {/* header stays put; the rows scroll under it */}
+            <div className="nice-scroll max-h-[70vh] overflow-y-auto">
+            <div className="sticky top-0 z-10 hidden grid-cols-12 gap-4 border-b border-slate-200/80 bg-slate-50/95 px-6 backdrop-blur py-3.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 md:grid">
               <div className="col-span-1 text-center">Date</div>
               <div className="col-span-4">Agenda</div>
               <div className="col-span-2 text-center">Time</div>
@@ -1188,9 +1331,9 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                       ? 'Pick a participant, a date and a free time slot — it takes less than a minute.'
                       : 'Try a different search, or clear the filters to see everything.'}
                   </p>
-                  {meetings.length > 0 && (searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all') && (
+                  {meetings.length > 0 && (searchQuery || statusFilter !== 'all' || typeFilter !== 'all' || priorityFilter !== 'all' || whenFilter !== 'all') && (
                     <button
-                      onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); }}
+                      onClick={() => { setSearchQuery(''); setStatusFilter('all'); setTypeFilter('all'); setPriorityFilter('all'); setWhenFilter('all'); }}
                       className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
                     >
                       <X className="h-3.5 w-3.5" /> Clear filters
@@ -1209,6 +1352,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                   const time = meeting.meeting_time || '';
                   const statusKey = getStatusKey(meeting);
                   const dateTag = dayTag(meeting.meeting_date || meeting.created_date, statusKey);
+                  const travel = tightTravel.get(meeting.id);
                   const style = getStatusStyle(statusKey);
                   const title = getMeetingTitle(meeting);
 
@@ -1289,6 +1433,14 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                                 {dateTag.label}
                               </span>
                             )}
+                            {travel && (
+                              <span
+                                className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ${travel.level === 'too-tight' ? 'bg-rose-50 text-rose-700 ring-rose-500/20' : 'bg-amber-50 text-amber-700 ring-amber-500/20'}`}
+                                title={`${travel.level === 'too-tight' ? 'Not enough time to travel' : 'Tight travel'} from “${travel.from.agenda || 'previous meeting'}”: ${travel.message}`}
+                              >
+                                <Route className="h-2.5 w-2.5" /> {travel.level === 'too-tight' ? 'Travel clash' : 'Tight travel'}
+                              </span>
+                            )}
                             {hasMinutes && (
                               <span
                                 className="inline-flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] font-bold text-violet-700 ring-1 ring-inset ring-violet-500/20"
@@ -1307,17 +1459,11 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                               </button>
                             )}
                           </div>
-                          {meeting.officer_name && (
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); setHistoryPerson({ id: meeting.officer_id, name: meeting.officer_name }); }}
-                              title="See all meetings with this person"
-                              className="mt-1 flex max-w-full items-center gap-1.5 rounded-md text-left text-xs text-slate-500 transition-colors hover:text-violet-600 hover:underline"
-                            >
-                              <User className="h-3 w-3 shrink-0 text-slate-400" />
-                              <span className="truncate">with {meeting.officer_name}</span>
-                            </button>
-                          )}
+                          <ParticipantsLine
+                            meeting={meeting}
+                            onPerson={(p) => setHistoryPerson(p)}
+                            onMore={() => setSelectedMeeting(meeting)}
+                          />
                         </div>
 
                         <div className="col-span-2 text-center">
@@ -1408,6 +1554,14 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                                   {style.label}
                                   <ChevronDown className="h-2.5 w-2.5" />
                                 </button>
+                                {travel && (
+                                  <span
+                                    className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ${travel.level === 'too-tight' ? 'bg-rose-50 text-rose-700 ring-rose-500/20' : 'bg-amber-50 text-amber-700 ring-amber-500/20'}`}
+                                    title={`${travel.level === 'too-tight' ? 'Not enough time to travel' : 'Tight travel'} from “${travel.from.agenda || 'previous meeting'}”: ${travel.message}`}
+                                  >
+                                    <Route className="h-2.5 w-2.5" /> {travel.level === 'too-tight' ? 'Travel clash' : 'Tight travel'}
+                                  </span>
+                                )}
                                 {dateTag && dateTag.label !== 'Overdue' && (
                                   <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ${dateTag.cls}`}>
                                     {dateTag.label}
@@ -1415,16 +1569,11 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                                 )}
                               </div>
                             </div>
-                            {meeting.officer_name && (
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); setHistoryPerson({ id: meeting.officer_id, name: meeting.officer_name }); }}
-                                className="mt-1 flex max-w-full items-center gap-1.5 text-left text-xs text-slate-500 underline-offset-2 active:text-violet-600"
-                              >
-                                <User className="h-3 w-3 shrink-0 text-slate-400" />
-                                <span className="truncate">with {meeting.officer_name}</span>
-                              </button>
-                            )}
+                            <ParticipantsLine
+                              meeting={meeting}
+                              onPerson={(p) => setHistoryPerson(p)}
+                              onMore={() => setSelectedMeeting(meeting)}
+                            />
 
                             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                               <span className="flex items-center gap-1">
@@ -1466,6 +1615,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
                   );
                 })
               )}
+            </div>
             </div>
 
             {/* Pagination */}
@@ -1561,7 +1711,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
     onOpenFull={() => {
       const m = meetings.find((mm) => mm.id === notesPopover.id);
       setNotesPopover(null);
-      if (m) { setSelectedMeeting(m); setFollowUpOpen(true); }
+      if (m) { setSelectedMeeting(m); setOpenNotesOnPanel(true); }
     }}
   />
 )}
@@ -1573,6 +1723,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
           onClose={() => setCommandPaletteOpen(false)}
           onSelectMeeting={(m) => { setCommandPaletteOpen(false); setSelectedMeeting(m); }}
           onNewMeeting={() => { setCommandPaletteOpen(false); openCreate(); }}
+          onAskAI={showAi ? (q) => { setCommandPaletteOpen(false); askAI(q); } : undefined}
           getStatusStyle={getStatusStyle}
           getStatusKey={getStatusKey}
           getMeetingTitle={getMeetingTitle}
@@ -1619,323 +1770,25 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
       )}
 
       {/* --------------------- Off-canvas: Meeting detail --------------------- */}
-      {selectedMeeting && (() => {
-        const d = selectedMeeting;
-        const sk = getStatusKey(d);
-        const st = getStatusStyle(sk);
-        const di = formatDate(d.meeting_date || d.created_date);
-        const tc = getTypeConfig(d.meeting_type);
-        const PanelTypeIcon = tc?.icon;
-        const pr = PRIORITY_BADGE[String(d.priority || '').toLowerCase()];
-
-        const notesText = d.agenda_notes || d.notes || d.description || d.details || '';
-        const phoneVal = d.contact_phone || d.phone || '';
-        const emailVal = d.contact_email || d.email || '';
-
-        const followUpText = d.follow_up_notes || d.followup_notes || d.follow_up || d.followup || '';
-
-        const history = parseHistory(d.status_history);
-
-        return (
-          <div className="fixed inset-0 z-50">
-            <div
-              className="anim-overlay absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
-              onClick={() => setSelectedMeeting(null)}
-            />
-
-            <aside className="anim-panel nice-scroll absolute right-0 top-0 flex h-full w-full flex-col overflow-y-auto bg-white shadow-2xl sm:max-w-xl lg:max-w-2xl">
-              <div className={`h-1.5 w-full ${tc ? tc.band : 'bg-gradient-to-r from-violet-500 to-indigo-500'}`} />
-
-              {/* Header */}
-              <div className={`border-b px-5 py-4 ${tc ? tc.headerBg : 'border-slate-100 bg-white'}`}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${st.badge}`}>
-                        <span className={`h-1.5 w-1.5 rounded-full ${st.dot} ${sk === 'scheduled' ? 'animate-pulse' : ''}`} />
-                        {st.label}
-                      </span>
-                      {d.meeting_type && (
-                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize ${tc ? tc.badge : 'bg-gray-100 text-gray-600 ring-1 ring-inset ring-gray-500/15'}`}>
-                          {PanelTypeIcon && <PanelTypeIcon className="h-3 w-3" />}
-                          {tc?.label || d.meeting_type}
-                        </span>
-                      )}
-
-                      {followUpText && (
-                        <button
-                          onClick={() => setFollowUpOpen(true)}
-                          className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-800 ring-1 ring-inset ring-amber-500/30 transition-all duration-200 hover:-translate-y-0.5 hover:bg-amber-200 active:scale-95"
-                          title="Open follow-up notes"
-                        >
-                          <StickyNote className="h-3 w-3" />
-                          Follow-up
-                          <ChevronDown className={`h-3 w-3 transition-transform duration-300 ${followUpOpen ? 'rotate-180' : ''}`} />
-                        </button>
-                      )}
-
-                      {!followUpText && (
-                        <button
-                          onClick={() => startFollowUpEdit('')}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-amber-300 bg-white px-2.5 py-1 text-[11px] font-bold text-amber-600 transition-all duration-200 hover:bg-amber-50 active:scale-95"
-                          title="Add a follow-up note"
-                        >
-                          <StickyNote className="h-3 w-3" />
-                          Add follow-up
-                        </button>
-                      )}
-                    </div>
-                    <h2 className="mt-2 text-lg font-bold leading-snug text-slate-900">{getMeetingTitle(d)}</h2>
-                    {di && (
-                      <p className="mt-0.5 text-xs font-medium text-slate-400">
-                        {di.weekday} · {di.full}
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => setSelectedMeeting(null)}
-                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 transition-all hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 active:scale-90"
-                    aria-label="Close panel"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-
-                <div className="mt-3.5 flex items-center gap-2">
-                  <button
-                    onClick={handleEdit}
-                    className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-full bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white shadow-md shadow-slate-900/10 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 active:scale-[0.98]"
-                  >
-                    <Edit2 className="h-3.5 w-3.5" /> Edit
-                  </button>
-                  <button
-                    onClick={handleOpenUpdate}
-                    className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-amber-100 active:scale-[0.98]"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" /> Update
-                  </button>
-                  <button
-                    onClick={() => openDuplicate(d)}
-                    title="Duplicate — create a new meeting with the same details"
-                    className="inline-flex items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-600 transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-200 hover:text-violet-700 active:scale-[0.98]"
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    <span className="hidden sm:inline">Duplicate</span>
-                  </button>
-                  <button
-                    onClick={() => setShowDeleteConfirm(true)}
-                    title="Delete"
-                    className="inline-flex items-center justify-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs font-semibold text-rose-600 transition-all duration-200 hover:-translate-y-0.5 hover:bg-rose-100 active:scale-[0.98]"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Body */}
-              <div className="flex-1 space-y-4 px-5 py-5">
-                {d.meeting_type && (
-                  <div className={`flex items-center gap-3 rounded-2xl border p-4 ${tc ? tc.highlightCard : 'border-slate-200 bg-slate-50'}`}>
-                    <span className={`flex h-10 w-10 items-center justify-center rounded-xl text-white shadow-sm ${tc ? tc.strip : 'bg-slate-300'}`}>
-                      {PanelTypeIcon && <PanelTypeIcon className="h-5 w-5" />}
-                    </span>
-                    <div>
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Meeting Type</p>
-                      <p className="text-sm font-bold capitalize text-slate-900">{tc?.label || d.meeting_type}</p>
-                    </div>
-                    <span className={`ml-auto h-2.5 w-2.5 rounded-full ${tc ? tc.legendDot : 'bg-gray-400'}`} />
-                  </div>
-                )}
-
-                {/* Follow-up notes — expandable, editable inline */}
-                {(followUpText || followUpOpen) && (
-                  <div className="overflow-hidden rounded-2xl border border-amber-200 bg-amber-50/60">
-                    <button
-                      onClick={() => setFollowUpOpen((v) => !v)}
-                      className="flex w-full items-center gap-3 p-4 text-left transition-colors hover:bg-amber-100/50"
-                    >
-                      <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-amber-400 text-white shadow-sm">
-                        <StickyNote className="h-4 w-4" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[10px] font-bold uppercase tracking-wider text-amber-700">Follow-up Notes</p>
-                        <p className="truncate text-xs font-medium text-slate-600">
-                          {followUpText ? String(followUpText).split('\n')[0] : 'No note yet'}
-                        </p>
-                      </div>
-                      <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold text-amber-800 ring-1 ring-inset ring-amber-500/30">
-                        {followUpOpen ? 'Hide' : 'Open'}
-                      </span>
-                      <ChevronDown className={`h-4 w-4 flex-shrink-0 text-amber-600 transition-transform duration-300 ${followUpOpen ? 'rotate-180' : ''}`} />
-                    </button>
-                    {followUpOpen && (
-                      <div className="anim-fade-in border-t border-amber-200 bg-white px-4 py-3">
-                        {followUpEditing ? (
-                          <div className="space-y-2">
-                            <textarea
-                              value={followUpDraft}
-                              onChange={(e) => setFollowUpDraft(e.target.value)}
-                              rows={4}
-                              disabled={followUpSaving}
-                              autoFocus
-                              placeholder="Add a follow-up note..."
-                              className="w-full resize-none rounded-xl border border-amber-200 bg-white px-3 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:border-amber-400 focus:outline-none focus:ring-4 focus:ring-amber-500/10"
-                            />
-                            <div className="flex items-center justify-end gap-2">
-                              <button
-                                onClick={() => setFollowUpEditing(false)}
-                                disabled={followUpSaving}
-                                className="rounded-full border border-slate-200 px-3.5 py-1.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
-                              >
-                                Cancel
-                              </button>
-                              <button
-                                onClick={saveFollowUpEdit}
-                                disabled={followUpSaving}
-                                className="inline-flex items-center gap-1.5 rounded-full bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-amber-600 disabled:opacity-60"
-                              >
-                                {followUpSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                                {followUpSaving ? 'Saving...' : 'Save'}
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">
-                              {followUpText || 'No follow-up note yet.'}
-                            </p>
-                            <button
-                              onClick={() => startFollowUpEdit(String(followUpText || ''))}
-                              className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-50"
-                            >
-                              <Edit2 className="h-3 w-3" /> {followUpText ? 'Edit note' : 'Add note'}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3">
-                  <InfoTile icon={CalendarDays} tint="bg-violet-50 text-violet-600" label="Date">
-                    {di ? di.full : '—'}
-                    {di && <span className="mt-0.5 block text-[11px] font-medium text-slate-400">{di.weekday}</span>}
-                  </InfoTile>
-                  <InfoTile icon={Clock} tint="bg-violet-50 text-violet-600" label="Time">
-                    {formatTimeDisplay(d.meeting_time || '')}
-                    {d.duration ? <span className="ml-1 text-xs font-medium text-slate-400">({d.duration} min)</span> : null}
-                  </InfoTile>
-                  <InfoTile icon={MapPin} tint="bg-sky-50 text-sky-600" label="Location">
-                    <span className="break-words">{d.location || '—'}</span>
-                    {d.city && <span className="mt-0.5 block text-[11px] font-medium text-slate-400">{d.city}</span>}
-                  </InfoTile>
-                  <InfoTile icon={User} tint="bg-emerald-50 text-emerald-600" label="Officer">
-                    <span className="break-words">{d.officer_name || '—'}</span>
-                    {d.officer_name && (
-                      <button
-                        onClick={() => setHistoryPerson({ id: d.officer_id, name: d.officer_name })}
-                        className="mt-1 block text-[11px] font-semibold text-violet-600 hover:underline"
-                      >
-                        View history →
-                      </button>
-                    )}
-                  </InfoTile>
-                  <InfoTile icon={Tag} tint="bg-amber-50 text-amber-600" label="Priority">
-                    {d.priority ? (
-                      <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ${pr?.badge || ''}`}>
-                        <span className={`h-1.5 w-1.5 rounded-full ${pr?.dot || 'bg-gray-300'}`} />
-                        {d.priority}
-                      </span>
-                    ) : '—'}
-                  </InfoTile>
-                  <InfoTile icon={Briefcase} tint="bg-fuchsia-50 text-fuchsia-600" label="Type">
-                    <span className="capitalize">{d.meeting_type || '—'}</span>
-                  </InfoTile>
-                </div>
-
-                {/* ★ v28: minutes of meeting (no action items) */}
-                <MinutesOfMeetingCard
-                  meeting={d}
-                  onPatched={(patch) => {
-                    setSelectedMeeting((prev: any) => (prev ? { ...prev, ...patch } : prev));
-                    setMeetings((prev) => prev.map((m) => (m.id === d.id ? { ...m, ...patch } : m)));
-                  }}
-                />
-
-                {notesText && (
-                  <InfoTile icon={AlignLeft} tint="bg-indigo-50 text-indigo-600" label="Agenda / Notes">
-                    <p className="whitespace-pre-wrap break-words font-normal leading-relaxed text-slate-700">
-                      {notesText}
-                    </p>
-                  </InfoTile>
-                )}
-
-                {phoneVal && (
-                  <InfoTile icon={Phone} tint="bg-rose-50 text-rose-600" label="Phone">
-                    <span className="flex flex-wrap items-center gap-2">
-                      {phoneVal}
-                      {whatsappLink(phoneVal, d) && (
-                        <a
-                          href={whatsappLink(phoneVal, d)!}
-                          target="_blank"
-                          rel="noreferrer"
-                          title="Opens WhatsApp with a reminder message ready to send"
-                          className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-500/20 hover:bg-emerald-100"
-                        >
-                          <MessageCircle className="h-3.5 w-3.5" /> WhatsApp reminder
-                        </a>
-                      )}
-                    </span>
-                  </InfoTile>
-                )}
-                {emailVal && (
-                  <InfoTile icon={Mail} tint="bg-teal-50 text-teal-600" label="Email">
-                    <span className="break-all">{emailVal}</span>
-                  </InfoTile>
-                )}
-
-                {history.length > 0 && (
-                  <div className="rounded-2xl border border-slate-200/80 bg-white p-4">
-                    <div className="mb-2.5 flex items-center gap-2">
-                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
-                        <History className="h-3.5 w-3.5" />
-                      </span>
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Activity trail</p>
-                    </div>
-                    <ul className="space-y-2">
-                      {history.slice().reverse().map((h, idx) => {
-                        const hs = STATUS_STYLES[String(h.status || '').toLowerCase()];
-                        const when = (() => {
-                          const t = new Date(h.date).getTime();
-                          return Number.isNaN(t) ? '' : new Date(t).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-                        })();
-                        return (
-                          <li key={idx} className="flex items-center gap-2 text-xs">
-                            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${hs?.dot || 'bg-slate-300'}`} />
-                            <span className="font-semibold text-slate-700">{h.status}</span>
-                            <span className="ml-auto text-slate-400">{when}</span>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </div>
-                )}
-
-                <InfoTile icon={Calendar} tint="bg-slate-100 text-slate-600" label="Created">
-                  {formatDateTime(d.created_date)}
-                </InfoTile>
-                {d.updated_date && (
-                  <InfoTile icon={RefreshCw} tint="bg-slate-100 text-slate-600" label="Last Updated">
-                    {formatDateTime(d.updated_date)}
-                  </InfoTile>
-                )}
-              </div>
-
-            </aside>
-          </div>
-        );
-      })()}
+      {/* the same panel as everywhere else (Dashboard, Calendar …) — components/MeetingDetailsPanel */}
+      {selectedMeeting && (
+        <MeetingDetailsPanel
+          meeting={selectedMeeting}
+          onClose={() => { setSelectedMeeting(null); setOpenNotesOnPanel(false); }}
+          onEdit={() => handleEdit()}
+          onUpdate={() => handleOpenUpdate()}
+          onFollowUp={(m) => (editable ? scheduleFollowUp(m) : viewOnly())}
+          onDuplicate={(m) => openDuplicate(m)}
+          onDelete={() => (editable ? setShowDeleteConfirm(true) : viewOnly())}
+          onViewHistory={(person) => setHistoryPerson(person)}
+          onMeetingChange={(updated) => {
+            setSelectedMeeting(updated);
+            setMeetings((prev) => prev.map((m) => (m.id === updated.id ? { ...m, ...updated } : m)));
+          }}
+          openFollowUp={openNotesOnPanel} // opened from the notes popover → show the notes
+          escToClose={false} // this page has its own Escape handling (delete confirmation, palette …)
+        />
+      )}
 
       {/* ------------------------- Delete confirmation ------------------------ */}
       {showDeleteConfirm && (
@@ -1952,7 +1805,7 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
               <div className="min-w-0">
                 <h3 className="text-base font-bold text-slate-900">Delete meeting?</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  <span className="font-semibold text-slate-700">"{selectedMeeting ? getMeetingTitle(selectedMeeting) : ''}"</span> will be removed from the list and archived, so it can be recovered later if needed.
+                  <span className="font-semibold text-slate-700">&ldquo;{selectedMeeting ? getMeetingTitle(selectedMeeting) : ''}&rdquo;</span> will be removed from the list and archived, so it can be recovered later if needed.
                 </p>
               </div>
             </div>
@@ -2046,6 +1899,15 @@ function openNotesPopover(e: React.MouseEvent, meeting: any, text: string) {
       )}
 
       {/* -------- participant history (no action items) -------- */}
+      {keyPeopleOpen && (
+        <KeyPeoplePanel
+          meetings={meetings}
+          editable={editable}
+          onClose={() => setKeyPeopleOpen(false)}
+          onHistory={(p) => { setKeyPeopleOpen(false); setHistoryPerson(p); }}
+        />
+      )}
+
       {historyPerson && (
         <ParticipantHistory
           person={historyPerson}

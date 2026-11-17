@@ -14,8 +14,21 @@ describe('roleOf', () => {
     ['read-only', 'viewer'],
     ['View only', 'viewer'],
     ['Administration', 'editor'], // a department name, not a role
+    [['read', 'write', 'delete', 'admin'], 'admin'], // PocketBase list field
+    [['read', 'write', 'delete'], 'editor'],
   ])('%j → %s', (permissions, role) => {
     expect(roleOf({ permissions })).toBe(role);
+  });
+
+  it('the role field wins over permissions', () => {
+    expect(roleOf({ role: 'Admin', permissions: ['read', 'write', 'delete'] })).toBe('admin');
+    expect(roleOf({ role: 'Super Admin', permissions: [] })).toBe('admin');
+    expect(roleOf({ role: 'superadmin' })).toBe('admin');
+    expect(roleOf({ role: 'Viewer', permissions: 'admin' })).toBe('viewer');
+    expect(roleOf({ role: 'Editor', permissions: 'admin' })).toBe('editor');
+    expect(roleOf({ role: 'Administration' })).toBe('editor'); // unrecognised → permissions decide
+    expect(roleOf({ role: '', permissions: 'view only' })).toBe('viewer');
+    expect(roleOf({ collectionName: '_superusers' })).toBe('admin'); // PocketBase owner account
   });
 });
 

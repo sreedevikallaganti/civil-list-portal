@@ -10,7 +10,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  Bell, BellRing, CalendarClock, CalendarDays, Plane, ListChecks, AlertTriangle, FileText,
+  Bell, BellPlus, BellRing, CalendarClock, CalendarDays, Plane, ListChecks, AlertTriangle, FileText,
   Cake, ArrowRightLeft, X, CheckCheck, UserPlus,
 } from 'lucide-react';
 import pb from '@/lib/pocketbase';
@@ -21,7 +21,7 @@ import { metBeforeFor, scheduleHref } from '@/lib/trips';
 
 /* ─────────────────────────── state ─────────────────────────── */
 
-type Store = { read: string[]; dismissed: string[] };
+type Store = { read: string[]; dismissed: string[]; alerted: string[] };
 type Ctx = {
   items: AppNotification[];
   unread: number;
@@ -34,19 +34,35 @@ const NotificationsContext = createContext<Ctx | null>(null);
 
 const KEEP = 400;
 const load = (key: string): Store => {
-  try { return { read: [], dismissed: [], ...JSON.parse(localStorage.getItem(key) || '{}') }; }
-  catch { return { read: [], dismissed: [] }; }
+  try { return { read: [], dismissed: [], alerted: [], ...JSON.parse(localStorage.getItem(key) || '{}') }; }
+  catch { return { read: [], dismissed: [], alerted: [] }; }
 };
 const save = (key: string, s: Store) => {
-  try { localStorage.setItem(key, JSON.stringify({ read: s.read.slice(-KEEP), dismissed: s.dismissed.slice(-KEEP) })); }
+  try { localStorage.setItem(key, JSON.stringify({ read: s.read.slice(-KEEP), dismissed: s.dismissed.slice(-KEEP), alerted: s.alerted.slice(-KEEP) })); }
   catch { /* private window / storage blocked — state just won't persist */ }
 };
+
+/* these also pop up as a system notification (phone / desktop) when the user allowed it */
+const ALERT_KINDS: NotificationKind[] = ['starting', 'followup', 'overdue'];
+const MAX_POPUPS = 3; // per batch — the rest are still in the bell
+
+const canAlert = () => typeof window !== 'undefined' && 'Notification' in window;
+
+async function popUp(n: AppNotification) {
+  const options: NotificationOptions = { body: n.body, tag: n.id, icon: '/icons/icon-192.png', data: { url: n.href } };
+  try {
+    // through the service worker, so a tap opens the app at the right screen (public/sw.js)
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg) await reg.showNotification(n.title, options);
+    else new Notification(n.title, options);
+  } catch { /* blocked or unsupported — the bell still shows it */ }
+}
 
 export function NotificationsProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const storeKey = `civillist:notifications:${user?.id || 'anon'}`;
   const [meetings, setMeetings] = useState<any[]>([]);
-  const [store, setStore] = useState<Store>({ read: [], dismissed: [] });
+  const [store, setStore] = useState<Store>({ read: [], dismissed: [], alerted: [] });
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => { setStore(load(storeKey)); }, [storeKey]);
@@ -76,19 +92,31 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { people } = useLivePeople(meetings);
-  const all = useMemo(() => buildNotifications(meetings, people, now), [meetings, people, now]);
+  const myEmail = String(user?.email || '');
+  const all = useMemo(() => buildNotifications(meetings, people, now, myEmail), [meetings, people, now, myEmail]);
   const items = useMemo(() => all.filter((n) => !store.dismissed.includes(n.id)), [all, store.dismissed]);
 
   const update = useCallback((fn: (s: Store) => Store) => {
     setStore((prev) => { const next = fn(prev); save(storeKey, next); return next; });
   }, [storeKey]);
 
+  /* new unread alerts → a system notification, once each */
+  useEffect(() => {
+    if (!user || !canAlert() || Notification.permission !== 'granted') return;
+    const fresh = items.filter((n) => ALERT_KINDS.includes(n.kind) && !store.read.includes(n.id) && !store.alerted.includes(n.id));
+    if (!fresh.length) return;
+    fresh.slice(0, MAX_POPUPS).forEach((n) => void popUp(n));
+    // remembering what was shown is the effect's whole purpose (it is persisted with the read state)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    update((s) => ({ ...s, alerted: [...new Set([...s.alerted, ...fresh.map((n) => n.id)])] }));
+  }, [user, items, store.read, store.alerted, update]);
+
   const value: Ctx = {
     items,
     unread: items.filter((n) => !store.read.includes(n.id)).length,
     isRead: (id) => store.read.includes(id),
     markRead: (ids) => update((s) => ({ ...s, read: [...new Set([...s.read, ...ids])] })),
-    dismiss: (id) => update((s) => ({ read: [...s.read, id], dismissed: [...new Set([...s.dismissed, id])] })),
+    dismiss: (id) => update((s) => ({ ...s, read: [...s.read, id], dismissed: [...new Set([...s.dismissed, id])] })),
     meetings,
   };
 
@@ -114,6 +142,7 @@ export function NotificationBell({ className = '' }: { className?: string }) {
   const ctx = useNotifications();
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [, setPermission] = useState(''); // re-render after the browser's permission prompt
   const panelRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -161,13 +190,21 @@ export function NotificationBell({ className = '' }: { className?: string }) {
           ref={panelRef}
           role="dialog"
           aria-label="Notifications"
-          className="anim-scale-in fixed inset-x-3 top-16 z-[70] flex max-h-[min(80vh,640px)] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15 lg:left-[16.5rem] lg:right-auto lg:top-4 lg:w-[26rem]"
+          className="anim-scale-in fixed inset-x-3 top-16 z-[70] flex max-h-[min(80vh,640px)] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15 lg:left-[calc(var(--sidebar-w,16rem)+0.5rem)] lg:right-auto lg:top-4 lg:w-[26rem]"
         >
           <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
             <div>
               <p className="text-sm font-bold text-slate-900">Notifications</p>
               <p className="text-[11px] text-slate-400">{unread ? `${unread} new` : 'You’re all caught up'}</p>
             </div>
+            {/* the panel only renders in the browser (after a click), so reading Notification here is safe */}
+            {canAlert() && Notification.permission === 'default' && (
+              <button onClick={() => Notification.requestPermission().then(setPermission).catch(() => {})}
+                title="Pop up follow-ups and meetings starting soon, even when this tab is in the background"
+                className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-700">
+                <BellPlus className="h-3.5 w-3.5" /> Turn on alerts
+              </button>
+            )}
             {unread > 0 && (
               <button onClick={() => markRead(items.map((n) => n.id))}
                 className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold text-violet-600 hover:bg-violet-50">
